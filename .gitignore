@@ -1,0 +1,12 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Go
+# 忽略Go服务器的编译结果（如果有的话）
+/go-server/bin/
+/go-server/mcp-server
+
+# OS-specific
+.DS_Store

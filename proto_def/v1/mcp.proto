@@ -1,0 +1,135 @@
+// The syntax of the protocol buffer language.
+// プロトコルバッファ言語の構文。
+syntax = "proto3";
+
+// The package name, which prevents naming conflicts.
+// パッケージ名。名前の競合を防ぐために使用されます。
+package mcp.v1;
+
+// The Go package path for the generated files.
+// 生成されるGoファイルのGoパッケージパス。
+option go_package = "github.com/IceMask/Appium_mcp/go-server/proto/v1"; // <-- 确保这里是你自己的模块路径
+
+// The service definition for the Mobile Control Platform (MCP).
+// モバイルコントロールプラットフォーム（MCP）のサービス定義。
+service MCPService {
+  // Get a list of available devices managed by the server.
+  // サーバーによって管理されている利用可能なデバイスのリストを取得します。
+  rpc GetAvailableDevices(GetAvailableDevicesRequest) returns (GetAvailableDevicesResponse);
+
+  // Start a new session on a specific device with a specific app.
+  // 特定のデバイスで特定のアプリの新しいセッションを開始します。
+  rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
+
+  // End the current session.
+  // 現在のセッションを終了します。
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+
+  // Get the current UI layout/hierarchy of the screen.
+  // 現在の画面のUIレイアウト/階層を取得します。
+  rpc GetScreenLayout(GetScreenLayoutRequest) returns (GetScreenLayoutResponse);
+
+  // Tap an element on the screen identified by its description.
+  // 画面上の要素をその説明によって識別し、タップします。
+  rpc TapElement(TapElementRequest) returns (TapElementResponse);
+
+  // Input text into an element identified by its description.
+  // 要素をその説明によって識別し、テキストを入力します。
+  rpc InputText(InputTextRequest) returns (InputTextResponse);
+
+  // Perform a swipe gesture on the screen.
+  // 画面上でスワイプジェスチャーを実行します。
+  rpc Swipe(SwipeRequest) returns (SwipeResponse);
+
+  // Get a specific attribute from a UI element.
+  // UI要素から特定の属性を取得します。
+  rpc GetElementAttribute(GetElementAttributeRequest) returns (GetElementAttributeResponse);
+}
+
+// ------ Message Definitions ------
+// ------ メッセージ定義 ------
+
+// Base request structure containing session ID.
+// セッションIDを含む基本リクエスト構造。
+message SessionRequest {
+  string session_id = 1;
+}
+
+// Represents a single device.
+// 単一のデバイスを表します。
+message Device {
+  string device_id = 1;
+  string os = 2;
+  string os_version = 3;
+  string status = 4;
+}
+
+message GetAvailableDevicesRequest {}
+message GetAvailableDevicesResponse {
+  repeated Device devices = 1;
+}
+
+message StartSessionRequest {
+  string device_id = 1;
+  string app_id = 2;
+}
+message StartSessionResponse {
+  string session_id = 1;
+}
+
+message EndSessionRequest {
+  string session_id = 1;
+}
+message EndSessionResponse {
+  string message = 1;
+}
+
+message GetScreenLayoutRequest {
+  string session_id = 1;
+}
+message GetScreenLayoutResponse {
+  string layout_data = 1; // UI layout, typically in XML or JSON format. UIレイアウト。通常はXMLまたはJSON形式。
+}
+
+message TapElementRequest {
+  string session_id = 1;
+  string element_description = 2; // e.g., "the login button". 「ログインボタン」など。
+}
+message TapElementResponse {
+  string message = 1;
+}
+
+message InputTextRequest {
+  string session_id = 1;
+  string element_description = 2; // e.g., "the username field". 「ユーザー名フィールド」など。
+  string text_to_input = 3;
+}
+message InputTextResponse {
+  string message = 1;
+}
+
+message SwipeRequest {
+  string session_id = 1;
+  enum SwipeDirection {
+    UP = 0;
+    DOWN = 1;
+    LEFT = 2;
+    RIGHT = 3;
+  }
+  SwipeDirection direction = 2;
+  // Percentage of the screen to swipe, e.g., 0.8 for 80%.
+  // スワイプする画面の割合（例：80%の場合は0.8）。
+  double distance_percentage = 3;
+}
+message SwipeResponse {
+  string message = 1;
+}
+
+message GetElementAttributeRequest {
+  string session_id = 1;
+  string element_description = 2;
+  string attribute_name = 3; // e.g., "text", "enabled", "selected". 「text」、「enabled」、「selected」など。
+}
+message GetElementAttributeResponse {
+  string attribute_value = 1;
+}
