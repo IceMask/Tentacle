@@ -1,0 +1,67 @@
+server:
+  port: 50051
+  max_connections: 100
+  request_timeout: 30s
+  shutdown_timeout: 30s
+
+devices:
+  physical:
+    enabled: true
+    devices:
+      - id: "pixel_5_001"
+        name: "Pixel 5 Test Device"
+        udid: "emulator-5554"
+        platform: "android"
+        version: "11.0"
+        appium_url: "http://localhost:4723"
+        capabilities:
+          automationName: "UiAutomator2"
+          
+  emulator:
+    enabled: true
+    docker_host: "unix:///var/run/docker.sock"
+    max_instances: 5
+    templates:
+      - name: "android_11_default"
+        image: "budtmo/docker-android:emulator_11.0"
+        platform: "android"
+        version: "11.0"
+        device_model: "Pixel_4"
+        resources:
+          cpu_cores: 2
+          memory_mb: 4096
+          storage_gb: 16
+          
+  aws:
+    enabled: false
+    region: "us-west-2"
+    project_arn: ""
+    
+  appium:
+    default_url: "http://localhost:4723"
+    command_timeout: 30s
+    implicit_wait_timeout: 10s
+    retry_attempts: 3
+
+session:
+  max_duration: 2h
+  idle_timeout: 30m
+  max_concurrent: 10
+  enable_recording: true
+
+test:
+  default_timeout: 60s
+  screenshot_on_fail: true
+  video_recording: false
+  max_retries: 2
+
+tls:
+  enabled: false
+
+logging:
+  level: "info"
+  format: "json"
+  output_path: "logs/umtp.log"
+  max_size_mb: 100
+  max_backups: 3
+  max_age_days: 7

@@ -1,151 +1,150 @@
-// main is the entry point for the MCP server.
-// mainはMCPサーバーのエントリポイントです。
 package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"net"
-	"os/exec"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-	// This package is used to generate unique IDs for our sessions.
-	// このパッケージはセッションの一意のIDを生成するために使用されます。
-	"github.com/google/uuid"
-
-	pb "github.com/IceMask/mcp-server/proto/v1" // <-- 确保这里是你自己的模块路径
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	"google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/reflection"
+
+	"mcp_for_appium/internal/config"
+	"mcp_for_appium/internal/device"
+	"mcp_for_appium/internal/service"
+	pb "mcp_for_appium/proto/v1"
 )
 
-// mcpServer is our implementation of the MCPServiceServer interface.
-// mcpServerはMCPServiceServerインターフェースの私たちの実装です。
-type mcpServer struct {
-	pb.UnimplementedMCPServiceServer
-	// The map now stores the command object itself for better control.
-	// マップはより良い制御のためにコマンドオブジェクト自体を保存するようになりました。
-	activeSessions map[string]*exec.Cmd
-}
-
-// NewMCPServer creates a new instance of our server.
-// NewMCPServerはサーバーの新しいインスタンスを作成します。
-func NewMCPServer() *mcpServer {
-	return &mcpServer{
-		activeSessions: make(map[string]*exec.Cmd),
-	}
-}
-
-// findFreePort asks the kernel for a free open port that is ready to use.
-// findFreePortはカーネルに使用可能な空きポートを問い合わせます。
-func findFreePort() (int, error) {
-	// Listen on port 0, which tells the OS to give us a random free port.
-	// ポート0でリッスンすると、OSがランダムな空きポートを割り当ててくれます。
-	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
-	if err != nil {
-		return 0, err
-	}
-
-	l, err := net.ListenTCP("tcp", addr)
-	if err != nil {
-		return 0, err
-	}
-	defer l.Close() // Ensure the listener is closed to free the port. ポートを解放するためにリスナーを確実に閉じます。
-	return l.Addr().(*net.TCPAddr).Port, nil
-}
-
-// StartSession launches a new Appium server instance.
-// StartSessionは新しいAppiumサーバーインスタンスを起動します。
-func (s *mcpServer) StartSession(ctx context.Context, req *pb.StartSessionRequest) (*pb.StartSessionResponse, error) {
-	log.Printf("Received StartSession request for device %s with app %s", req.DeviceId, req.AppId)
-
-	// 1. Find a free port for the new Appium instance.
-	// 1. 新しいAppiumインスタンスのために空きポートを見つけます。
-	port, err := findFreePort()
-	if err != nil {
-		log.Printf("Error finding a free port: %v", err)
-		return nil, fmt.Errorf("could not find a free port: %w", err)
-	}
-	log.Printf("Found free port for Appium: %d", port)
-
-	// 2. Create the Appium command.
-	// 2. Appiumコマンドを作成します。
-	// We use `appium -p <port>` to start Appium on the specific port.
-	// `appium -p <port>` を使用して、特定のポートでAppiumを起動します。
-	cmd := exec.Command("appium", "-p", fmt.Sprintf("%d", port))
-
-	// Optional: Redirect Appium's logs to a file for debugging.
-	// オプション：デバッグのためにAppiumのログをファイルにリダイレクトします。
-	// logfile, _ := os.Create(fmt.Sprintf("./appium-log-%d.txt", port))
-	// cmd.Stdout = logfile
-	// cmd.Stderr = logfile
-
-	// 3. Start the command asynchronously.
-	// 3. コマンドを非同期で開始します。
-	if err := cmd.Start(); err != nil {
-		log.Printf("Error starting Appium command: %v", err)
-		return nil, fmt.Errorf("failed to start appium: %w", err)
-	}
-
-	// 4. Generate a unique session ID and store the process.
-	// 4. 一意のセッションIDを生成し、プロセスを保存します。
-	sessionID := uuid.New().String()
-	s.activeSessions[sessionID] = cmd
-	log.Printf("Appium server started for session %s on port %d with PID %d", sessionID, port, cmd.Process.Pid)
-
-	// 5. Return the new session ID to the client.
-	// 5. 新しいセッションIDをクライアントに返します。
-	return &pb.StartSessionResponse{SessionId: sessionID}, nil
-}
-
-// EndSession terminates a running Appium server instance.
-// EndSessionは実行中のAppiumサーバーインスタンスを終了させます。
-func (s *mcpServer) EndSession(ctx context.Context, req *pb.EndSessionRequest) (*pb.EndSessionResponse, error) {
-	sessionID := req.SessionId
-	log.Printf("Received EndSession request for session %s", sessionID)
-
-	cmd, ok := s.activeSessions[sessionID]
-	if !ok {
-		log.Printf("Session ID %s not found", sessionID)
-		return nil, fmt.Errorf("session not found: %s", sessionID)
-	}
-
-	// Kill the process.
-	// プロセスを強制終了します。
-	if err := cmd.Process.Kill(); err != nil {
-		log.Printf("Failed to kill process for session %s (PID: %d): %v", sessionID, cmd.Process.Pid, err)
-		// We still try to clean up the map even if killing fails.
-		// 強制終了に失敗しても、マップのクリーンアップを試みます。
-	} else {
-		log.Printf("Successfully killed process for session %s (PID: %d)", sessionID, cmd.Process.Pid)
-	}
-
-	// Remove the session from our tracking map.
-	// トラッキングマップからセッションを削除します。
-	delete(s.activeSessions, sessionID)
-
-	return &pb.EndSessionResponse{Message: "Session ended successfully"}, nil
-}
-
-// TapElement is the implementation for the TapElement RPC.
-// TapElementはTapElement RPCの実装です。
-func (s *mcpServer) TapElement(ctx context.Context, req *pb.TapElementRequest) (*pb.TapElementResponse, error) {
-	log.Printf("Received TapElement request for session %s: description='%s'", req.SessionId, req.ElementDescription)
-	return &pb.TapElementResponse{Message: "TapElement request processed successfully"}, nil
-}
+var (
+	configFile = flag.String("config", "config.yaml", "Path to configuration file")
+	port       = flag.Int("port", 50051, "The server port")
+	debug      = flag.Bool("debug", false, "Enable debug mode")
+)
 
 func main() {
-	const port = ":50051"
-	lis, err := net.Listen("tcp", port)
+	flag.Parse()
+
+	// 初始化日志
+	if *debug {
+		log.SetFlags(log.LstdFlags | log.Lshortfile)
+	} else {
+		log.SetFlags(log.LstdFlags)
+	}
+
+	// 加载配置
+	cfg, err := config.Load(*configFile)
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		log.Fatalf("Failed to load config: %v", err)
 	}
-	s := grpc.NewServer()
 
-	pb.RegisterMCPServiceServer(s, NewMCPServer())
-
-	reflection.Register(s)
-	log.Printf("Server listening at %v", lis.Addr())
-	if err := s.Serve(lis); err != nil {
-		log.Fatalf("failed to serve: %v", err)
+	// 初始化设备管理器
+	deviceManager, err := device.NewManager(cfg.DeviceConfig)
+	if err != nil {
+		log.Fatalf("Failed to initialize device manager: %v", err)
 	}
+	defer deviceManager.Cleanup()
+
+	// 创建 gRPC 服务器
+	opts := []grpc.ServerOption{
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			MaxConnectionIdle:     15 * time.Second,
+			MaxConnectionAge:      30 * time.Second,
+			MaxConnectionAgeGrace: 5 * time.Second,
+			Time:                  5 * time.Second,
+			Timeout:               1 * time.Second,
+		}),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             5 * time.Second,
+			PermitWithoutStream: true,
+		}),
+	}
+
+	if cfg.TLS.Enabled {
+		// TODO: 添加 TLS 配置
+	}
+
+	grpcServer := grpc.NewServer(opts...)
+
+	// 注册服务
+	registerServices(grpcServer, deviceManager, cfg)
+
+	// 注册健康检查
+	healthServer := health.NewServer()
+	grpc_health_v1.RegisterHealthServer(grpcServer, healthServer)
+
+	// 注册反射服务（用于调试）
+	if *debug {
+		reflection.Register(grpcServer)
+	}
+
+	// 启动服务器
+	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", *port))
+	if err != nil {
+		log.Fatalf("Failed to listen: %v", err)
+	}
+
+	// 优雅关闭
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+		<-sigChan
+
+		log.Println("Shutting down server...")
+
+		// 给正在进行的请求一些时间完成
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		done := make(chan struct{})
+		go func() {
+			grpcServer.GracefulStop()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+			log.Println("Server stopped gracefully")
+		case <-ctx.Done():
+			log.Println("Forcing server stop")
+			grpcServer.Stop()
+		}
+
+		deviceManager.Cleanup()
+		os.Exit(0)
+	}()
+
+	log.Printf("Starting gRPC server on port %d", *port)
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("Failed to serve: %v", err)
+	}
+}
+
+func registerServices(s *grpc.Server, dm *device.Manager, cfg *config.Config) {
+	// 创建服务实例
+	deviceService := service.NewDeviceService(dm)
+	sessionService := service.NewSessionService(dm, cfg.Session)
+	interactionService := service.NewInteractionService(dm)
+	screenService := service.NewScreenService(dm)
+	applicationService := service.NewApplicationService(dm)
+	testService := service.NewTestService(dm, cfg.Test)
+	systemService := service.NewSystemService(dm)
+
+	// 注册到 gRPC 服务器
+	pb.RegisterDeviceServiceServer(s, deviceService)
+	pb.RegisterSessionServiceServer(s, sessionService)
+	pb.RegisterInteractionServiceServer(s, interactionService)
+	pb.RegisterScreenServiceServer(s, screenService)
+	pb.RegisterApplicationServiceServer(s, applicationService)
+	pb.RegisterTestServiceServer(s, testService)
+	pb.RegisterSystemServiceServer(s, systemService)
+
+	log.Println("All services registered successfully")
 }
