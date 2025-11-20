@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package mobile_mcp.v1.orchestrator;
+
+option go_package = "github.com/mcp/mobile-worker/pkg/proto/orchestrator";
+
+service Orchestrator {
+  rpc StartSession (StartSessionRequest) returns (StartSessionResponse);
+  rpc ExecutePlan (ExecutePlanRequest) returns (ExecutePlanResponse);
+  rpc CancelPlan (CancelPlanRequest) returns (CancelPlanResponse);
+  rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message StartSessionRequest {
+  string project_id = 1;
+  string user_id = 2;
+  map<string, string> labels = 3;
+  string capabilities = 4;
+}
+
+message StartSessionResponse {
+  string session_id = 1;
+  string capabilities = 2;
+}
+
+message ExecutePlanRequest {
+  string session_id = 1;
+  string trace_id = 2;
+  string plan_json = 3;
+}
+
+message ExecutePlanResponse {
+  string trace_id = 1;
+  string status = 2;
+}
+
+message CancelPlanRequest {
+  string trace_id = 1;
+}
+
+message CancelPlanResponse {
+  bool success = 1;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+  repeated Issue issues = 2;
+}
+
+message Issue {
+  string type = 1;
+  string severity = 2;
+  string message = 3;
+}
