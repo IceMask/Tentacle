@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package mobile_mcp.v1.worker;
+
+option go_package = "github.com/mcp/mobile-worker/pkg/proto/worker";
+
+service Worker {
+  rpc StartSession (StartSessionRequest) returns (StartSessionResponse);
+  rpc ExecutePlan (ExecutePlanRequest) returns (stream PlanEvent);
+  rpc CancelPlan (CancelPlanRequest) returns (CancelPlanResponse);
+  rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message StartSessionRequest {
+  string session_id = 1;
+  string capabilities = 2;
+}
+
+message StartSessionResponse {
+  bool success = 1;
+}
+
+message ExecutePlanRequest {
+  string session_id = 1;
+  string trace_id = 2;
+  string plan_json = 3;
+}
+
+message PlanEvent {
+  int32 seq = 1;
+  int32 step_index = 2;
+  string status = 3;
+  string message = 4;
+  map<string, string> metrics = 5;
+}
+
+message CancelPlanRequest {
+  string trace_id = 1;
+}
+
+message CancelPlanResponse {
+  bool success = 1;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+}
