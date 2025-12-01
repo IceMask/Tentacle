@@ -1,0 +1,119 @@
+syntax = "proto3";
+
+package mcp.mobile.v1.worker;
+
+option go_package = "mcp_for_appium/proto/gen/worker";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+import "proto/orchestrator.proto";
+
+// Worker Service
+service WorkerService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc ExecutePlan(ExecutePlanRequest) returns (stream mcp.mobile.v1.PlanEvent);
+  rpc CancelPlan(CancelPlanRequest) returns (CancelPlanResponse);
+  rpc GetSemanticSnapshot(GetSemanticSnapshotRequest) returns (GetSemanticSnapshotResponse);
+  rpc TakeScreenshot(TakeScreenshotRequest) returns (TakeScreenshotResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc UploadArtifacts(stream ArtifactChunk) returns (UploadArtifactsResponse);
+  rpc StreamLogs(StreamLogsRequest) returns (stream LogEvent);
+}
+
+message RegisterRequest {
+  string worker_id = 1;
+  map<string, string> tags = 2;
+  int32 capacity = 3;
+}
+
+message RegisterResponse {
+  bool ok = 1;
+  int32 lease_ttl_sec = 2;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  WorkerStatus status = 2;
+}
+
+message WorkerStatus {
+  int32 active_sessions = 1;
+  int32 capacity = 2;
+  google.protobuf.Struct device_stats = 3;
+}
+
+message HeartbeatResponse {
+  bool ok = 1;
+}
+
+message ExecutePlanRequest {
+  string session_id = 1;
+  string trace_id = 2;
+  google.protobuf.Struct plan = 3;
+}
+
+message CancelPlanRequest {
+  string trace_id = 1;
+}
+
+message CancelPlanResponse {
+  bool ok = 1;
+}
+
+message GetSemanticSnapshotRequest {
+  string session_id = 1;
+  string since_rev = 2;
+}
+
+message GetSemanticSnapshotResponse {
+  bool changed = 1;
+  string rev = 2;
+  string snapshot_ref = 3;
+  google.protobuf.Struct tree = 4;
+}
+
+message TakeScreenshotRequest {
+  string session_id = 1;
+  string trace_id = 2;
+  bool include_thumb = 3;
+}
+
+message TakeScreenshotResponse {
+  mcp.mobile.v1.ArtifactRef full = 1;
+  mcp.mobile.v1.ArtifactRef thumb = 2;
+}
+
+message HealthCheckRequest {
+  bool deep = 1;
+}
+
+message HealthCheckResponse {
+  string status = 1;
+  repeated mcp.mobile.v1.Issue issues = 2;
+}
+
+message ArtifactChunk {
+  string trace_id = 1;
+  string key = 2;
+  bytes data = 3;
+  int64 offset = 4;
+  string sha256 = 5; // final chunk only
+}
+
+message UploadArtifactsResponse {
+  string artifact_ref = 1;
+  bool ok = 2;
+}
+
+message StreamLogsRequest {
+  string trace_id = 1;
+  int64 since_ts = 2;
+}
+
+message LogEvent {
+  string level = 1;
+  string message = 2;
+  google.protobuf.Timestamp timestamp = 3;
+  google.protobuf.Struct fields = 4;
+}
