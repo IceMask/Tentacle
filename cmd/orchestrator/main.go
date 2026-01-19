@@ -16,17 +16,19 @@ import (
 )
 
 func main() {
-	// 1. Load Config
+	// 加载配置
 	cfg, err := config.Load("config.yaml")
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
 	// 2. Init Telemetry
+	// 初始化日志（Tracing 待接入）
 	telemetry.InitLogger(cfg.Telemetry.LogLevel)
 	// telemetry.InitTracer(...)
 
 	// 3. Init Storage
+	// 初始化 Postgres/Redis/S3 依赖
 	pgDAO, err := postgres.NewDAO(context.Background(), cfg.Storage.Postgres)
 	if err != nil {
 		log.Fatalf("failed to init postgres: %v", err)
@@ -45,9 +47,11 @@ func main() {
 	}
 
 	// 4. Init Service
+	// 构造 orchestrator 服务，内部包含 dispatcher/registry
 	svc := orchestrator.NewService(cfg.Orchestrator, pgDAO, redisCache, s3Client)
 
 	// 5. Start Service (dispatcher and registry monitor)
+	// 启动后台循环
 	if err := svc.Start(context.Background()); err != nil {
 		log.Fatalf("failed to start service: %v", err)
 	}
@@ -58,12 +62,14 @@ func main() {
 	log.Printf("Orchestrator started on port %d", cfg.Orchestrator.GRPCPort)
 
 	// 7. Graceful Shutdown
+	// 监听退出信号
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("Shutting down orchestrator...")
 
 	// Cleanup logic
+	// 停止后台循环并清理资源
 	svc.Stop()
 	defer pgDAO.Close()
 	defer redisCache.Close()

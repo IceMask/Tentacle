@@ -4,9 +4,31 @@ __pycache__/
 *.pyc
 
 # Go
-# 忽略Go服务器的编译结果（如果有的话）
-/go-server/bin/
-/go-server/mcp-server
+# 编译产物 - 根目录下的可执行文件
+/gateway
+/orchestrator
+/worker
+
+# 其他编译输出
+/bin/
+/dist/
+/tmp/
+*.test
+*.out
+coverage*
+.cache/
 
 # OS-specific
 .DS_Store
+
+# Editor/IDE
+.idea/
+.vscode/
+
+# Local config
+.env
+.env.local
+
+# 临时报告文档
+*_PROGRESS.md
+TEST_REPORT.md

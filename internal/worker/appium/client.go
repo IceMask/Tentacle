@@ -3,11 +3,18 @@ package appium
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strings"
+	"sync"
+	"syscall"
 	"time"
+
+	stdErrors "errors"
 
 	"mcp_for_appium/internal/errors"
 )
@@ -16,6 +23,15 @@ type Client struct {
 	baseURL    string
 	httpClient *http.Client
 	sessionID  string
+
+	mu                  sync.Mutex
+	consecutiveFailures int
+	breakerOpenUntil    time.Time
+	breakerThreshold    int
+	breakerOpenFor      time.Duration
+	maxRetries          int
+	minRetryDelay       time.Duration
+	maxRetryDelay       time.Duration
 }
 
 func NewClient(url string) *Client {
@@ -29,6 +45,11 @@ func NewClient(url string) *Client {
 				DisableCompression: true,
 			},
 		},
+		breakerThreshold: 3,
+		breakerOpenFor:   10 * time.Second,
+		maxRetries:       3,
+		minRetryDelay:    200 * time.Millisecond,
+		maxRetryDelay:    2 * time.Second,
 	}
 }
 
@@ -40,7 +61,8 @@ func (c *Client) StartSession(ctx context.Context, caps map[string]interface{}) 
 	}
 
 	var resp struct {
-		Value struct {
+		SessionID string `json:"sessionId"`
+		Value     struct {
 			SessionID string `json:"sessionId"`
 		} `json:"value"`
 	}
@@ -49,7 +71,14 @@ func (c *Client) StartSession(ctx context.Context, caps map[string]interface{}) 
 		return "", err
 	}
 
-	c.sessionID = resp.Value.SessionID
+	if resp.Value.SessionID != "" {
+		c.sessionID = resp.Value.SessionID
+	} else {
+		c.sessionID = resp.SessionID
+	}
+	if c.sessionID == "" {
+		return "", errors.New(errors.CodeInternal, "missing sessionId in Appium response")
+	}
 	return c.sessionID, nil
 }
 
@@ -57,10 +86,17 @@ func (c *Client) DeleteSession(ctx context.Context) error {
 	if c.sessionID == "" {
 		return nil
 	}
-	return c.do(ctx, "DELETE", "/session/"+c.sessionID, nil, nil)
+	if err := c.do(ctx, "DELETE", "/session/"+c.sessionID, nil, nil); err != nil {
+		return err
+	}
+	c.sessionID = ""
+	return nil
 }
 
 func (c *Client) FindElement(ctx context.Context, strategy, selector string) (string, error) {
+	if err := c.ensureSession(); err != nil {
+		return "", err
+	}
 	payload := map[string]string{
 		"using": strategy,
 		"value": selector,
@@ -82,45 +118,253 @@ func (c *Client) FindElement(ctx context.Context, strategy, selector string) (st
 }
 
 func (c *Client) Click(ctx context.Context, elementID string) error {
+	if err := c.ensureSession(); err != nil {
+		return err
+	}
 	return c.do(ctx, "POST", "/session/"+c.sessionID+"/element/"+elementID+"/click", map[string]interface{}{}, nil)
 }
 
+func (c *Client) SendKeys(ctx context.Context, elementID, text string) error {
+	if err := c.ensureSession(); err != nil {
+		return err
+	}
+	payload := map[string]interface{}{
+		"text":  text,
+		"value": []string{text},
+	}
+	return c.do(ctx, "POST", "/session/"+c.sessionID+"/element/"+elementID+"/value", payload, nil)
+}
+
+func (c *Client) Screenshot(ctx context.Context) ([]byte, error) {
+	if err := c.ensureSession(); err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Value string `json:"value"`
+	}
+	if err := c.do(ctx, "GET", "/session/"+c.sessionID+"/screenshot", nil, &resp); err != nil {
+		return nil, err
+	}
+	data, err := base64.StdEncoding.DecodeString(resp.Value)
+	if err != nil {
+		return nil, errors.Wrap(errors.CodeInternal, "failed to decode screenshot", err)
+	}
+	return data, nil
+}
+
+func (c *Client) PageSource(ctx context.Context) (string, error) {
+	if err := c.ensureSession(); err != nil {
+		return "", err
+	}
+	var resp struct {
+		Value string `json:"value"`
+	}
+	if err := c.do(ctx, "GET", "/session/"+c.sessionID+"/source", nil, &resp); err != nil {
+		return "", err
+	}
+	return resp.Value, nil
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body interface{}, result interface{}) error {
-	var reqBody io.Reader
+	if err := c.checkBreaker(); err != nil {
+		return err
+	}
+
+	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return errors.Wrap(errors.CodeInternal, "failed to marshal body", err)
 		}
-		reqBody = bytes.NewBuffer(b)
+		payload = b
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
-	if err != nil {
-		return errors.Wrap(errors.CodeInternal, "failed to create request", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	// Retry logic could be here
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return errors.Wrap(errors.CodeStoreConn, "appium request failed", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		// Read error body
-		b, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode == 404 {
-			return errors.New(errors.CodeAppElemNotFound, string(b))
+	var lastErr error
+	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		if err := c.checkBreaker(); err != nil {
+			return err
 		}
-		return errors.New(errors.CodeInternal, fmt.Sprintf("appium error %d: %s", resp.StatusCode, string(b)))
+
+		var reqBody io.Reader
+		if payload != nil {
+			reqBody = bytes.NewReader(payload)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+		if err != nil {
+			return errors.Wrap(errors.CodeInternal, "failed to create request", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = c.mapTransportError(err)
+			if c.shouldRetry(nil, err, attempt) {
+				continue
+			}
+			c.noteFailure()
+			return lastErr
+		}
+
+		b, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			lastErr = errors.Wrap(errors.CodeInternal, "failed to read response body", readErr)
+			if c.shouldRetry(resp, readErr, attempt) {
+				continue
+			}
+			c.noteFailure()
+			return lastErr
+		}
+
+		if resp.StatusCode >= 400 {
+			lastErr = c.mapAppiumError(resp.StatusCode, b)
+			if c.shouldRetry(resp, nil, attempt) {
+				continue
+			}
+			c.noteFailure()
+			return lastErr
+		}
+
+		if result != nil {
+			if err := json.Unmarshal(b, result); err != nil {
+				lastErr = errors.Wrap(errors.CodeInternal, "failed to decode response", err)
+				if c.shouldRetry(resp, err, attempt) {
+					continue
+				}
+				c.noteFailure()
+				return lastErr
+			}
+		}
+
+		c.noteSuccess()
+		return nil
 	}
 
-	if result != nil {
-		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
-			return errors.Wrap(errors.CodeInternal, "failed to decode response", err)
-		}
+	if lastErr == nil {
+		lastErr = errors.New(errors.CodeInternal, "appium request failed without response")
+	}
+	c.noteFailure()
+	return lastErr
+}
+
+func (c *Client) ensureSession() error {
+	if c.sessionID == "" {
+		return errors.New(errors.CodeSessionNotFound, "appium session not started")
 	}
 	return nil
+}
+
+func (c *Client) mapTransportError(err error) error {
+	if stdErrors.Is(err, context.DeadlineExceeded) {
+		return errors.Wrap(errors.CodeAppTimeout, "appium request timeout", err)
+	}
+	if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+		return errors.Wrap(errors.CodeAppTimeout, "appium request timeout", err)
+	}
+	return errors.Wrap(errors.CodeStoreConn, "appium request failed", err)
+}
+
+func (c *Client) mapAppiumError(status int, body []byte) error {
+	msg := strings.TrimSpace(string(body))
+	var appiumResp struct {
+		Value struct {
+			Error   string `json:"error"`
+			Message string `json:"message"`
+		} `json:"value"`
+	}
+	if err := json.Unmarshal(body, &appiumResp); err == nil && appiumResp.Value.Error != "" {
+		if appiumResp.Value.Message != "" {
+			msg = appiumResp.Value.Message
+		}
+		switch strings.ToLower(appiumResp.Value.Error) {
+		case "no such element":
+			return errors.New(errors.CodeAppElemNotFound, msg)
+		case "invalid session id":
+			return errors.New(errors.CodeSessionDead, msg)
+		case "timeout", "script timeout":
+			return errors.New(errors.CodeAppTimeout, msg)
+		}
+	}
+
+	switch status {
+	case http.StatusNotFound:
+		return errors.New(errors.CodeAppElemNotFound, msg)
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+		return errors.New(errors.CodeAppTimeout, msg)
+	}
+
+	return errors.New(errors.CodeInternal, fmt.Sprintf("appium error %d: %s", status, msg))
+}
+
+func (c *Client) shouldRetry(resp *http.Response, err error, attempt int) bool {
+	if attempt >= c.maxRetries {
+		return false
+	}
+	if err != nil {
+		if stdErrors.Is(err, syscall.ECONNRESET) || stdErrors.Is(err, syscall.EPIPE) || stdErrors.Is(err, io.EOF) {
+			c.backoff(attempt)
+			return true
+		}
+		if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
+			c.backoff(attempt)
+			return true
+		}
+		return false
+	}
+	if resp == nil {
+		return false
+	}
+	if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
+		c.backoff(attempt)
+		return true
+	}
+	return false
+}
+
+func (c *Client) backoff(attempt int) {
+	delay := c.minRetryDelay
+	for i := 0; i < attempt; i++ {
+		delay *= 2
+		if delay >= c.maxRetryDelay {
+			delay = c.maxRetryDelay
+			break
+		}
+	}
+	time.Sleep(delay)
+}
+
+func (c *Client) checkBreaker() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.breakerOpenUntil.IsZero() {
+		return nil
+	}
+	if time.Now().Before(c.breakerOpenUntil) {
+		return errors.New(errors.CodeHealthDown, "appium circuit breaker open")
+	}
+
+	c.consecutiveFailures = 0
+	c.breakerOpenUntil = time.Time{}
+	return nil
+}
+
+func (c *Client) noteFailure() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.consecutiveFailures++
+	if c.consecutiveFailures >= c.breakerThreshold {
+		c.breakerOpenUntil = time.Now().Add(c.breakerOpenFor)
+	}
+}
+
+func (c *Client) noteSuccess() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.consecutiveFailures = 0
+	c.breakerOpenUntil = time.Time{}
 }
