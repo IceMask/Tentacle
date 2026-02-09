@@ -1,0 +1,15 @@
+{
+  "name": "hideKeyboard",
+  "description": "隐藏设备的软键盘",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID"
+      }
+    },
+    "required": ["sessionId"],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "sendKeysToElement",
+  "description": "向指定元素输入文本",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID"
+      },
+      "elementId": {
+        "type": "string",
+        "description": "元素ID，由 findElement 返回"
+      },
+      "text": {
+        "type": "string",
+        "description": "要输入的文本"
+      }
+    },
+    "required": ["sessionId", "elementId", "text"],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "pressBack",
+  "description": "按设备的返回键（Android）或导航返回（iOS）",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID"
+      }
+    },
+    "required": ["sessionId"],
+    "additionalProperties": false
+  }
+}

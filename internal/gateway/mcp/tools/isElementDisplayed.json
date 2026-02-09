@@ -1,0 +1,19 @@
+{
+  "name": "isElementDisplayed",
+  "description": "检查元素是否在屏幕上可见",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID"
+      },
+      "elementId": {
+        "type": "string",
+        "description": "元素ID，由 findElement 返回"
+      }
+    },
+    "required": ["sessionId", "elementId"],
+    "additionalProperties": false
+  }
+}

@@ -207,6 +207,168 @@ func (h *Handler) ProcessRequest(ctx context.Context, req *Request) (interface{}
 		result = h.capService.List(ctx)
 	case "healthCheck":
 		result = h.orch.HealthCheck(ctx)
+	// Interactive element operations
+	case "findElement":
+		var params struct {
+			SessionID string `json:"sessionId"`
+			Strategy  string `json:"strategy"`
+			Selector  string `json:"selector"`
+		}
+		if err = json.Unmarshal(req.Params, &params); err != nil {
+			return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode findElement params"}
+		}
+		var elementID string
+		elementID, err = h.orch.FindElement(ctx, params.SessionID, params.Strategy, params.Selector)
+		if err == nil {
+			result = map[string]string{"elementId": elementID}
+		}
+	case "clickElement":
+		var params struct {
+			SessionID string `json:"sessionId"`
+			ElementID string `json:"elementId"`
+		}
+		if err = json.Unmarshal(req.Params, &params); err != nil {
+			return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode clickElement params"}
+		}
+		err = h.orch.ClickElement(ctx, params.SessionID, params.ElementID)
+		if err == nil {
+			result = map[string]bool{"success": true}
+		}
+	case "sendKeysToElement":
+		var params struct {
+			SessionID string `json:"sessionId"`
+			ElementID string `json:"elementId"`
+			Text      string `json:"text"`
+		}
+		if err = json.Unmarshal(req.Params, &params); err != nil {
+			return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode sendKeysToElement params"}
+		}
+		err = h.orch.SendKeysToElement(ctx, params.SessionID, params.ElementID, params.Text)
+		if err == nil {
+			result = map[string]bool{"success": true}
+		}
+	case "clearElement":
+		var params struct {
+			SessionID string `json:"sessionId"`
+			ElementID string `json:"elementId"`
+		}
+		if err = json.Unmarshal(req.Params, &params); err != nil {
+			return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode clearElement params"}
+		}
+		err = h.orch.ClearElement(ctx, params.SessionID, params.ElementID)
+		if err == nil {
+			result = map[string]bool{"success": true}
+		}
+	case "getElementText":
+		var params struct {
+			SessionID string `json:"sessionId"`
+			ElementID string `json:"elementId"`
+		}
+		if err = json.Unmarshal(req.Params, &params); err != nil {
+			return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode getElementText params"}
+		}
+		var text string
+		text, err = h.orch.GetElementText(ctx, params.SessionID, params.ElementID)
+		if err == nil {
+			result = map[string]string{"text": text}
+		}
+	case "getElementAttribute":
+		var params struct {
+			SessionID string `json:"sessionId"`
+			ElementID string `json:"elementId"`
+			Attribute string `json:"attribute"`
+		}
+		if err = json.Unmarshal(req.Params, &params); err != nil {
+			return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode getElementAttribute params"}
+		}
+		var value string
+		value, err = h.orch.GetElementAttribute(ctx, params.SessionID, params.ElementID, params.Attribute)
+		if err == nil {
+			result = map[string]interface{}{"attribute": params.Attribute, "value": value}
+		}
+	case "isElementDisplayed":
+		var params struct {
+			SessionID string `json:"sessionId"`
+			ElementID string `json:"elementId"`
+		}
+		if err = json.Unmarshal(req.Params, &params); err != nil {
+			return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode isElementDisplayed params"}
+		}
+		var displayed bool
+		displayed, err = h.orch.IsElementDisplayed(ctx, params.SessionID, params.ElementID)
+		if err == nil {
+			result = map[string]bool{"displayed": displayed}
+		}
+	case "tap":
+		var params struct {
+			SessionID string `json:"sessionId"`
+			X         int    `json:"x"`
+			Y         int    `json:"y"`
+		}
+		if err = json.Unmarshal(req.Params, &params); err != nil {
+			return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode tap params"}
+		}
+		err = h.orch.Tap(ctx, params.SessionID, params.X, params.Y)
+		if err == nil {
+			result = map[string]bool{"success": true}
+		}
+	case "swipe":
+		var params struct {
+			SessionID  string `json:"sessionId"`
+			StartX     int    `json:"startX"`
+			StartY     int    `json:"startY"`
+			EndX       int    `json:"endX"`
+			EndY       int    `json:"endY"`
+			DurationMs int    `json:"durationMs"`
+		}
+		if err = json.Unmarshal(req.Params, &params); err != nil {
+			return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode swipe params"}
+		}
+		if params.DurationMs == 0 {
+			params.DurationMs = 200
+		}
+		err = h.orch.Swipe(ctx, params.SessionID, params.StartX, params.StartY, params.EndX, params.EndY, params.DurationMs)
+		if err == nil {
+			result = map[string]bool{"success": true}
+		}
+	case "longPress":
+		var params struct {
+			SessionID  string `json:"sessionId"`
+			ElementID  string `json:"elementId"`
+			DurationMs int    `json:"durationMs"`
+		}
+		if err = json.Unmarshal(req.Params, &params); err != nil {
+			return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode longPress params"}
+		}
+		if params.DurationMs == 0 {
+			params.DurationMs = 1000
+		}
+		err = h.orch.LongPress(ctx, params.SessionID, params.ElementID, params.DurationMs)
+		if err == nil {
+			result = map[string]bool{"success": true}
+		}
+	case "pressBack":
+		var params struct {
+			SessionID string `json:"sessionId"`
+		}
+		if err = json.Unmarshal(req.Params, &params); err != nil {
+			return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode pressBack params"}
+		}
+		err = h.orch.PressBack(ctx, params.SessionID)
+		if err == nil {
+			result = map[string]bool{"success": true}
+		}
+	case "hideKeyboard":
+		var params struct {
+			SessionID string `json:"sessionId"`
+		}
+		if err = json.Unmarshal(req.Params, &params); err != nil {
+			return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode hideKeyboard params"}
+		}
+		err = h.orch.HideKeyboard(ctx, params.SessionID)
+		if err == nil {
+			result = map[string]bool{"success": true}
+		}
 	case "replay", "subscribe", "unsubscribe":
 		return nil, errors.New(errors.CodeStepUnsupported, "method not implemented: "+req.Method)
 	default:

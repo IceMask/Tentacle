@@ -476,3 +476,101 @@ func (s *Service) ExecuteDispatchedPlan(ctx context.Context, traceID string, ses
 	telemetry.ExecuteLatency.WithLabelValues("", "", "passed").Observe(elapsed)
 	return s.dao.UpdateTraceStatus(runCtx, traceID, "completed")
 }
+
+// Interactive element operations
+
+func (s *Service) FindElement(ctx context.Context, sessionID, strategy, selector string) (string, error) {
+	app, err := s.getAppiumClient(sessionID)
+	if err != nil {
+		return "", err
+	}
+	return app.FindElement(ctx, strategy, selector)
+}
+
+func (s *Service) ClickElement(ctx context.Context, sessionID, elementID string) error {
+	app, err := s.getAppiumClient(sessionID)
+	if err != nil {
+		return err
+	}
+	return app.Click(ctx, elementID)
+}
+
+func (s *Service) SendKeysToElement(ctx context.Context, sessionID, elementID, text string) error {
+	app, err := s.getAppiumClient(sessionID)
+	if err != nil {
+		return err
+	}
+	return app.SendKeys(ctx, elementID, text)
+}
+
+func (s *Service) ClearElement(ctx context.Context, sessionID, elementID string) error {
+	app, err := s.getAppiumClient(sessionID)
+	if err != nil {
+		return err
+	}
+	return app.Clear(ctx, elementID)
+}
+
+func (s *Service) GetElementText(ctx context.Context, sessionID, elementID string) (string, error) {
+	app, err := s.getAppiumClient(sessionID)
+	if err != nil {
+		return "", err
+	}
+	return app.GetText(ctx, elementID)
+}
+
+func (s *Service) GetElementAttribute(ctx context.Context, sessionID, elementID, attribute string) (string, error) {
+	app, err := s.getAppiumClient(sessionID)
+	if err != nil {
+		return "", err
+	}
+	return app.GetAttribute(ctx, elementID, attribute)
+}
+
+func (s *Service) IsElementDisplayed(ctx context.Context, sessionID, elementID string) (bool, error) {
+	app, err := s.getAppiumClient(sessionID)
+	if err != nil {
+		return false, err
+	}
+	return app.IsDisplayed(ctx, elementID)
+}
+
+func (s *Service) Tap(ctx context.Context, sessionID string, x, y int) error {
+	app, err := s.getAppiumClient(sessionID)
+	if err != nil {
+		return err
+	}
+	return app.Tap(ctx, x, y)
+}
+
+func (s *Service) Swipe(ctx context.Context, sessionID string, startX, startY, endX, endY, durationMs int) error {
+	app, err := s.getAppiumClient(sessionID)
+	if err != nil {
+		return err
+	}
+	return app.Swipe(ctx, startX, startY, endX, endY, durationMs)
+}
+
+func (s *Service) LongPress(ctx context.Context, sessionID, elementID string, durationMs int) error {
+	app, err := s.getAppiumClient(sessionID)
+	if err != nil {
+		return err
+	}
+	return app.LongPress(ctx, elementID, durationMs)
+}
+
+func (s *Service) PressBack(ctx context.Context, sessionID string) error {
+	app, err := s.getAppiumClient(sessionID)
+	if err != nil {
+		return err
+	}
+	return app.Back(ctx)
+}
+
+func (s *Service) HideKeyboard(ctx context.Context, sessionID string) error {
+	app, err := s.getAppiumClient(sessionID)
+	if err != nil {
+		return err
+	}
+	return app.HideKeyboard(ctx)
+}

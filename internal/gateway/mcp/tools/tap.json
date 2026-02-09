@@ -1,0 +1,23 @@
+{
+  "name": "tap",
+  "description": "在指定屏幕坐标点击/轻触",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID"
+      },
+      "x": {
+        "type": "integer",
+        "description": "X 坐标（像素）"
+      },
+      "y": {
+        "type": "integer",
+        "description": "Y 坐标（像素）"
+      }
+    },
+    "required": ["sessionId", "x", "y"],
+    "additionalProperties": false
+  }
+}

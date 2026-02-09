@@ -167,6 +167,192 @@ func (c *Client) PageSource(ctx context.Context) (string, error) {
 	return resp.Value, nil
 }
 
+// Clear clears the text content of an element
+func (c *Client) Clear(ctx context.Context, elementID string) error {
+	if err := c.ensureSession(); err != nil {
+		return err
+	}
+	return c.do(ctx, "POST", "/session/"+c.sessionID+"/element/"+elementID+"/clear", map[string]interface{}{}, nil)
+}
+
+// GetText retrieves the visible text of an element
+func (c *Client) GetText(ctx context.Context, elementID string) (string, error) {
+	if err := c.ensureSession(); err != nil {
+		return "", err
+	}
+	var resp struct {
+		Value string `json:"value"`
+	}
+	if err := c.do(ctx, "GET", "/session/"+c.sessionID+"/element/"+elementID+"/text", nil, &resp); err != nil {
+		return "", err
+	}
+	return resp.Value, nil
+}
+
+// GetAttribute retrieves an attribute value of an element
+func (c *Client) GetAttribute(ctx context.Context, elementID, attribute string) (string, error) {
+	if err := c.ensureSession(); err != nil {
+		return "", err
+	}
+	var resp struct {
+		Value string `json:"value"`
+	}
+	if err := c.do(ctx, "GET", "/session/"+c.sessionID+"/element/"+elementID+"/attribute/"+attribute, nil, &resp); err != nil {
+		return "", err
+	}
+	return resp.Value, nil
+}
+
+// IsDisplayed checks if an element is visible
+func (c *Client) IsDisplayed(ctx context.Context, elementID string) (bool, error) {
+	if err := c.ensureSession(); err != nil {
+		return false, err
+	}
+	var resp struct {
+		Value bool `json:"value"`
+	}
+	if err := c.do(ctx, "GET", "/session/"+c.sessionID+"/element/"+elementID+"/displayed", nil, &resp); err != nil {
+		return false, err
+	}
+	return resp.Value, nil
+}
+
+// Tap performs a tap action at coordinates (for touch actions)
+func (c *Client) Tap(ctx context.Context, x, y int) error {
+	if err := c.ensureSession(); err != nil {
+		return err
+	}
+	payload := map[string]interface{}{
+		"actions": []map[string]interface{}{
+			{
+				"type": "pointer",
+				"id":   "finger1",
+				"parameters": map[string]string{
+					"pointerType": "touch",
+				},
+				"actions": []map[string]interface{}{
+					{
+						"type":     "pointerMove",
+						"duration": 0,
+						"x":        x,
+						"y":        y,
+					},
+					{
+						"type":   "pointerDown",
+						"button": 0,
+					},
+					{
+						"type":   "pointerUp",
+						"button": 0,
+					},
+				},
+			},
+		},
+	}
+	return c.do(ctx, "POST", "/session/"+c.sessionID+"/actions", payload, nil)
+}
+
+// Swipe performs a swipe gesture from (x1, y1) to (x2, y2)
+func (c *Client) Swipe(ctx context.Context, x1, y1, x2, y2, durationMs int) error {
+	if err := c.ensureSession(); err != nil {
+		return err
+	}
+	payload := map[string]interface{}{
+		"actions": []map[string]interface{}{
+			{
+				"type": "pointer",
+				"id":   "finger1",
+				"parameters": map[string]string{
+					"pointerType": "touch",
+				},
+				"actions": []map[string]interface{}{
+					{
+						"type":     "pointerMove",
+						"duration": 0,
+						"x":        x1,
+						"y":        y1,
+					},
+					{
+						"type":   "pointerDown",
+						"button": 0,
+					},
+					{
+						"type":     "pointerMove",
+						"duration": durationMs,
+						"x":        x2,
+						"y":        y2,
+					},
+					{
+						"type":   "pointerUp",
+						"button": 0,
+					},
+				},
+			},
+		},
+	}
+	return c.do(ctx, "POST", "/session/"+c.sessionID+"/actions", payload, nil)
+}
+
+// LongPress performs a long press on an element
+func (c *Client) LongPress(ctx context.Context, elementID string, durationMs int) error {
+	if err := c.ensureSession(); err != nil {
+		return err
+	}
+	payload := map[string]interface{}{
+		"actions": []map[string]interface{}{
+			{
+				"type": "pointer",
+				"id":   "finger1",
+				"parameters": map[string]string{
+					"pointerType": "touch",
+				},
+				"actions": []map[string]interface{}{
+					{
+						"type":     "pointerMove",
+						"duration": 0,
+						"origin": map[string]string{
+							"element-6066-11e4-a52e-4f735466cecf": elementID,
+						},
+					},
+					{
+						"type":   "pointerDown",
+						"button": 0,
+					},
+					{
+						"type":     "pause",
+						"duration": durationMs,
+					},
+					{
+						"type":   "pointerUp",
+						"button": 0,
+					},
+				},
+			},
+		},
+	}
+	return c.do(ctx, "POST", "/session/"+c.sessionID+"/actions", payload, nil)
+}
+
+// Back presses the device back button
+func (c *Client) Back(ctx context.Context) error {
+	if err := c.ensureSession(); err != nil {
+		return err
+	}
+	return c.do(ctx, "POST", "/session/"+c.sessionID+"/back", map[string]interface{}{}, nil)
+}
+
+// HideKeyboard hides the on-screen keyboard
+func (c *Client) HideKeyboard(ctx context.Context) error {
+	if err := c.ensureSession(); err != nil {
+		return err
+	}
+	// Try both strategies (Android and iOS differ)
+	payload := map[string]interface{}{
+		"strategy": "tapOutside",
+	}
+	return c.do(ctx, "POST", "/session/"+c.sessionID+"/appium/device/hide_keyboard", payload, nil)
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body interface{}, result interface{}) error {
 	if err := c.checkBreaker(); err != nil {
 		return err

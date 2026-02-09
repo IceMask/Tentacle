@@ -1,0 +1,23 @@
+{
+  "name": "getElementAttribute",
+  "description": "获取元素的属性值，如 enabled、selected、checked 等",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID"
+      },
+      "elementId": {
+        "type": "string",
+        "description": "元素ID，由 findElement 返回"
+      },
+      "attribute": {
+        "type": "string",
+        "description": "属性名，如 'text', 'enabled', 'selected', 'checked', 'displayed'"
+      }
+    },
+    "required": ["sessionId", "elementId", "attribute"],
+    "additionalProperties": false
+  }
+}

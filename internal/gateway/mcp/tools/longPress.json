@@ -1,0 +1,24 @@
+{
+  "name": "longPress",
+  "description": "对元素执行长按操作",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID"
+      },
+      "elementId": {
+        "type": "string",
+        "description": "元素ID，由 findElement 返回"
+      },
+      "durationMs": {
+        "type": "integer",
+        "description": "长按持续时间（毫秒），默认 1000",
+        "default": 1000
+      }
+    },
+    "required": ["sessionId", "elementId"],
+    "additionalProperties": false
+  }
+}

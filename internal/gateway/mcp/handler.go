@@ -126,6 +126,31 @@ func (h *MCPHandler) executeTool(ctx context.Context, toolName string, arguments
 		return h.handleGetTrace(ctx, arguments)
 	case "healthCheck":
 		return h.handleHealthCheck(ctx, arguments)
+	// Interactive element operations
+	case "findElement":
+		return h.handleFindElement(ctx, arguments)
+	case "clickElement":
+		return h.handleClickElement(ctx, arguments)
+	case "sendKeysToElement":
+		return h.handleSendKeysToElement(ctx, arguments)
+	case "clearElement":
+		return h.handleClearElement(ctx, arguments)
+	case "getElementText":
+		return h.handleGetElementText(ctx, arguments)
+	case "getElementAttribute":
+		return h.handleGetElementAttribute(ctx, arguments)
+	case "isElementDisplayed":
+		return h.handleIsElementDisplayed(ctx, arguments)
+	case "tap":
+		return h.handleTap(ctx, arguments)
+	case "swipe":
+		return h.handleSwipe(ctx, arguments)
+	case "longPress":
+		return h.handleLongPress(ctx, arguments)
+	case "pressBack":
+		return h.handlePressBack(ctx, arguments)
+	case "hideKeyboard":
+		return h.handleHideKeyboard(ctx, arguments)
 	default:
 		return nil, &MCPError{
 			Code:    -32601,
@@ -458,4 +483,191 @@ func parseResourceURI(uri string) (string, string, error) {
 func formatToolResult(toolName string, result interface{}) string {
 	data, _ := json.MarshalIndent(result, "", "  ")
 	return string(data)
+}
+
+// Interactive element operation handlers
+
+func (h *MCPHandler) handleFindElement(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		SessionID string `json:"sessionId"`
+		Strategy  string `json:"strategy"`
+		Selector  string `json:"selector"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+	elementID, err := h.orch.FindElement(ctx, args.SessionID, args.Strategy, args.Selector)
+	if err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to find element", Data: err.Error()}
+	}
+	return map[string]interface{}{"elementId": elementID}, nil
+}
+
+func (h *MCPHandler) handleClickElement(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		SessionID string `json:"sessionId"`
+		ElementID string `json:"elementId"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+	if err := h.orch.ClickElement(ctx, args.SessionID, args.ElementID); err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to click element", Data: err.Error()}
+	}
+	return map[string]interface{}{"success": true}, nil
+}
+
+func (h *MCPHandler) handleSendKeysToElement(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		SessionID string `json:"sessionId"`
+		ElementID string `json:"elementId"`
+		Text      string `json:"text"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+	if err := h.orch.SendKeysToElement(ctx, args.SessionID, args.ElementID, args.Text); err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to send keys", Data: err.Error()}
+	}
+	return map[string]interface{}{"success": true}, nil
+}
+
+func (h *MCPHandler) handleClearElement(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		SessionID string `json:"sessionId"`
+		ElementID string `json:"elementId"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+	if err := h.orch.ClearElement(ctx, args.SessionID, args.ElementID); err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to clear element", Data: err.Error()}
+	}
+	return map[string]interface{}{"success": true}, nil
+}
+
+func (h *MCPHandler) handleGetElementText(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		SessionID string `json:"sessionId"`
+		ElementID string `json:"elementId"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+	text, err := h.orch.GetElementText(ctx, args.SessionID, args.ElementID)
+	if err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to get element text", Data: err.Error()}
+	}
+	return map[string]interface{}{"text": text}, nil
+}
+
+func (h *MCPHandler) handleGetElementAttribute(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		SessionID string `json:"sessionId"`
+		ElementID string `json:"elementId"`
+		Attribute string `json:"attribute"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+	value, err := h.orch.GetElementAttribute(ctx, args.SessionID, args.ElementID, args.Attribute)
+	if err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to get attribute", Data: err.Error()}
+	}
+	return map[string]interface{}{"attribute": args.Attribute, "value": value}, nil
+}
+
+func (h *MCPHandler) handleIsElementDisplayed(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		SessionID string `json:"sessionId"`
+		ElementID string `json:"elementId"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+	displayed, err := h.orch.IsElementDisplayed(ctx, args.SessionID, args.ElementID)
+	if err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to check if element displayed", Data: err.Error()}
+	}
+	return map[string]interface{}{"displayed": displayed}, nil
+}
+
+func (h *MCPHandler) handleTap(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		SessionID string `json:"sessionId"`
+		X         int    `json:"x"`
+		Y         int    `json:"y"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+	if err := h.orch.Tap(ctx, args.SessionID, args.X, args.Y); err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to tap", Data: err.Error()}
+	}
+	return map[string]interface{}{"success": true}, nil
+}
+
+func (h *MCPHandler) handleSwipe(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		SessionID  string `json:"sessionId"`
+		StartX     int    `json:"startX"`
+		StartY     int    `json:"startY"`
+		EndX       int    `json:"endX"`
+		EndY       int    `json:"endY"`
+		DurationMs int    `json:"durationMs"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+	if args.DurationMs == 0 {
+		args.DurationMs = 200
+	}
+	if err := h.orch.Swipe(ctx, args.SessionID, args.StartX, args.StartY, args.EndX, args.EndY, args.DurationMs); err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to swipe", Data: err.Error()}
+	}
+	return map[string]interface{}{"success": true}, nil
+}
+
+func (h *MCPHandler) handleLongPress(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		SessionID  string `json:"sessionId"`
+		ElementID  string `json:"elementId"`
+		DurationMs int    `json:"durationMs"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+	if args.DurationMs == 0 {
+		args.DurationMs = 1000
+	}
+	if err := h.orch.LongPress(ctx, args.SessionID, args.ElementID, args.DurationMs); err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to long press", Data: err.Error()}
+	}
+	return map[string]interface{}{"success": true}, nil
+}
+
+func (h *MCPHandler) handlePressBack(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+	if err := h.orch.PressBack(ctx, args.SessionID); err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to press back", Data: err.Error()}
+	}
+	return map[string]interface{}{"success": true}, nil
+}
+
+func (h *MCPHandler) handleHideKeyboard(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		SessionID string `json:"sessionId"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+	if err := h.orch.HideKeyboard(ctx, args.SessionID); err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to hide keyboard", Data: err.Error()}
+	}
+	return map[string]interface{}{"success": true}, nil
 }

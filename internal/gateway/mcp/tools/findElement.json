@@ -1,0 +1,24 @@
+{
+  "name": "findElement",
+  "description": "查找屏幕上的UI元素，返回元素ID用于后续操作",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID"
+      },
+      "strategy": {
+        "type": "string",
+        "description": "定位策略",
+        "enum": ["id", "xpath", "accessibility id", "class name", "-android uiautomator", "-ios predicate string", "-ios class chain"]
+      },
+      "selector": {
+        "type": "string",
+        "description": "选择器表达式，如 XPath: //android.widget.Button[@text='登录']"
+      }
+    },
+    "required": ["sessionId", "strategy", "selector"],
+    "additionalProperties": false
+  }
+}

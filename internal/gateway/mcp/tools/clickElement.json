@@ -1,0 +1,19 @@
+{
+  "name": "clickElement",
+  "description": "点击指定的UI元素（通过元素ID）",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID"
+      },
+      "elementId": {
+        "type": "string",
+        "description": "元素ID，由 findElement 返回"
+      }
+    },
+    "required": ["sessionId", "elementId"],
+    "additionalProperties": false
+  }
+}

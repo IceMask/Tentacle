@@ -1,0 +1,36 @@
+{
+  "name": "swipe",
+  "description": "在屏幕上执行滑动手势，从起点坐标滑动到终点坐标",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID"
+      },
+      "startX": {
+        "type": "integer",
+        "description": "起点 X 坐标"
+      },
+      "startY": {
+        "type": "integer",
+        "description": "起点 Y 坐标"
+      },
+      "endX": {
+        "type": "integer",
+        "description": "终点 X 坐标"
+      },
+      "endY": {
+        "type": "integer",
+        "description": "终点 Y 坐标"
+      },
+      "durationMs": {
+        "type": "integer",
+        "description": "滑动持续时间（毫秒），默认 200",
+        "default": 200
+      }
+    },
+    "required": ["sessionId", "startX", "startY", "endX", "endY"],
+    "additionalProperties": false
+  }
+}
