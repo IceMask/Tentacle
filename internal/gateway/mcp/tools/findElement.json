@@ -1,21 +1,21 @@
 {
   "name": "findElement",
-  "description": "查找屏幕上的UI元素，返回元素ID用于后续操作",
+  "description": "Locates a UI element on the current screen using the specified strategy and returns its unique element ID for use in subsequent operations like clickElement or sendKeysToElement. This is the first step in any interactive element operation workflow. Supports multiple locator strategies including XPath (most flexible), accessibility ID (recommended for cross-platform), ID (fastest), and platform-specific strategies like Android UiAutomator and iOS Predicates. Fails with 'element not found' if the element doesn't exist or isn't currently visible.",
   "inputSchema": {
     "type": "object",
     "properties": {
       "sessionId": {
         "type": "string",
-        "description": "会话ID"
+        "description": "Active session ID"
       },
       "strategy": {
         "type": "string",
-        "description": "定位策略",
+        "description": "Element locator strategy to use",
         "enum": ["id", "xpath", "accessibility id", "class name", "-android uiautomator", "-ios predicate string", "-ios class chain"]
       },
       "selector": {
         "type": "string",
-        "description": "选择器表达式，如 XPath: //android.widget.Button[@text='登录']"
+        "description": "The locator expression. Examples: 'login_button' for id, '//android.widget.Button[@text=\"Login\"]' for xpath, 'Login Button' for accessibility id, 'new UiSelector().text(\"Login\")' for android uiautomator"
       }
     },
     "required": ["sessionId", "strategy", "selector"],

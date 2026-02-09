@@ -1,12 +1,12 @@
 {
   "name": "hideKeyboard",
-  "description": "隐藏设备的软键盘",
+  "description": "Dismisses the on-screen soft keyboard if it's currently visible. This is useful after text input operations to ensure the keyboard doesn't obscure other UI elements you need to interact with. The implementation varies by platform: on Android it taps outside the keyboard area, on iOS it looks for a 'Done' or 'Hide keyboard' button. If the keyboard is already hidden, this operation has no effect.",
   "inputSchema": {
     "type": "object",
     "properties": {
       "sessionId": {
         "type": "string",
-        "description": "会话ID"
+        "description": "Active session ID"
       }
     },
     "required": ["sessionId"],

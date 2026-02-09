@@ -1,32 +1,32 @@
 {
   "name": "swipe",
-  "description": "在屏幕上执行滑动手势，从起点坐标滑动到终点坐标",
+  "description": "Performs a swipe gesture from start coordinates (startX, startY) to end coordinates (endX, endY) over the specified duration. Use this for scrolling lists, switching between tabs/pages, pulling to refresh, or dismissing notifications. The duration affects swipe speed: shorter duration = faster swipe (more momentum), longer duration = slower swipe (more controlled). Common patterns: vertical scroll up (startY > endY), scroll down (startY < endY), horizontal swipe left (startX > endX), swipe right (startX < endX).",
   "inputSchema": {
     "type": "object",
     "properties": {
       "sessionId": {
         "type": "string",
-        "description": "会话ID"
+        "description": "Active session ID"
       },
       "startX": {
         "type": "integer",
-        "description": "起点 X 坐标"
+        "description": "Starting X coordinate in pixels"
       },
       "startY": {
         "type": "integer",
-        "description": "起点 Y 坐标"
+        "description": "Starting Y coordinate in pixels"
       },
       "endX": {
         "type": "integer",
-        "description": "终点 X 坐标"
+        "description": "Ending X coordinate in pixels where the swipe finishes"
       },
       "endY": {
         "type": "integer",
-        "description": "终点 Y 坐标"
+        "description": "Ending Y coordinate in pixels where the swipe finishes"
       },
       "durationMs": {
         "type": "integer",
-        "description": "滑动持续时间（毫秒），默认 200",
+        "description": "Duration of the swipe gesture in milliseconds (default: 200). Increase for slower, more controlled swipes; decrease for quick flicks",
         "default": 200
       }
     },

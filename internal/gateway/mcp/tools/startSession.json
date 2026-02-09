@@ -1,40 +1,40 @@
 {
   "name": "startSession",
-  "description": "创建一个新的移动设备测试会话，用于连接到 Appium 服务器并初始化设备",
+  "description": "Creates a new mobile testing session by connecting to an Appium server and initializing the device with specified capabilities. This is always the first step before any test automation can begin. Returns a sessionId that must be used in all subsequent operations. The session will remain active until explicitly ended with endSession or the server restarts.",
   "inputSchema": {
     "type": "object",
     "properties": {
       "projectId": {
         "type": "string",
-        "description": "项目ID，用于标识测试项目"
+        "description": "Project identifier for organizing and tracking test sessions across different projects or teams"
       },
       "actorId": {
         "type": "string",
-        "description": "执行者ID（可选）"
+        "description": "Optional identifier for the user or system initiating the session, useful for audit trails"
       },
       "labels": {
         "type": "object",
-        "description": "会话标签，键值对形式（可选）",
+        "description": "Optional key-value pairs for tagging sessions with custom metadata (e.g., environment, build number)",
         "additionalProperties": {
           "type": "string"
         }
       },
       "w3cCapsJson": {
         "type": "object",
-        "description": "W3C WebDriver 标准的设备能力配置，如 platformName, deviceName, app 等",
+        "description": "W3C WebDriver standard capabilities defining device configuration. Must include platformName (iOS/Android), deviceName, and app path or bundle ID",
         "properties": {
           "platformName": {
             "type": "string",
             "enum": ["iOS", "Android"],
-            "description": "平台名称"
+            "description": "Target platform - iOS or Android"
           },
           "deviceName": {
             "type": "string",
-            "description": "设备名称，如 'iPhone 13', 'Pixel 6'"
+            "description": "Device identifier, e.g., 'iPhone 13', 'Pixel 6', or specific UDID for physical devices"
           },
           "app": {
             "type": "string",
-            "description": "应用路径或 bundle ID"
+            "description": "Path to .app/.ipa/.apk file, or bundle ID for installed apps (e.g., com.example.app)"
           }
         }
       }

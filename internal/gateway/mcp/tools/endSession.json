@@ -1,12 +1,12 @@
 {
   "name": "endSession",
-  "description": "关闭移动设备测试会话，释放资源",
+  "description": "Closes an active mobile testing session and releases all associated resources including the app instance and device connection. Always call this when testing is complete to avoid resource leaks. The sessionId becomes invalid after this operation.",
   "inputSchema": {
     "type": "object",
     "properties": {
       "sessionId": {
         "type": "string",
-        "description": "要关闭的会话ID"
+        "description": "The session identifier returned by startSession that you want to terminate"
       }
     },
     "required": ["sessionId"],

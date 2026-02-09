@@ -1,6 +1,6 @@
 {
   "name": "healthCheck",
-  "description": "检查服务健康状态，包括 Appium 连接、数据库等",
+  "description": "Checks the operational status of the testing infrastructure including Appium server connectivity, database availability, and Redis cache. Returns 'healthy', 'degraded', or 'down' along with details about which components have issues. Use this to diagnose infrastructure problems before starting test sessions.",
   "inputSchema": {
     "type": "object",
     "properties": {},

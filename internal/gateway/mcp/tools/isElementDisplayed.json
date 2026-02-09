@@ -1,16 +1,16 @@
 {
   "name": "isElementDisplayed",
-  "description": "检查元素是否在屏幕上可见",
+  "description": "Checks whether an element is currently visible on the screen. Returns true if the element is displayed (even if partially off-screen or behind other elements), false otherwise. Use this to verify that expected UI elements appeared after an action, or to check visibility before attempting interactions that require the element to be visible.",
   "inputSchema": {
     "type": "object",
     "properties": {
       "sessionId": {
         "type": "string",
-        "description": "会话ID"
+        "description": "Active session ID"
       },
       "elementId": {
         "type": "string",
-        "description": "元素ID，由 findElement 返回"
+        "description": "Element identifier to check visibility for (from findElement)"
       }
     },
     "required": ["sessionId", "elementId"],

@@ -1,16 +1,16 @@
 {
   "name": "clearElement",
-  "description": "清空输入框元素的内容",
+  "description": "Clears all text content from an input field element, leaving it empty. Use this before sendKeysToElement if you need to replace existing content rather than append to it. Only works on elements that support text input; calling it on non-editable elements will fail.",
   "inputSchema": {
     "type": "object",
     "properties": {
       "sessionId": {
         "type": "string",
-        "description": "会话ID"
+        "description": "Active session ID"
       },
       "elementId": {
         "type": "string",
-        "description": "元素ID，由 findElement 返回"
+        "description": "Element identifier for the input field to clear (from findElement)"
       }
     },
     "required": ["sessionId", "elementId"],

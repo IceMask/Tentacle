@@ -1,16 +1,16 @@
 {
   "name": "clickElement",
-  "description": "点击指定的UI元素（通过元素ID）",
+  "description": "Performs a tap/click action on the element identified by elementId (obtained from findElement). This simulates a user tapping the element on a touchscreen. The element must be visible and enabled, otherwise the operation will fail. Use this for buttons, links, list items, and any tappable UI component.",
   "inputSchema": {
     "type": "object",
     "properties": {
       "sessionId": {
         "type": "string",
-        "description": "会话ID"
+        "description": "Active session ID"
       },
       "elementId": {
         "type": "string",
-        "description": "元素ID，由 findElement 返回"
+        "description": "Element identifier returned by findElement, uniquely identifying which element to click"
       }
     },
     "required": ["sessionId", "elementId"],

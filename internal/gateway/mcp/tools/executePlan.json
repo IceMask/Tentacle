@@ -1,16 +1,16 @@
 {
   "name": "executePlan",
-  "description": "在已创建的会话中执行移动自动化测试计划，支持点击、输入、截图等操作",
+  "description": "Executes a pre-defined test plan containing multiple steps (click, sendKeys, wait, screenshot) in batch mode. Ideal for known test flows and regression testing. The plan runs asynchronously and returns a traceId immediately for tracking execution status. Use this when you have a complete test sequence ready; for exploratory testing where you need to see results before deciding next steps, use the interactive element operations instead (findElement, clickElement, etc.).",
   "inputSchema": {
     "type": "object",
     "properties": {
       "sessionId": {
         "type": "string",
-        "description": "会话ID，由 startSession 返回"
+        "description": "Active session ID from startSession"
       },
       "plan": {
         "type": "object",
-        "description": "测试计划，包含一系列步骤",
+        "description": "Test plan containing an array of sequential steps to execute",
         "properties": {
           "steps": {
             "type": "array",
@@ -19,16 +19,16 @@
               "properties": {
                 "type": {
                   "type": "string",
-                  "description": "步骤类型",
+                  "description": "Step action type",
                   "enum": ["click", "sendKeys", "wait", "screenshot"]
                 },
                 "selector": {
                   "type": "string",
-                  "description": "元素选择器（XPath 或其他定位策略）"
+                  "description": "Element locator using XPath or other strategy (required for click, sendKeys)"
                 },
                 "params": {
                   "type": "object",
-                  "description": "步骤参数（可选）"
+                  "description": "Additional parameters specific to the step type (e.g., {text: 'hello'} for sendKeys, {duration: 2000} for wait)"
                 }
               },
               "required": ["type"]
@@ -38,7 +38,7 @@
       },
       "traceId": {
         "type": "string",
-        "description": "跟踪ID（可选），用于关联执行记录"
+        "description": "Optional trace ID for correlating this execution with logs and artifacts. Auto-generated if not provided"
       }
     },
     "required": ["sessionId", "plan"],

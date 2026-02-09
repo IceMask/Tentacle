@@ -1,20 +1,20 @@
 {
   "name": "takeScreenshot",
-  "description": "对当前设备屏幕进行截图",
+  "description": "Captures a PNG screenshot of the current device screen and uploads it to S3 storage, returning a pre-signed URL valid for 15 minutes. Screenshots are automatically linked to the specified traceId for later retrieval. Optionally generates a thumbnail version. Use this to visually document the app state at key moments or when encountering unexpected behavior.",
   "inputSchema": {
     "type": "object",
     "properties": {
       "sessionId": {
         "type": "string",
-        "description": "会话ID"
+        "description": "Active session ID"
       },
       "traceId": {
         "type": "string",
-        "description": "跟踪ID，用于关联截图工件到执行记录"
+        "description": "Trace ID to associate this screenshot with. Required for organizing artifacts by test execution"
       },
       "includeThumb": {
         "type": "boolean",
-        "description": "是否包含缩略图（可选）",
+        "description": "Whether to also generate a thumbnail version (default: true)",
         "default": true
       }
     },

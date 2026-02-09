@@ -1,20 +1,20 @@
 {
   "name": "getElementAttribute",
-  "description": "获取元素的属性值，如 enabled、selected、checked 等",
+  "description": "Retrieves a specific attribute value from an element. Common attributes include 'enabled' (whether element accepts input), 'selected' (for checkboxes/radio buttons), 'checked' (boolean state), 'displayed' (visibility), 'text' (same as getElementText), 'name', 'value', and 'contentDescription'. The available attributes vary by platform and element type. Use this to check element state before interacting with it.",
   "inputSchema": {
     "type": "object",
     "properties": {
       "sessionId": {
         "type": "string",
-        "description": "会话ID"
+        "description": "Active session ID"
       },
       "elementId": {
         "type": "string",
-        "description": "元素ID，由 findElement 返回"
+        "description": "Element identifier (from findElement)"
       },
       "attribute": {
         "type": "string",
-        "description": "属性名，如 'text', 'enabled', 'selected', 'checked', 'displayed'"
+        "description": "Name of the attribute to retrieve. Standard attributes: 'enabled', 'selected', 'checked', 'displayed', 'text', 'name', 'value', 'contentDescription'"
       }
     },
     "required": ["sessionId", "elementId", "attribute"],
