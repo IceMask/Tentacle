@@ -1,0 +1,19 @@
+{
+  "name": "getSemanticSnapshot",
+  "description": "获取当前屏幕的UI元素树结构快照，用于分析界面元素",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID"
+      },
+      "sinceRev": {
+        "type": "string",
+        "description": "上次快照版本号（可选），用于差量更新"
+      }
+    },
+    "required": ["sessionId"],
+    "additionalProperties": false
+  }
+}

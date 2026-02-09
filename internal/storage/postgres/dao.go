@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"time"
 
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/errors"
@@ -43,6 +44,10 @@ func (d *DAO) Close() {
 	d.pool.Close()
 }
 
+func (d *DAO) Ping(ctx context.Context) error {
+	return d.pool.Ping(ctx)
+}
+
 // --- Sessions ---
 
 func (d *DAO) CreateSession(ctx context.Context, s *Session) error {
@@ -65,6 +70,15 @@ func (d *DAO) GetSession(ctx context.Context, id string) (*Session, error) {
 	return s, nil
 }
 
+func (d *DAO) EndSession(ctx context.Context, id string, endedAt time.Time) error {
+	_, err := d.pool.Exec(ctx, `
+		UPDATE sessions
+		SET status = 'ended', ended_at = $2, updated_at = $2
+		WHERE id = $1
+	`, id, endedAt)
+	return err
+}
+
 // --- Traces ---
 
 func (d *DAO) CreateTrace(ctx context.Context, t *Trace) error {
@@ -85,6 +99,15 @@ func (d *DAO) GetTrace(ctx context.Context, id string) (*Trace, error) {
 		return nil, errors.Wrap(errors.CodeTraceNotFound, "trace not found", err)
 	}
 	return t, nil
+}
+
+func (d *DAO) UpdateTraceStatus(ctx context.Context, id string, status string) error {
+	_, err := d.pool.Exec(ctx, `
+		UPDATE traces
+		SET status = $2, updated_at = NOW()
+		WHERE id = $1
+	`, id, status)
+	return err
 }
 
 // --- Events ---

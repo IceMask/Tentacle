@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"mcp_for_appium/internal/util"
+
+	"go.opentelemetry.io/otel/trace"
 )
 
 var defaultLogger *slog.Logger
@@ -51,9 +53,16 @@ func Logger() *slog.Logger {
 	return defaultLogger
 }
 
-// WithContext returns a logger with context fields (e.g. traceId) if present.
-// For now, it just returns the default logger as slog doesn't automatically extract from context without helper.
+// WithContext returns a logger enriched with traceId and spanId from the
+// OpenTelemetry span in ctx, if one is present and valid.
 func WithContext(ctx context.Context) *slog.Logger {
-	// TODO: Extract traceId/requestId from context and add to logger
-	return defaultLogger
+	span := trace.SpanFromContext(ctx)
+	sc := span.SpanContext()
+	if !sc.IsValid() {
+		return defaultLogger
+	}
+	return defaultLogger.With(
+		"trace_id", sc.TraceID().String(),
+		"span_id", sc.SpanID().String(),
+	)
 }

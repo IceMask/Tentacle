@@ -32,7 +32,7 @@ type Hub struct {
 type subscription struct {
 	traceID string
 	clients map[*Client]bool
-	pubsub  interface{} // redis.PubSub
+	done    chan struct{} // closed when last client unsubscribes; signals listenToTrace to exit
 }
 
 type Client struct {
@@ -88,11 +88,12 @@ func (h *Hub) registerClient(ctx context.Context, client *Client) {
 		sub = &subscription{
 			traceID: client.traceID,
 			clients: make(map[*Client]bool),
+			done:    make(chan struct{}),
 		}
 		h.subscriptions[client.traceID] = sub
 
 		// Start Redis PubSub listener for this trace
-		go h.listenToTrace(ctx, client.traceID)
+		go h.listenToTrace(ctx, client.traceID, sub.done)
 
 		h.logger.InfoContext(ctx, "new trace subscription created",
 			"trace_id", client.traceID)
@@ -118,10 +119,10 @@ func (h *Hub) unregisterClient(client *Client) {
 		if sub, exists := h.subscriptions[client.traceID]; exists {
 			delete(sub.clients, client)
 
-			// If no more clients for this trace, cleanup subscription
+			// If no more clients for this trace, signal PubSub listener to exit and cleanup
 			if len(sub.clients) == 0 {
+				close(sub.done)
 				delete(h.subscriptions, client.traceID)
-				// TODO: unsubscribe from Redis PubSub
 				h.logger.Info("trace subscription removed",
 					"trace_id", client.traceID)
 			}
@@ -133,8 +134,9 @@ func (h *Hub) unregisterClient(client *Client) {
 	}
 }
 
-// listenToTrace subscribes to Redis PubSub for a specific trace and forwards events
-func (h *Hub) listenToTrace(ctx context.Context, traceID string) {
+// listenToTrace subscribes to Redis PubSub for a specific trace and forwards events.
+// It exits when ctx is cancelled, the hub stops, or done is closed (last client left).
+func (h *Hub) listenToTrace(ctx context.Context, traceID string, done <-chan struct{}) {
 	channel := eventsChannelPrefix + traceID
 	pubsub := h.cache.Subscribe(ctx, channel)
 	defer pubsub.Close()
@@ -147,6 +149,8 @@ func (h *Hub) listenToTrace(ctx context.Context, traceID string) {
 		case <-ctx.Done():
 			return
 		case <-h.stopCh:
+			return
+		case <-done:
 			return
 		case msg, ok := <-ch:
 			if !ok {
@@ -171,6 +175,7 @@ func (h *Hub) broadcastToTrace(traceID string, message []byte) {
 	}
 
 	for client := range sub.clients {
+		telemetry.WSQueueLen.Observe(float64(len(client.send)))
 		// Try to send with drop-oldest strategy
 		select {
 		case client.send <- message:
@@ -189,7 +194,7 @@ func (h *Hub) broadcastToTrace(traceID string, message []byte) {
 					"trace_id", traceID,
 					"channel_id", client.channelID,
 					"consecutive_drops", client.drops)
-				// TODO: increment metrics websocket_drops_total
+				telemetry.WebsocketDrops.WithLabelValues("", traceID).Inc()
 			}
 
 			// Try to send again

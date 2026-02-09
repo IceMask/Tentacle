@@ -1,0 +1,118 @@
+# MCP Mobile Worker Configuration Example
+# Copy this file to config.yaml and adjust the values
+
+gateway:
+  port: 8080
+  # Enable TLS (optional)
+  # tlsCert: /path/to/cert.pem
+  # tlsKey: /path/to/key.pem
+
+orchestrator:
+  # Worker pool configuration
+  workerPool:
+    maxSize: 10
+    idleTimeout: 300s  # 5 minutes
+
+  # Timeout configuration
+  timeout:
+    step: 30s
+    plan: 10m
+    cancel: 1s
+
+  # Auto-wait configuration
+  wait:
+    auto:
+      max: 5s
+
+worker:
+  # Appium server URL
+  appiumURL: "http://localhost:4723"
+
+  # Concurrency limits
+  maxConcurrent: 5
+
+  # Timeout configuration
+  timeout:
+    appiumRequest: 8s
+    sessionSetup: 30s
+
+  # Retry configuration
+  retry:
+    maxAttempts: 3
+    jitter:
+      min: 200ms
+      max: 1200ms
+
+storage:
+  postgres:
+    host: localhost
+    port: 5432
+    database: mcp_mobile_worker
+    user: postgres
+    password: postgres
+    # SSL mode: disable, require, verify-ca, verify-full
+    sslMode: disable
+    maxConns: 25
+    maxIdleTime: 15m
+
+  redis:
+    addr: localhost:6379
+    password: ""
+    db: 0
+    poolSize: 10
+    minIdleConns: 2
+
+  s3:
+    endpoint: s3.amazonaws.com
+    region: us-east-1
+    bucket: mcp-artifacts
+    # Access credentials (use environment variables in production)
+    # accessKeyID: YOUR_ACCESS_KEY
+    # secretAccessKey: YOUR_SECRET_KEY
+    # Or use IAM role / instance profile
+
+telemetry:
+  # Log level: debug, info, warn, error
+  logLevel: info
+
+  # Structured logging format
+  logFormat: json
+
+  # Prometheus metrics endpoint
+  metricsEnabled: true
+  metricsPort: 9090
+
+  # OpenTelemetry tracing (optional)
+  # tracing:
+  #   enabled: true
+  #   endpoint: localhost:4317
+  #   serviceName: mcp-mobile-worker
+
+# Security configuration
+security:
+  # Authentication methods
+  auth:
+    # PAT (Personal Access Token)
+    pat:
+      enabled: true
+      # tokens are stored in database
+
+    # OIDC (OpenID Connect)
+    oidc:
+      enabled: false
+      # issuer: https://your-idp.com
+      # audience: mcp-mobile-worker
+      # jwksURL: https://your-idp.com/.well-known/jwks.json
+
+    # HMAC signature
+    hmac:
+      enabled: false
+      # secret stored in environment variable: MCP_HMAC_SECRET
+      timeWindow: 5m  # ±5 minutes
+
+  # TLS configuration
+  tls:
+    enabled: false
+    # cert: /path/to/cert.pem
+    # key: /path/to/key.pem
+    # ca: /path/to/ca.pem  # for mTLS

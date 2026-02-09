@@ -1,0 +1,8 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "sessionId": { "type": "string" }
+  },
+  "required": ["sessionId"]
+}

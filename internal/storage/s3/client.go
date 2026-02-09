@@ -2,6 +2,7 @@ package s3
 
 import (
 	"context"
+	"bytes"
 	"time"
 
 	"mcp_for_appium/internal/config"
@@ -82,4 +83,14 @@ func (c *Client) PresignGet(ctx context.Context, key string, lifetime time.Durat
 		return "", err
 	}
 	return req.URL, nil
+}
+
+func (c *Client) PutObject(ctx context.Context, key string, contentType string, data []byte) error {
+	_, err := c.s3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(c.bucket),
+		Key:         aws.String(key),
+		ContentType: aws.String(contentType),
+		Body:        bytes.NewReader(data),
+	})
+	return err
 }

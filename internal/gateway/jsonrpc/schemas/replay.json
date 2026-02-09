@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "traceId": { "type": "string" },
+    "target": { "type": "string" }
+  },
+  "required": ["traceId"]
+}

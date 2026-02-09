@@ -1,0 +1,15 @@
+{
+  "name": "getTrace",
+  "description": "获取测试计划执行的详细记录",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "traceId": {
+        "type": "string",
+        "description": "跟踪ID"
+      }
+    },
+    "required": ["traceId"],
+    "additionalProperties": false
+  }
+}

@@ -200,3 +200,23 @@ func MapToJSONRPC(err error) *JSONRPCError {
 		Data:    string(e.Code),
 	}
 }
+
+// CodeOf extracts the internal error code, if present.
+func CodeOf(err error) (ErrorCode, bool) {
+	e, ok := err.(*Error)
+	if !ok {
+		return "", false
+	}
+	return e.Code, true
+}
+
+// IsCode returns true if err is an internal Error with the given code.
+func IsCode(err error, code ErrorCode) bool {
+	if err == nil {
+		return false
+	}
+	if c, ok := CodeOf(err); ok {
+		return c == code
+	}
+	return false
+}

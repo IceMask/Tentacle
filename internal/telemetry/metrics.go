@@ -37,6 +37,11 @@ var (
 		Help: "Total number of dropped websocket messages due to backpressure",
 	}, []string{"tenant", "trace_id"})
 
+	StreamLogsBackpressure = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "stream_logs_backpressure_total",
+		Help: "Total backpressure events for stream logs",
+	}, []string{"tenant", "trace_id"})
+
 	WSQueueLen = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name:    "ws_queue_len_histogram",
 		Help:    "Histogram of WebSocket queue lengths",

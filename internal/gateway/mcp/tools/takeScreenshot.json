@@ -1,0 +1,24 @@
+{
+  "name": "takeScreenshot",
+  "description": "对当前设备屏幕进行截图",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID"
+      },
+      "traceId": {
+        "type": "string",
+        "description": "跟踪ID，用于关联截图工件到执行记录"
+      },
+      "includeThumb": {
+        "type": "boolean",
+        "description": "是否包含缩略图（可选）",
+        "default": true
+      }
+    },
+    "required": ["sessionId", "traceId"],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "name": "startSession",
+  "description": "创建一个新的移动设备测试会话，用于连接到 Appium 服务器并初始化设备",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "projectId": {
+        "type": "string",
+        "description": "项目ID，用于标识测试项目"
+      },
+      "actorId": {
+        "type": "string",
+        "description": "执行者ID（可选）"
+      },
+      "labels": {
+        "type": "object",
+        "description": "会话标签，键值对形式（可选）",
+        "additionalProperties": {
+          "type": "string"
+        }
+      },
+      "w3cCapsJson": {
+        "type": "object",
+        "description": "W3C WebDriver 标准的设备能力配置，如 platformName, deviceName, app 等",
+        "properties": {
+          "platformName": {
+            "type": "string",
+            "enum": ["iOS", "Android"],
+            "description": "平台名称"
+          },
+          "deviceName": {
+            "type": "string",
+            "description": "设备名称，如 'iPhone 13', 'Pixel 6'"
+          },
+          "app": {
+            "type": "string",
+            "description": "应用路径或 bundle ID"
+          }
+        }
+      }
+    },
+    "required": ["projectId", "w3cCapsJson"],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "cancelPlan",
+  "description": "取消正在执行的测试计划",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "traceId": {
+        "type": "string",
+        "description": "要取消的执行跟踪ID"
+      }
+    },
+    "required": ["traceId"],
+    "additionalProperties": false
+  }
+}

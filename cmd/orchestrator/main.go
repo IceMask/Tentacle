@@ -25,7 +25,10 @@ func main() {
 	// 2. Init Telemetry
 	// 初始化日志（Tracing 待接入）
 	telemetry.InitLogger(cfg.Telemetry.LogLevel)
-	// telemetry.InitTracer(...)
+	shutdownTracer := telemetry.InitTracer("orchestrator", cfg.Telemetry.OTLPEndpoint)
+	defer func() {
+		_ = shutdownTracer(context.Background())
+	}()
 
 	// 3. Init Storage
 	// 初始化 Postgres/Redis/S3 依赖
@@ -48,7 +51,7 @@ func main() {
 
 	// 4. Init Service
 	// 构造 orchestrator 服务，内部包含 dispatcher/registry
-	svc := orchestrator.NewService(cfg.Orchestrator, pgDAO, redisCache, s3Client)
+	svc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, pgDAO, redisCache, s3Client)
 
 	// 5. Start Service (dispatcher and registry monitor)
 	// 启动后台循环
@@ -56,9 +59,13 @@ func main() {
 		log.Fatalf("failed to start service: %v", err)
 	}
 
-	// 6. Start Server (gRPC)
-	// TODO: Implement gRPC server in internal/orchestrator/grpc_server.go and start it here.
-	// For now, just block.
+	// 6. Start gRPC Server for worker registration / heartbeat
+	grpcSrv := orchestrator.NewGRPCServer(svc.Registry())
+	go func() {
+		if err := grpcSrv.Start(cfg.Orchestrator.GRPCPort); err != nil {
+			log.Fatalf("gRPC server error: %v", err)
+		}
+	}()
 	log.Printf("Orchestrator started on port %d", cfg.Orchestrator.GRPCPort)
 
 	// 7. Graceful Shutdown
@@ -70,6 +77,7 @@ func main() {
 
 	// Cleanup logic
 	// 停止后台循环并清理资源
+	grpcSrv.Stop()
 	svc.Stop()
 	defer pgDAO.Close()
 	defer redisCache.Close()

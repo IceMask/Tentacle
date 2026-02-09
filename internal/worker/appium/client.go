@@ -17,6 +17,7 @@ import (
 	stdErrors "errors"
 
 	"mcp_for_appium/internal/errors"
+	"mcp_for_appium/internal/telemetry"
 )
 
 type Client struct {
@@ -40,16 +41,17 @@ func NewClient(url string) *Client {
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 			Transport: &http.Transport{
-				MaxIdleConns:       10,
+				MaxIdleConns:       200,
+				MaxIdleConnsPerHost: 200,
 				IdleConnTimeout:    30 * time.Second,
 				DisableCompression: true,
 			},
 		},
 		breakerThreshold: 3,
 		breakerOpenFor:   10 * time.Second,
-		maxRetries:       3,
+		maxRetries:       2,
 		minRetryDelay:    200 * time.Millisecond,
-		maxRetryDelay:    2 * time.Second,
+		maxRetryDelay:    1200 * time.Millisecond,
 	}
 }
 
@@ -197,7 +199,9 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
 
+		start := time.Now()
 		resp, err := c.httpClient.Do(req)
+		telemetry.AppiumRTT.WithLabelValues("", c.baseURL).Observe(float64(time.Since(start).Milliseconds()))
 		if err != nil {
 			lastErr = c.mapTransportError(err)
 			if c.shouldRetry(nil, err, attempt) {

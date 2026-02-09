@@ -1,0 +1,9 @@
+{
+  "name": "healthCheck",
+  "description": "检查服务健康状态，包括 Appium 连接、数据库等",
+  "inputSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

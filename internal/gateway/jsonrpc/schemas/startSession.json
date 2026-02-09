@@ -1,0 +1,14 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "projectId": { "type": "string" },
+    "actorId": { "type": "string" },
+    "labels": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "w3cCapsJson": { "type": "object" }
+  },
+  "required": ["projectId", "w3cCapsJson"]
+}

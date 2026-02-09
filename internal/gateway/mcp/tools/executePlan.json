@@ -1,0 +1,47 @@
+{
+  "name": "executePlan",
+  "description": "在已创建的会话中执行移动自动化测试计划，支持点击、输入、截图等操作",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "会话ID，由 startSession 返回"
+      },
+      "plan": {
+        "type": "object",
+        "description": "测试计划，包含一系列步骤",
+        "properties": {
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "description": "步骤类型",
+                  "enum": ["click", "sendKeys", "wait", "screenshot"]
+                },
+                "selector": {
+                  "type": "string",
+                  "description": "元素选择器（XPath 或其他定位策略）"
+                },
+                "params": {
+                  "type": "object",
+                  "description": "步骤参数（可选）"
+                }
+              },
+              "required": ["type"]
+            }
+          }
+        }
+      },
+      "traceId": {
+        "type": "string",
+        "description": "跟踪ID（可选），用于关联执行记录"
+      }
+    },
+    "required": ["sessionId", "plan"],
+    "additionalProperties": false
+  }
+}

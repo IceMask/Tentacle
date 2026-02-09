@@ -1,3 +1,81 @@
+# MCP Mobile Worker - Appium 自动化测试平台
+
+> **版本**: v4.3
+> **协议支持**: 标准 MCP (Model Context Protocol) + JSON-RPC + REST + gRPC + WebSocket
+
+## 概述
+
+MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，支持 iOS 和 Android 自动化测试。通过标准 MCP 协议，可直接被 Claude Desktop 等 AI 工具发现和调用。
+
+### v4.3 新特性
+
+- ✅ **标准 MCP 协议支持**：实现 Anthropic MCP 标准（协议版本 2024-11-05）
+- ✅ **stdio 传输模式**：通过 `gateway --stdio` 启动，支持 Claude Desktop 配置
+- ✅ **MCP Tools 注册表**：8 个核心业务方法作为 Tools 暴露给 LLM
+- ✅ **向后兼容**：保持原有 HTTP/REST/gRPC/WebSocket 接口不变
+
+### 快速开始
+
+#### 1. 作为 MCP Server 使用（Claude Desktop 集成）
+
+在 Claude Desktop 配置文件中添加：
+
+```json
+{
+  "mcpServers": {
+    "appium-mobile-testing": {
+      "command": "/path/to/gateway",
+      "args": ["--stdio"],
+      "env": {
+        "CONFIG_PATH": "/path/to/config.yaml"
+      }
+    }
+  }
+}
+```
+
+配置文件位置：
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+#### 2. 作为 HTTP 服务使用
+
+```bash
+# 启动 HTTP 服务器模式（默认）
+./gateway --config config.yaml
+
+# 访问 JSON-RPC 端点
+curl -X POST http://localhost:8080/jsonrpc \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/list",
+    "params": {},
+    "id": 1
+  }'
+```
+
+### MCP Tools 列表
+
+通过 MCP 协议可用的工具：
+
+1. **startSession** - 创建移动设备测试会话
+2. **executePlan** - 执行自动化测试计划
+3. **endSession** - 关闭会话释放资源
+4. **getSemanticSnapshot** - 获取 UI 元素树快照
+5. **takeScreenshot** - 对设备屏幕截图
+6. **cancelPlan** - 取消正在执行的计划
+7. **getTrace** - 获取执行记录详情
+8. **healthCheck** - 检查服务健康状态
+
+### 文档
+
+- [需求说明 v4.3](./requirements.v4.3.md)
+- [架构设计 v4.3](./module_v4.3_design.md)
+- [详细文档](./appium_mcp_docs_v4_3_detailed/)
+
+## 系统架构
+
 flowchart TD
   %% ========= Ingress =========
   A[Client<br/>REST / JSON-RPC] --> B[Gateway]

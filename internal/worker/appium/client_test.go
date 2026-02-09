@@ -27,8 +27,8 @@ func TestNewClient(t *testing.T) {
 		t.Errorf("Expected breakerThreshold to be 3, got %d", client.breakerThreshold)
 	}
 
-	if client.maxRetries != 3 {
-		t.Errorf("Expected maxRetries to be 3, got %d", client.maxRetries)
+	if client.maxRetries != 2 {
+		t.Errorf("Expected maxRetries to be 2, got %d", client.maxRetries)
 	}
 }
 

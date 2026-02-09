@@ -15,12 +15,13 @@ func NewService(cfg config.GatewayConfig) *Service {
 
 func (s *Service) List(ctx context.Context) map[string]interface{} {
 	return map[string]interface{}{
-		"apiVersion": "4.2.0",
+		"apiVersion": "4.3.0",
 		"capabilities": map[string]interface{}{
-			"planOps": []string{"startSession", "executePlan", "getSemanticSnapshot"},
+			"planOps": []string{"startSession", "executePlan", "endSession", "getSemanticSnapshot", "takeScreenshot", "cancelPlan", "getTrace", "healthCheck"},
 			"features": map[string]string{
 				"jsonrpc": "stable",
 				"a2a":     "beta",
+				"mcp":     "beta",
 			},
 		},
 	}

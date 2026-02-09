@@ -228,6 +228,17 @@ func (c *Cache) SetNX(ctx context.Context, key string, value interface{}, ttl ti
 	return c.client.SetNX(ctx, key, value, ttl).Result()
 }
 
+// Incr increments a key and sets TTL on first creation; returns the new value.
+func (c *Cache) Incr(ctx context.Context, key string, ttl time.Duration) (int64, error) {
+	pipe := c.client.TxPipeline()
+	incr := pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, ttl)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, err
+	}
+	return incr.Val(), nil
+}
+
 // Ping checks connection
 func (c *Cache) Ping(ctx context.Context) error {
 	return c.client.Ping(ctx).Err()

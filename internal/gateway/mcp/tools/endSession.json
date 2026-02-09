@@ -1,0 +1,15 @@
+{
+  "name": "endSession",
+  "description": "关闭移动设备测试会话，释放资源",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "要关闭的会话ID"
+      }
+    },
+    "required": ["sessionId"],
+    "additionalProperties": false
+  }
+}

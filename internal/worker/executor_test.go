@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"mcp_for_appium/internal/worker/appium"
 )
@@ -58,7 +59,7 @@ func TestNewExecutor(t *testing.T) {
 	// Type assertion won't work directly, so we use the real client for this test
 	client := appium.NewClient("http://localhost:4723")
 
-	executor := NewExecutor(client)
+	executor := NewExecutor(client, time.Second, 5*time.Second, nil)
 	if executor == nil {
 		t.Fatal("Expected non-nil executor")
 	}

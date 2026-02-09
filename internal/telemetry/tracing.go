@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -26,13 +27,23 @@ func InitTracer(serviceName string, endpoint string) func(context.Context) error
 		return func(context.Context) error { return nil }
 	}
 
-	// TODO: Add OTLP exporter if endpoint is provided
-	// exporter, err := otlptracegrpc.New(ctx, otlptracegrpc.WithEndpoint(endpoint))
+	var opts []sdktrace.TracerProviderOption
+	opts = append(opts, sdktrace.WithResource(res))
+	opts = append(opts, sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.25))))
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(0.25))), // 25% sampling
-	)
+	if endpoint != "" {
+		exporter, err := otlptracegrpc.New(context.Background(),
+			otlptracegrpc.WithEndpoint(endpoint),
+			otlptracegrpc.WithInsecure(),
+		)
+		if err != nil {
+			log.Printf("failed to create OTLP exporter: %v", err)
+		} else {
+			opts = append(opts, sdktrace.WithBatcher(exporter))
+		}
+	}
+
+	tp := sdktrace.NewTracerProvider(opts...)
 
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))

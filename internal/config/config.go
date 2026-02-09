@@ -34,6 +34,8 @@ type WorkerConfig struct {
 	Concurrency       int               `yaml:"concurrency" env:"WORKER__CONCURRENCY" default:"0"` // 0 means auto-detect
 	HeartbeatInterval time.Duration     `yaml:"heartbeat_interval" env:"WORKER__HEARTBEAT_INTERVAL" default:"10s"`
 	Tags              map[string]string `yaml:"tags"`
+	OrchestratorAddr  string            `yaml:"orchestrator_addr" env:"WORKER__ORCHESTRATOR_ADDR" default:"localhost:9090"`
+	GRPCPort          int               `yaml:"grpc_port" env:"WORKER__GRPC_PORT" default:"9092"`
 }
 
 type StorageConfig struct {
