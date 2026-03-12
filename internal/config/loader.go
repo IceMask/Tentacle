@@ -62,6 +62,7 @@ func MustLoad(path string) *Config {
 	return cfg
 }
 
+// applyDefaults executes this operation.
 func applyDefaults(v interface{}) error {
 	// A simple implementation to set defaults based on `default` tag
 	// This is a recursive function using reflection
@@ -100,6 +101,7 @@ func applyDefaults(v interface{}) error {
 	return nil
 }
 
+// applyEnvOverrides executes this operation.
 func applyEnvOverrides(v interface{}) error {
 	val := reflect.ValueOf(v)
 	if val.Kind() == reflect.Ptr {
@@ -136,6 +138,7 @@ func applyEnvOverrides(v interface{}) error {
 	return nil
 }
 
+// setField executes this operation.
 func setField(value reflect.Value, s string) error {
 	switch value.Kind() {
 	case reflect.String:
@@ -178,6 +181,7 @@ func setField(value reflect.Value, s string) error {
 	return nil
 }
 
+// validate executes this operation.
 func validate(cfg *Config) error {
 	// 1. Mutually exclusive Auth
 	if cfg.Auth.EnablePAT && cfg.Auth.EnableOIDC {
@@ -200,6 +204,14 @@ func validate(cfg *Config) error {
 	if cfg.Storage.Postgres.DSN == "" {
 		// Maybe optional for some modes? But generally required.
 		// return errors.New(errors.CodeConfigMissing, "Postgres DSN missing")
+	}
+
+	// 4. Device Farm
+	switch strings.ToLower(strings.TrimSpace(cfg.DeviceFarm.Mode)) {
+	case "", "disabled", "test_grid", "run_api":
+		// valid
+	default:
+		return errors.New(errors.CodeConfigInvalid, "devicefarm.mode must be one of: disabled, test_grid, run_api")
 	}
 
 	return nil

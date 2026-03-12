@@ -13,10 +13,12 @@ type AuthMiddleware struct {
 	// hmacValidator *auth.HMACValidator
 }
 
+// NewAuthMiddleware executes this operation.
 func NewAuthMiddleware(pat *auth.PATValidator) *AuthMiddleware {
 	return &AuthMiddleware{patValidator: pat}
 }
 
+// Handle executes this operation.
 func (m *AuthMiddleware) Handle(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")

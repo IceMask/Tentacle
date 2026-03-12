@@ -9,10 +9,12 @@ type Service struct {
 	cfg config.GatewayConfig
 }
 
+// NewService executes this operation.
 func NewService(cfg config.GatewayConfig) *Service {
 	return &Service{cfg: cfg}
 }
 
+// List executes this operation.
 func (s *Service) List(ctx context.Context) map[string]interface{} {
 	return map[string]interface{}{
 		"apiVersion": "4.3.0",

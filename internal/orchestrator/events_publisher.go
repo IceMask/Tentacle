@@ -23,6 +23,7 @@ type EventsPublisher struct {
 	logger *slog.Logger
 }
 
+// NewEventsPublisher executes this operation.
 func NewEventsPublisher(dao *postgres.DAO, cache *redis.Cache) *EventsPublisher {
 	return &EventsPublisher{
 		dao:    dao,

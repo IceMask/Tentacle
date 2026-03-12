@@ -14,6 +14,7 @@ type DAO struct {
 	pool *pgxpool.Pool
 }
 
+// NewDAO executes this operation.
 func NewDAO(ctx context.Context, cfg config.PostgresConfig) (*DAO, error) {
 	if cfg.DSN == "" {
 		return nil, errors.New(errors.CodeConfigMissing, "postgres DSN is empty")
@@ -40,16 +41,19 @@ func NewDAO(ctx context.Context, cfg config.PostgresConfig) (*DAO, error) {
 	return &DAO{pool: pool}, nil
 }
 
+// Close executes this operation.
 func (d *DAO) Close() {
 	d.pool.Close()
 }
 
+// Ping executes this operation.
 func (d *DAO) Ping(ctx context.Context) error {
 	return d.pool.Ping(ctx)
 }
 
 // --- Sessions ---
 
+// CreateSession executes this operation.
 func (d *DAO) CreateSession(ctx context.Context, s *Session) error {
 	_, err := d.pool.Exec(ctx, `
 		INSERT INTO sessions (id, project_id, status, capabilities, created_at, updated_at)
@@ -58,6 +62,7 @@ func (d *DAO) CreateSession(ctx context.Context, s *Session) error {
 	return err
 }
 
+// GetSession executes this operation.
 func (d *DAO) GetSession(ctx context.Context, id string) (*Session, error) {
 	s := &Session{}
 	err := d.pool.QueryRow(ctx, `
@@ -70,6 +75,7 @@ func (d *DAO) GetSession(ctx context.Context, id string) (*Session, error) {
 	return s, nil
 }
 
+// EndSession executes this operation.
 func (d *DAO) EndSession(ctx context.Context, id string, endedAt time.Time) error {
 	_, err := d.pool.Exec(ctx, `
 		UPDATE sessions
@@ -81,6 +87,7 @@ func (d *DAO) EndSession(ctx context.Context, id string, endedAt time.Time) erro
 
 // --- Traces ---
 
+// CreateTrace executes this operation.
 func (d *DAO) CreateTrace(ctx context.Context, t *Trace) error {
 	_, err := d.pool.Exec(ctx, `
 		INSERT INTO traces (id, session_id, project_id, status, created_at, updated_at)
@@ -89,6 +96,7 @@ func (d *DAO) CreateTrace(ctx context.Context, t *Trace) error {
 	return err
 }
 
+// GetTrace executes this operation.
 func (d *DAO) GetTrace(ctx context.Context, id string) (*Trace, error) {
 	t := &Trace{}
 	err := d.pool.QueryRow(ctx, `
@@ -101,6 +109,7 @@ func (d *DAO) GetTrace(ctx context.Context, id string) (*Trace, error) {
 	return t, nil
 }
 
+// UpdateTraceStatus executes this operation.
 func (d *DAO) UpdateTraceStatus(ctx context.Context, id string, status string) error {
 	_, err := d.pool.Exec(ctx, `
 		UPDATE traces
@@ -112,6 +121,7 @@ func (d *DAO) UpdateTraceStatus(ctx context.Context, id string, status string) e
 
 // --- Events ---
 
+// InsertPlanEvent executes this operation.
 func (d *DAO) InsertPlanEvent(ctx context.Context, e *PlanEvent) error {
 	_, err := d.pool.Exec(ctx, `
 		INSERT INTO plan_events (trace_id, seq, step_index, status, payload, created_at)
@@ -120,6 +130,7 @@ func (d *DAO) InsertPlanEvent(ctx context.Context, e *PlanEvent) error {
 	return err
 }
 
+// ListEvents executes this operation.
 func (d *DAO) ListEvents(ctx context.Context, traceID string, sinceSeq int64, limit int) ([]*PlanEvent, error) {
 	rows, err := d.pool.Query(ctx, `
 		SELECT trace_id, seq, step_index, status, payload, created_at
@@ -146,6 +157,7 @@ func (d *DAO) ListEvents(ctx context.Context, traceID string, sinceSeq int64, li
 
 // --- Artifacts ---
 
+// InsertArtifact executes this operation.
 func (d *DAO) InsertArtifact(ctx context.Context, a *Artifact) error {
 	_, err := d.pool.Exec(ctx, `
 		INSERT INTO artifacts (id, trace_id, key, type, size, created_at, metadata)
@@ -158,6 +170,7 @@ func (d *DAO) InsertArtifact(ctx context.Context, a *Artifact) error {
 	return nil
 }
 
+// ListArtifacts executes this operation.
 func (d *DAO) ListArtifacts(ctx context.Context, traceID string) ([]*Artifact, error) {
 	rows, err := d.pool.Query(ctx, `
 		SELECT id, trace_id, key, type, size, created_at, metadata

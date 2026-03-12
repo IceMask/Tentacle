@@ -52,15 +52,15 @@ const (
 	CodeAppTimeout      ErrorCode = "E.APP.TIMEOUT"
 
 	// Rate Limit & Health
-	CodeRateLimited      ErrorCode = "E.RATE.LIMITED"
-	CodeHealthDegraded   ErrorCode = "E.HEALTH.DEGRADED"
-	CodeHealthDown       ErrorCode = "E.HEALTH.DOWN"
-	CodeLogsUnavailable  ErrorCode = "E.LOGS.UNAVAILABLE"
-	CodeWSTooManySubs    ErrorCode = "E.WS.TOO_MANY_SUBS"
-	CodeWSBackpressure   ErrorCode = "E.WS.BACKPRESSURE_DROP"
+	CodeRateLimited     ErrorCode = "E.RATE.LIMITED"
+	CodeHealthDegraded  ErrorCode = "E.HEALTH.DEGRADED"
+	CodeHealthDown      ErrorCode = "E.HEALTH.DOWN"
+	CodeLogsUnavailable ErrorCode = "E.LOGS.UNAVAILABLE"
+	CodeWSTooManySubs   ErrorCode = "E.WS.TOO_MANY_SUBS"
+	CodeWSBackpressure  ErrorCode = "E.WS.BACKPRESSURE_DROP"
 
 	// Auth
-	CodeUnauthenticated ErrorCode = "E.AUTH.UNAUTHENTICATED"
+	CodeUnauthenticated  ErrorCode = "E.AUTH.UNAUTHENTICATED"
 	CodePermissionDenied ErrorCode = "E.AUTH.PERMISSION_DENIED"
 	CodeNonceDuplicate   ErrorCode = "E.AUTH.NONCE_DUPLICATE"
 	CodeTokenExpired     ErrorCode = "E.AUTH.TOKEN_EXPIRED"
@@ -76,6 +76,7 @@ type Error struct {
 	Err     error
 }
 
+// Error executes this operation.
 func (e *Error) Error() string {
 	if e.Err != nil {
 		return fmt.Sprintf("[%s] %s: %v", e.Code, e.Message, e.Err)
@@ -83,6 +84,7 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("[%s] %s", e.Code, e.Message)
 }
 
+// Unwrap executes this operation.
 func (e *Error) Unwrap() error {
 	return e.Err
 }

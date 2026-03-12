@@ -2,12 +2,16 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
+	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
 	"mcp_for_appium/internal/config"
+	"mcp_for_appium/internal/devicefarm"
 	"mcp_for_appium/internal/errors"
 	"mcp_for_appium/internal/storage/postgres"
 	"mcp_for_appium/internal/storage/redis"
@@ -20,46 +24,91 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
-type Service struct {
-	cfg        config.OrchestratorConfig
-	dao        *postgres.DAO
-	cache      *redis.Cache
-	s3         *s3.Client
-	dispatcher *Dispatcher
-	registry   *WorkerRegistry
-	publisher  *EventsPublisher
-	appiumURL  string
-	appiumMu   sync.Mutex
-	appiumMap  map[string]*appium.Client
-	planMu     sync.Mutex
-	planCancel map[string]context.CancelFunc
-	snapshotMu sync.Mutex
-	snapshots  map[string]*snapshotCache
-	logger     *slog.Logger
+const (
+	appiumSessionKeyPrefix     = "session:appium:"
+	appiumSessionKeyTTL        = 24 * time.Hour
+	deviceFarmCacheTTL         = 24 * time.Hour
+	deviceFarmUploadMetaTTL    = 2 * time.Hour
+	deviceFarmLastAppPrefix    = "devicefarm:last:app:"
+	deviceFarmLastTestPrefix   = "devicefarm:last:testpkg:"
+	deviceFarmLastPoolPrefix   = "devicefarm:last:pool:"
+	deviceFarmUploadMetaPrefix = "devicefarm:uploadmeta:"
+)
+
+type deviceFarmUploadMeta struct {
+	ProjectARN string `json:"projectArn"`
+	Type       string `json:"type"`
 }
 
-func NewService(cfg config.OrchestratorConfig, workerCfg config.WorkerConfig, dao *postgres.DAO, cache *redis.Cache, s3 *s3.Client) *Service {
+type Service struct {
+	cfg          config.OrchestratorConfig
+	dao          *postgres.DAO
+	cache        *redis.Cache
+	s3           *s3.Client
+	dispatcher   *Dispatcher
+	registry     *WorkerRegistry
+	publisher    *EventsPublisher
+	appiumURL    string
+	appiumMu     sync.Mutex
+	appiumMap    map[string]*appium.Client
+	planMu       sync.Mutex
+	planCancel   map[string]context.CancelFunc
+	snapshotMu   sync.Mutex
+	snapshots    map[string]*snapshotCache
+	logger       *slog.Logger
+	execMode     string
+	deviceFarm   *devicefarm.Client
+	dfMode       string
+	dfProjectARN string
+}
+
+// NewService executes this operation.
+func NewService(cfg config.OrchestratorConfig, workerCfg config.WorkerConfig, awsCfg config.AWSConfig, dfCfg config.DeviceFarmConfig, dao *postgres.DAO, cache *redis.Cache, s3 *s3.Client) *Service {
+	mode := normalizeExecutionMode(cfg.ExecutionMode)
+	cfg.ExecutionMode = mode
 	registry := NewWorkerRegistry(cache)
 	publisher := NewEventsPublisher(dao, cache)
 
 	svc := &Service{
-		cfg:        cfg,
-		dao:        dao,
-		cache:      cache,
-		s3:         s3,
-		registry:   registry,
-		publisher:  publisher,
-		appiumURL:  workerCfg.AppiumURL,
-		appiumMap:  make(map[string]*appium.Client),
-		planCancel: make(map[string]context.CancelFunc),
-		snapshots:  make(map[string]*snapshotCache),
-		logger:     telemetry.Logger(),
+		cfg:          cfg,
+		dao:          dao,
+		cache:        cache,
+		s3:           s3,
+		registry:     registry,
+		publisher:    publisher,
+		appiumURL:    workerCfg.AppiumURL,
+		appiumMap:    make(map[string]*appium.Client),
+		planCancel:   make(map[string]context.CancelFunc),
+		snapshots:    make(map[string]*snapshotCache),
+		logger:       telemetry.Logger(),
+		execMode:     mode,
+		dfMode:       strings.ToLower(strings.TrimSpace(dfCfg.Mode)),
+		dfProjectARN: strings.TrimSpace(dfCfg.ProjectARN),
 	}
 
-	dispatcher := NewDispatcher(cache, registry, svc)
+	// Initialize Device Farm SDK client when run_api mode is explicitly enabled.
+	if svc.dfMode == "run_api" {
+		dfClient, err := devicefarm.NewClient(context.Background(), awsCfg, dfCfg)
+		if err != nil {
+			svc.logger.Warn("failed to init device farm client", "error", err)
+		} else {
+			svc.deviceFarm = dfClient
+		}
+	}
+
+	var executor PlanExecutor
+	if mode == ExecutionModeMonolith {
+		executor = svc
+	}
+	dispatcher := NewDispatcher(cache, registry, executor)
 	svc.dispatcher = dispatcher
 
 	return svc
+}
+
+// ExecutionMode executes this operation.
+func (s *Service) ExecutionMode() string {
+	return s.execMode
 }
 
 // Registry returns the worker registry (used to wire up the gRPC server).
@@ -89,6 +138,7 @@ func (s *Service) Stop() {
 	s.logger.Info("orchestrator service stopped")
 }
 
+// StartSession executes this operation.
 func (s *Service) StartSession(ctx context.Context, projectID string, caps map[string]interface{}) (*postgres.Session, error) {
 	ctx, span := otel.Tracer("orchestrator").Start(ctx, "StartSession")
 	defer span.End()
@@ -98,7 +148,8 @@ func (s *Service) StartSession(ctx context.Context, projectID string, caps map[s
 	}
 
 	app := appium.NewClient(s.appiumURL)
-	if _, err := app.StartSession(ctx, caps); err != nil {
+	appiumSessionID, err := app.StartSession(ctx, caps)
+	if err != nil {
 		return nil, errors.Wrap(errors.CodeInternal, "failed to start appium session", err)
 	}
 
@@ -120,6 +171,13 @@ func (s *Service) StartSession(ctx context.Context, projectID string, caps map[s
 		return nil, errors.Wrap(errors.CodeInternal, "failed to create session", err)
 	}
 
+	if err := s.cache.Set(ctx, appiumSessionKeyPrefix+sessID, appiumSessionID, appiumSessionKeyTTL); err != nil {
+		s.logger.WarnContext(ctx, "failed to persist appium session mapping",
+			"session_id", sessID,
+			"appium_session_id", appiumSessionID,
+			"error", err)
+	}
+
 	s.appiumMu.Lock()
 	s.appiumMap[sessID] = app
 	s.appiumMu.Unlock()
@@ -127,10 +185,12 @@ func (s *Service) StartSession(ctx context.Context, projectID string, caps map[s
 	return sess, nil
 }
 
+// ExecutePlan executes this operation.
 func (s *Service) ExecutePlan(ctx context.Context, sessionID string, plan json.RawMessage) (string, error) {
 	return s.ExecutePlanWithTrace(ctx, sessionID, "", plan)
 }
 
+// ExecutePlanWithTrace executes this operation.
 func (s *Service) ExecutePlanWithTrace(ctx context.Context, sessionID string, traceID string, plan json.RawMessage) (string, error) {
 	ctx, span := otel.Tracer("orchestrator").Start(ctx, "ExecutePlan")
 	defer span.End()
@@ -168,18 +228,22 @@ func (s *Service) ExecutePlanWithTrace(ctx context.Context, sessionID string, tr
 	return traceID, nil
 }
 
+// GetEvents executes this operation.
 func (s *Service) GetEvents(ctx context.Context, traceID string, sinceSeq int64) ([]*postgres.PlanEvent, error) {
 	return s.dao.ListEvents(ctx, traceID, sinceSeq, 100)
 }
 
+// GetArtifacts executes this operation.
 func (s *Service) GetArtifacts(ctx context.Context, traceID string) ([]*postgres.Artifact, error) {
 	return s.dao.ListArtifacts(ctx, traceID)
 }
 
+// GetSession executes this operation.
 func (s *Service) GetSession(ctx context.Context, sessionID string) (*postgres.Session, error) {
 	return s.dao.GetSession(ctx, sessionID)
 }
 
+// EndSession executes this operation.
 func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 	ctx, span := otel.Tracer("orchestrator").Start(ctx, "EndSession")
 	defer span.End()
@@ -200,6 +264,11 @@ func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 	if app != nil {
 		_ = app.DeleteSession(ctx)
 	}
+	if err := s.cache.Del(ctx, appiumSessionKeyPrefix+sessionID); err != nil {
+		s.logger.WarnContext(ctx, "failed to delete appium session mapping",
+			"session_id", sessionID,
+			"error", err)
+	}
 
 	if err := s.dao.EndSession(ctx, sessionID, time.Now()); err != nil {
 		return errors.Wrap(errors.CodeStoreWrite, "failed to end session", err)
@@ -208,6 +277,7 @@ func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 	return nil
 }
 
+// CancelPlan executes this operation.
 func (s *Service) CancelPlan(ctx context.Context, traceID string) error {
 	s.planMu.Lock()
 	cancel := s.planCancel[traceID]
@@ -218,6 +288,17 @@ func (s *Service) CancelPlan(ctx context.Context, traceID string) error {
 		cancel()
 	}
 
+	if s.execMode == ExecutionModeDistributed {
+		cancelled, err := s.dispatcher.CancelDispatchedPlan(ctx, traceID)
+		if err != nil {
+			s.logger.WarnContext(ctx, "failed to propagate cancel to worker",
+				"trace_id", traceID,
+				"error", err)
+		} else if cancelled {
+			s.logger.InfoContext(ctx, "cancel propagated to worker", "trace_id", traceID)
+		}
+	}
+
 	_ = s.dispatcher.CancelPlan(ctx, traceID)
 	if err := s.dao.UpdateTraceStatus(ctx, traceID, "cancelled"); err != nil {
 		return errors.Wrap(errors.CodeStoreWrite, "failed to update trace status", err)
@@ -226,6 +307,7 @@ func (s *Service) CancelPlan(ctx context.Context, traceID string) error {
 	return nil
 }
 
+// GetTrace executes this operation.
 func (s *Service) GetTrace(ctx context.Context, traceID string) (*postgres.Trace, []*postgres.PlanEvent, error) {
 	trace, err := s.dao.GetTrace(ctx, traceID)
 	if err != nil {
@@ -240,8 +322,9 @@ func (s *Service) GetTrace(ctx context.Context, traceID string) (*postgres.Trace
 	return trace, events, nil
 }
 
+// GetSemanticSnapshot executes this operation.
 func (s *Service) GetSemanticSnapshot(ctx context.Context, sessionID string, sinceRev string) (map[string]interface{}, error) {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -285,12 +368,13 @@ func (s *Service) GetSemanticSnapshot(ctx context.Context, sessionID string, sin
 	}, nil
 }
 
+// TakeScreenshot executes this operation.
 func (s *Service) TakeScreenshot(ctx context.Context, sessionID string, traceID string, includeThumb bool) (map[string]interface{}, error) {
 	if traceID == "" {
 		return nil, errors.New(errors.CodePlanInvalid, "traceId is required for takeScreenshot")
 	}
 
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -319,6 +403,7 @@ func (s *Service) TakeScreenshot(ctx context.Context, sessionID string, traceID 
 	return result, nil
 }
 
+// HealthCheck executes this operation.
 func (s *Service) HealthCheck(ctx context.Context) map[string]interface{} {
 	status := "healthy"
 	issues := []string{}
@@ -352,12 +437,34 @@ func (s *Service) HealthCheck(ctx context.Context) map[string]interface{} {
 	}
 }
 
-func (s *Service) getAppiumClient(sessionID string) (*appium.Client, error) {
+// getAppiumClient executes this operation.
+func (s *Service) getAppiumClient(ctx context.Context, sessionID string) (*appium.Client, error) {
 	s.appiumMu.Lock()
 	app := s.appiumMap[sessionID]
 	s.appiumMu.Unlock()
 	if app == nil {
-		return nil, errors.New(errors.CodeSessionNotFound, "session not found")
+		appiumSessionID, err := s.cache.Get(ctx, appiumSessionKeyPrefix+sessionID)
+		if err != nil {
+			if err.Error() == "redis: nil" {
+				return nil, errors.New(errors.CodeSessionNotFound, "session not found")
+			}
+			return nil, errors.Wrap(errors.CodeStoreRead, "failed to load appium session mapping", err)
+		}
+		if appiumSessionID == "" {
+			return nil, errors.New(errors.CodeSessionNotFound, "session not found")
+		}
+
+		restored := appium.NewClient(s.appiumURL)
+		restored.AttachSession(appiumSessionID)
+
+		s.appiumMu.Lock()
+		if existing := s.appiumMap[sessionID]; existing != nil {
+			app = existing
+		} else {
+			s.appiumMap[sessionID] = restored
+			app = restored
+		}
+		s.appiumMu.Unlock()
 	}
 	return app, nil
 }
@@ -369,6 +476,7 @@ type snapshotCache struct {
 	cachedAt time.Time
 }
 
+// storeArtifact executes this operation.
 func (s *Service) storeArtifact(ctx context.Context, traceID string, key string, contentType string, data []byte) (map[string]interface{}, error) {
 	artifactID := uuid.New().String()
 	objectKey := traceID + "/" + artifactID + "/" + key
@@ -401,6 +509,7 @@ func (s *Service) storeArtifact(ctx context.Context, traceID string, key string,
 	}, nil
 }
 
+// ExecuteDispatchedPlan executes this operation.
 func (s *Service) ExecuteDispatchedPlan(ctx context.Context, traceID string, sessionID string, plan json.RawMessage) error {
 	ctx, span := otel.Tracer("orchestrator").Start(ctx, "ExecuteDispatchedPlan")
 	defer span.End()
@@ -426,7 +535,7 @@ func (s *Service) ExecuteDispatchedPlan(ctx context.Context, traceID string, ses
 		return err
 	}
 
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		_ = s.dao.UpdateTraceStatus(runCtx, traceID, "failed")
 		return err
@@ -479,98 +588,360 @@ func (s *Service) ExecuteDispatchedPlan(ctx context.Context, traceID string, ses
 
 // Interactive element operations
 
+// FindElement executes this operation.
 func (s *Service) FindElement(ctx context.Context, sessionID, strategy, selector string) (string, error) {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return "", err
 	}
 	return app.FindElement(ctx, strategy, selector)
 }
 
+// ClickElement executes this operation.
 func (s *Service) ClickElement(ctx context.Context, sessionID, elementID string) error {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	return app.Click(ctx, elementID)
 }
 
+// SendKeysToElement executes this operation.
 func (s *Service) SendKeysToElement(ctx context.Context, sessionID, elementID, text string) error {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	return app.SendKeys(ctx, elementID, text)
 }
 
+// ClearElement executes this operation.
 func (s *Service) ClearElement(ctx context.Context, sessionID, elementID string) error {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	return app.Clear(ctx, elementID)
 }
 
+// GetElementText executes this operation.
 func (s *Service) GetElementText(ctx context.Context, sessionID, elementID string) (string, error) {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return "", err
 	}
 	return app.GetText(ctx, elementID)
 }
 
+// GetElementAttribute executes this operation.
 func (s *Service) GetElementAttribute(ctx context.Context, sessionID, elementID, attribute string) (string, error) {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return "", err
 	}
 	return app.GetAttribute(ctx, elementID, attribute)
 }
 
+// IsElementDisplayed executes this operation.
 func (s *Service) IsElementDisplayed(ctx context.Context, sessionID, elementID string) (bool, error) {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return false, err
 	}
 	return app.IsDisplayed(ctx, elementID)
 }
 
+// Tap executes this operation.
 func (s *Service) Tap(ctx context.Context, sessionID string, x, y int) error {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	return app.Tap(ctx, x, y)
 }
 
+// Swipe executes this operation.
 func (s *Service) Swipe(ctx context.Context, sessionID string, startX, startY, endX, endY, durationMs int) error {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	return app.Swipe(ctx, startX, startY, endX, endY, durationMs)
 }
 
+// LongPress executes this operation.
 func (s *Service) LongPress(ctx context.Context, sessionID, elementID string, durationMs int) error {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	return app.LongPress(ctx, elementID, durationMs)
 }
 
+// PressBack executes this operation.
 func (s *Service) PressBack(ctx context.Context, sessionID string) error {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	return app.Back(ctx)
 }
 
+// HideKeyboard executes this operation.
 func (s *Service) HideKeyboard(ctx context.Context, sessionID string) error {
-	app, err := s.getAppiumClient(sessionID)
+	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	return app.HideKeyboard(ctx)
+}
+
+// ScheduleDeviceFarmRun executes this operation.
+func (s *Service) ScheduleDeviceFarmRun(ctx context.Context, req devicefarm.ScheduleRunRequest) (map[string]interface{}, error) {
+	// Guard calls when device farm integration mode is not enabled.
+	if s.dfMode != "run_api" {
+		return nil, errors.New(errors.CodeConfigConflict, "devicefarm mode is not run_api")
+	}
+	// Require a ready client so callers get deterministic setup errors.
+	if s.deviceFarm == nil {
+		return nil, errors.New(errors.CodeConfigMissing, "devicefarm client not initialized")
+	}
+
+	// Resolve stable project key first so cached ARNs can be looked up consistently.
+	projectARN := strings.TrimSpace(req.ProjectARN)
+	if projectARN == "" {
+		projectARN = strings.TrimSpace(s.dfProjectARN)
+	}
+	req.ProjectARN = projectARN
+
+	// Fill optional runtime arguments from cache to avoid repeated client prompts.
+	if strings.TrimSpace(req.AppARN) == "" {
+		req.AppARN = s.readDeviceFarmCachedARN(ctx, deviceFarmLastAppPrefix, projectARN)
+	}
+	if strings.TrimSpace(req.TestPackageARN) == "" {
+		req.TestPackageARN = s.readDeviceFarmCachedARN(ctx, deviceFarmLastTestPrefix, projectARN)
+	}
+	if strings.TrimSpace(req.DevicePoolARN) == "" {
+		req.DevicePoolARN = s.readDeviceFarmCachedARN(ctx, deviceFarmLastPoolPrefix, projectARN)
+	}
+
+	// Forward scheduling request to AWS Device Farm client.
+	result, err := s.deviceFarm.ScheduleRun(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Persist latest successful ARNs to reduce required arguments on later calls.
+	if projectARN != "" {
+		if strings.TrimSpace(req.AppARN) != "" {
+			s.writeDeviceFarmCachedARN(ctx, deviceFarmLastAppPrefix, projectARN, req.AppARN)
+		}
+		if strings.TrimSpace(req.TestPackageARN) != "" {
+			s.writeDeviceFarmCachedARN(ctx, deviceFarmLastTestPrefix, projectARN, req.TestPackageARN)
+		}
+		if pool, ok := result["devicePoolArn"].(string); ok && strings.TrimSpace(pool) != "" {
+			s.writeDeviceFarmCachedARN(ctx, deviceFarmLastPoolPrefix, projectARN, pool)
+		} else if strings.TrimSpace(req.DevicePoolARN) != "" {
+			s.writeDeviceFarmCachedARN(ctx, deviceFarmLastPoolPrefix, projectARN, req.DevicePoolARN)
+		}
+	}
+	return result, nil
+}
+
+// CreateDeviceFarmUpload executes this operation.
+func (s *Service) CreateDeviceFarmUpload(ctx context.Context, req devicefarm.CreateUploadRequest) (map[string]interface{}, error) {
+	// Guard calls when device farm integration mode is not enabled.
+	if s.dfMode != "run_api" {
+		return nil, errors.New(errors.CodeConfigConflict, "devicefarm mode is not run_api")
+	}
+	// Require a ready client so callers get deterministic setup errors.
+	if s.deviceFarm == nil {
+		return nil, errors.New(errors.CodeConfigMissing, "devicefarm client not initialized")
+	}
+	// Forward upload creation request to AWS Device Farm client.
+	result, err := s.deviceFarm.CreateUpload(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Store upload metadata so GetDeviceFarmUpload can bind SUCCEEDED uploads back to project cache.
+	if s.cache != nil {
+		uploadARN, _ := result["uploadArn"].(string)
+		projectARN, _ := result["projectArn"].(string)
+		uploadType, _ := result["type"].(string)
+		if strings.TrimSpace(uploadARN) != "" && strings.TrimSpace(projectARN) != "" && strings.TrimSpace(uploadType) != "" {
+			meta := deviceFarmUploadMeta{
+				ProjectARN: projectARN,
+				Type:       strings.ToUpper(strings.TrimSpace(uploadType)),
+			}
+			if raw, marshalErr := json.Marshal(meta); marshalErr == nil {
+				if err := s.cache.Set(ctx, deviceFarmUploadMetaPrefix+strings.TrimSpace(uploadARN), string(raw), deviceFarmUploadMetaTTL); err != nil {
+					s.logger.WarnContext(ctx, "failed to cache device farm upload metadata", "upload_arn", uploadARN, "error", err)
+				}
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetDeviceFarmUpload executes this operation.
+func (s *Service) GetDeviceFarmUpload(ctx context.Context, uploadARN string) (map[string]interface{}, error) {
+	// Guard calls when device farm integration mode is not enabled.
+	if s.dfMode != "run_api" {
+		return nil, errors.New(errors.CodeConfigConflict, "devicefarm mode is not run_api")
+	}
+	// Require a ready client so callers get deterministic setup errors.
+	if s.deviceFarm == nil {
+		return nil, errors.New(errors.CodeConfigMissing, "devicefarm client not initialized")
+	}
+	// Return the latest upload processing status from AWS.
+	result, err := s.deviceFarm.GetUpload(ctx, uploadARN)
+	if err != nil {
+		return nil, err
+	}
+
+	// Cache SUCCEEDED app/test-package upload ARN so schedule requests can omit repeated values.
+	status, _ := result["status"].(string)
+	if strings.EqualFold(strings.TrimSpace(status), "SUCCEEDED") {
+		s.cacheUploadAsLatestARN(ctx, strings.TrimSpace(uploadARN))
+	}
+	return result, nil
+}
+
+// GetDeviceFarmRun executes this operation.
+func (s *Service) GetDeviceFarmRun(ctx context.Context, runARN string) (map[string]interface{}, error) {
+	// Guard calls when device farm integration mode is not enabled.
+	if s.dfMode != "run_api" {
+		return nil, errors.New(errors.CodeConfigConflict, "devicefarm mode is not run_api")
+	}
+	// Require a ready client so callers get deterministic setup errors.
+	if s.deviceFarm == nil {
+		return nil, errors.New(errors.CodeConfigMissing, "devicefarm client not initialized")
+	}
+	// Return the latest run status from AWS.
+	return s.deviceFarm.GetRun(ctx, runARN)
+}
+
+// GetDeviceFarmRuntimeContext executes this operation.
+func (s *Service) GetDeviceFarmRuntimeContext(ctx context.Context, projectARN string) (map[string]interface{}, error) {
+	// Guard calls when device farm integration mode is not enabled.
+	if s.dfMode != "run_api" {
+		return nil, errors.New(errors.CodeConfigConflict, "devicefarm mode is not run_api")
+	}
+
+	// Resolve project ARN from argument first, then fallback to configured project.
+	resolvedProjectARN := strings.TrimSpace(projectARN)
+	if resolvedProjectARN == "" {
+		resolvedProjectARN = strings.TrimSpace(s.dfProjectARN)
+	}
+	if resolvedProjectARN == "" {
+		return nil, errors.New(errors.CodeConfigMissing, "devicefarm project arn is required")
+	}
+
+	// Return currently known runtime context to help clients decide what still needs to be provided.
+	return map[string]interface{}{
+		"projectArn":     resolvedProjectARN,
+		"appArn":         s.readDeviceFarmCachedARN(ctx, deviceFarmLastAppPrefix, resolvedProjectARN),
+		"testPackageArn": s.readDeviceFarmCachedARN(ctx, deviceFarmLastTestPrefix, resolvedProjectARN),
+		"devicePoolArn":  s.readDeviceFarmCachedARN(ctx, deviceFarmLastPoolPrefix, resolvedProjectARN),
+	}, nil
+}
+
+// AdbShell executes this operation.
+func (s *Service) AdbShell(ctx context.Context, deviceSerial string, command []string) (map[string]interface{}, error) {
+	// Ensure a non-empty command body before attempting adb invocation.
+	if len(command) == 0 {
+		return nil, errors.New(errors.CodePlanInvalid, "adb command must not be empty")
+	}
+
+	// Restrict shell entry points to a conservative command whitelist.
+	allowed := map[string]bool{
+		"getprop":  true,
+		"dumpsys":  true,
+		"pm":       true,
+		"settings": true,
+		"am":       true,
+		"input":    true,
+		"logcat":   true,
+		"wm":       true,
+		"svc":      true,
+		"ime":      true,
+		"monkey":   true,
+	}
+	// Reject non-whitelisted commands to reduce risk from arbitrary shell execution.
+	if !allowed[command[0]] {
+		return nil, errors.New(errors.CodePermissionDenied, "adb command is not in allowed whitelist")
+	}
+
+	// Build adb argv with optional target serial selection.
+	args := []string{}
+	if strings.TrimSpace(deviceSerial) != "" {
+		args = append(args, "-s", strings.TrimSpace(deviceSerial))
+	}
+	// Route all requests through adb shell with the provided command tokens.
+	args = append(args, "shell")
+	args = append(args, command...)
+
+	// Execute the command and collect merged stdout/stderr for diagnostics.
+	out, err := exec.CommandContext(ctx, "adb", args...).CombinedOutput()
+	if err != nil {
+		return nil, errors.Wrap(errors.CodeInternal, "adb shell command failed: "+strings.TrimSpace(string(out)), err)
+	}
+
+	// Return raw command output so callers can parse device response text.
+	return map[string]interface{}{
+		"success": true,
+		"output":  string(out),
+	}, nil
+}
+
+func deviceFarmProjectCacheSuffix(projectARN string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strings.TrimSpace(projectARN)))
+}
+
+func (s *Service) deviceFarmCacheKey(prefix, projectARN string) string {
+	return prefix + deviceFarmProjectCacheSuffix(projectARN)
+}
+
+func (s *Service) readDeviceFarmCachedARN(ctx context.Context, prefix, projectARN string) string {
+	if s.cache == nil || strings.TrimSpace(projectARN) == "" {
+		return ""
+	}
+	val, err := s.cache.Get(ctx, s.deviceFarmCacheKey(prefix, projectARN))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(val)
+}
+
+func (s *Service) writeDeviceFarmCachedARN(ctx context.Context, prefix, projectARN, arn string) {
+	if s.cache == nil || strings.TrimSpace(projectARN) == "" || strings.TrimSpace(arn) == "" {
+		return
+	}
+	if err := s.cache.Set(ctx, s.deviceFarmCacheKey(prefix, projectARN), strings.TrimSpace(arn), deviceFarmCacheTTL); err != nil {
+		s.logger.WarnContext(ctx, "failed to write device farm arn cache", "prefix", prefix, "project_arn", projectARN, "error", err)
+	}
+}
+
+func (s *Service) cacheUploadAsLatestARN(ctx context.Context, uploadARN string) {
+	if s.cache == nil || strings.TrimSpace(uploadARN) == "" {
+		return
+	}
+
+	raw, err := s.cache.Get(ctx, deviceFarmUploadMetaPrefix+uploadARN)
+	if err != nil || strings.TrimSpace(raw) == "" {
+		return
+	}
+
+	var meta deviceFarmUploadMeta
+	if err := json.Unmarshal([]byte(raw), &meta); err != nil {
+		return
+	}
+
+	switch strings.ToUpper(strings.TrimSpace(meta.Type)) {
+	case "ANDROID_APP", "IOS_APP":
+		s.writeDeviceFarmCachedARN(ctx, deviceFarmLastAppPrefix, meta.ProjectARN, uploadARN)
+	case "APPIUM_NODE_TEST_PACKAGE", "APPIUM_JAVA_TEST_PACKAGE", "APPIUM_PYTHON_TEST_PACKAGE":
+		s.writeDeviceFarmCachedARN(ctx, deviceFarmLastTestPrefix, meta.ProjectARN, uploadARN)
+	}
 }

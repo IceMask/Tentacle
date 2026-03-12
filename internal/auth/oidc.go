@@ -14,6 +14,7 @@ type OIDCValidator struct {
 	verifier *oidc.IDTokenVerifier
 }
 
+// NewOIDCValidator executes this operation.
 func NewOIDCValidator(ctx context.Context, issuerURL string, audience string) (*OIDCValidator, error) {
 	provider, err := oidc.NewProvider(ctx, issuerURL)
 	if err != nil {
@@ -31,6 +32,7 @@ func NewOIDCValidator(ctx context.Context, issuerURL string, audience string) (*
 	}, nil
 }
 
+// Validate executes this operation.
 func (v *OIDCValidator) Validate(ctx context.Context, rawToken string) (*Subject, error) {
 	// Remove Bearer prefix if present
 	if strings.HasPrefix(rawToken, "Bearer ") {

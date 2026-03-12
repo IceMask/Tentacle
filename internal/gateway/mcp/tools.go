@@ -135,6 +135,7 @@ type MCPError struct {
 	Data    interface{} `json:"data,omitempty"`
 }
 
+// Error executes this operation.
 func (e *MCPError) Error() string {
 	return e.Message
 }

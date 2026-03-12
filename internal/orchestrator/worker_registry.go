@@ -15,14 +15,14 @@ import (
 )
 
 const (
-	workerHashKey       = "workers:registry"
-	workerHeartbeatKey  = "workers:heartbeat:%s"
-	heartbeatTTL        = 30 * time.Second
-	heartbeatInterval   = 10 * time.Second
-	heartbeatMissMax    = 3
-	degradeAfterMisses  = 2
-	removeAfterSeconds  = 60
-	monitorInterval     = 5 * time.Second
+	workerHashKey      = "workers:registry"
+	workerHeartbeatKey = "workers:heartbeat:%s"
+	heartbeatTTL       = 30 * time.Second
+	heartbeatInterval  = 10 * time.Second
+	heartbeatMissMax   = 3
+	degradeAfterMisses = 2
+	removeAfterSeconds = 60
+	monitorInterval    = 5 * time.Second
 )
 
 type WorkerRegistry struct {
@@ -33,16 +33,17 @@ type WorkerRegistry struct {
 }
 
 type WorkerNode struct {
-	ID           string            `json:"id"`
-	Address      string            `json:"address"`
-	Tags         map[string]string `json:"tags"`
-	Capacity     int               `json:"capacity"`
-	ActiveLoad   int               `json:"active_load"`
-	Status       string            `json:"status"` // healthy|degraded|offline
-	LastSeen     time.Time         `json:"last_seen"`
-	MissedBeats  int               `json:"missed_beats"`
+	ID          string            `json:"id"`
+	Address     string            `json:"address"`
+	Tags        map[string]string `json:"tags"`
+	Capacity    int               `json:"capacity"`
+	ActiveLoad  int               `json:"active_load"`
+	Status      string            `json:"status"` // healthy|degraded|offline
+	LastSeen    time.Time         `json:"last_seen"`
+	MissedBeats int               `json:"missed_beats"`
 }
 
+// NewWorkerRegistry executes this operation.
 func NewWorkerRegistry(cache *redis.Cache) *WorkerRegistry {
 	return &WorkerRegistry{
 		cache:  cache,

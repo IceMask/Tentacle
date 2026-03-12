@@ -1,3 +1,6 @@
+//go:build tools
+// +build tools
+
 package main
 
 import (
@@ -8,6 +11,7 @@ import (
 	"strings"
 )
 
+// main is the entry point for this binary.
 func main() {
 	registry := mcp.NewToolRegistry()
 	tools := registry.List()
@@ -76,6 +80,7 @@ func main() {
 	fmt.Println("✓ MCP protocol 2024-11-05 compliant")
 }
 
+// printCategory executes this operation.
 func printCategory(title string, tools []mcp.Tool) {
 	if len(tools) == 0 {
 		return
@@ -152,6 +157,7 @@ func printCategory(title string, tools []mcp.Tool) {
 	}
 }
 
+// wrapText executes this operation.
 func wrapText(text string, width int) string {
 	words := strings.Fields(text)
 	if len(words) == 0 {
@@ -183,6 +189,7 @@ func wrapText(text string, width int) string {
 	return strings.Join(lines, "\n")
 }
 
+// contains executes this operation.
 func contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
@@ -192,6 +199,7 @@ func contains(slice []string, item string) bool {
 	return false
 }
 
+// generateExample executes this operation.
 func generateExample(tool mcp.Tool) map[string]interface{} {
 	example := map[string]interface{}{}
 

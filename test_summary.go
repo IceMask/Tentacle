@@ -1,3 +1,6 @@
+//go:build tools
+// +build tools
+
 package main
 
 import (
@@ -7,6 +10,7 @@ import (
 	"strings"
 )
 
+// main is the entry point for this binary.
 func main() {
 	registry := mcp.NewToolRegistry()
 	tools := registry.List()
@@ -23,11 +27,11 @@ func main() {
 
 	// Group by category
 	categories := map[string][]string{
-		"📱 Session":    {},
-		"⚡ Execution":  {},
-		"🔍 Element":    {},
-		"👆 Gesture":    {},
-		"🛠️  Utility":    {},
+		"📱 Session":   {},
+		"⚡ Execution": {},
+		"🔍 Element":   {},
+		"👆 Gesture":   {},
+		"🛠️  Utility": {},
 	}
 
 	for _, tool := range tools {
@@ -39,7 +43,7 @@ func main() {
 		case strings.Contains(tool.Name, "Element"):
 			categories["🔍 Element"] = append(categories["🔍 Element"], tool.Name)
 		case tool.Name == "tap" || tool.Name == "swipe" || tool.Name == "longPress" ||
-			 tool.Name == "pressBack" || tool.Name == "hideKeyboard":
+			tool.Name == "pressBack" || tool.Name == "hideKeyboard":
 			categories["👆 Gesture"] = append(categories["👆 Gesture"], tool.Name)
 		default:
 			categories["🛠️  Utility"] = append(categories["🛠️  Utility"], tool.Name)

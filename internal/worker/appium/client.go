@@ -35,16 +35,17 @@ type Client struct {
 	maxRetryDelay       time.Duration
 }
 
+// NewClient executes this operation.
 func NewClient(url string) *Client {
 	return &Client{
 		baseURL: url,
 		httpClient: &http.Client{
 			Timeout: 60 * time.Second,
 			Transport: &http.Transport{
-				MaxIdleConns:       200,
+				MaxIdleConns:        200,
 				MaxIdleConnsPerHost: 200,
-				IdleConnTimeout:    30 * time.Second,
-				DisableCompression: true,
+				IdleConnTimeout:     30 * time.Second,
+				DisableCompression:  true,
 			},
 		},
 		breakerThreshold: 3,
@@ -55,6 +56,7 @@ func NewClient(url string) *Client {
 	}
 }
 
+// StartSession executes this operation.
 func (c *Client) StartSession(ctx context.Context, caps map[string]interface{}) (string, error) {
 	payload := map[string]interface{}{
 		"capabilities": map[string]interface{}{
@@ -84,6 +86,7 @@ func (c *Client) StartSession(ctx context.Context, caps map[string]interface{}) 
 	return c.sessionID, nil
 }
 
+// DeleteSession executes this operation.
 func (c *Client) DeleteSession(ctx context.Context) error {
 	if c.sessionID == "" {
 		return nil
@@ -95,6 +98,13 @@ func (c *Client) DeleteSession(ctx context.Context) error {
 	return nil
 }
 
+// AttachSession binds the client to an existing Appium session id.
+// This is used by orchestrator recovery paths after process restart.
+func (c *Client) AttachSession(sessionID string) {
+	c.sessionID = sessionID
+}
+
+// FindElement executes this operation.
 func (c *Client) FindElement(ctx context.Context, strategy, selector string) (string, error) {
 	if err := c.ensureSession(); err != nil {
 		return "", err
@@ -119,6 +129,7 @@ func (c *Client) FindElement(ctx context.Context, strategy, selector string) (st
 	return "", errors.New(errors.CodeAppElemNotFound, "element id not found in response")
 }
 
+// Click executes this operation.
 func (c *Client) Click(ctx context.Context, elementID string) error {
 	if err := c.ensureSession(); err != nil {
 		return err
@@ -126,6 +137,7 @@ func (c *Client) Click(ctx context.Context, elementID string) error {
 	return c.do(ctx, "POST", "/session/"+c.sessionID+"/element/"+elementID+"/click", map[string]interface{}{}, nil)
 }
 
+// SendKeys executes this operation.
 func (c *Client) SendKeys(ctx context.Context, elementID, text string) error {
 	if err := c.ensureSession(); err != nil {
 		return err
@@ -137,6 +149,7 @@ func (c *Client) SendKeys(ctx context.Context, elementID, text string) error {
 	return c.do(ctx, "POST", "/session/"+c.sessionID+"/element/"+elementID+"/value", payload, nil)
 }
 
+// Screenshot executes this operation.
 func (c *Client) Screenshot(ctx context.Context) ([]byte, error) {
 	if err := c.ensureSession(); err != nil {
 		return nil, err
@@ -154,6 +167,7 @@ func (c *Client) Screenshot(ctx context.Context) ([]byte, error) {
 	return data, nil
 }
 
+// PageSource executes this operation.
 func (c *Client) PageSource(ctx context.Context) (string, error) {
 	if err := c.ensureSession(); err != nil {
 		return "", err
@@ -353,6 +367,7 @@ func (c *Client) HideKeyboard(ctx context.Context) error {
 	return c.do(ctx, "POST", "/session/"+c.sessionID+"/appium/device/hide_keyboard", payload, nil)
 }
 
+// do executes this operation.
 func (c *Client) do(ctx context.Context, method, path string, body interface{}, result interface{}) error {
 	if err := c.checkBreaker(); err != nil {
 		return err
@@ -439,6 +454,7 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 	return lastErr
 }
 
+// ensureSession executes this operation.
 func (c *Client) ensureSession() error {
 	if c.sessionID == "" {
 		return errors.New(errors.CodeSessionNotFound, "appium session not started")
@@ -446,6 +462,7 @@ func (c *Client) ensureSession() error {
 	return nil
 }
 
+// mapTransportError executes this operation.
 func (c *Client) mapTransportError(err error) error {
 	if stdErrors.Is(err, context.DeadlineExceeded) {
 		return errors.Wrap(errors.CodeAppTimeout, "appium request timeout", err)
@@ -456,6 +473,7 @@ func (c *Client) mapTransportError(err error) error {
 	return errors.Wrap(errors.CodeStoreConn, "appium request failed", err)
 }
 
+// mapAppiumError executes this operation.
 func (c *Client) mapAppiumError(status int, body []byte) error {
 	msg := strings.TrimSpace(string(body))
 	var appiumResp struct {
@@ -488,6 +506,7 @@ func (c *Client) mapAppiumError(status int, body []byte) error {
 	return errors.New(errors.CodeInternal, fmt.Sprintf("appium error %d: %s", status, msg))
 }
 
+// shouldRetry executes this operation.
 func (c *Client) shouldRetry(resp *http.Response, err error, attempt int) bool {
 	if attempt >= c.maxRetries {
 		return false
@@ -513,6 +532,7 @@ func (c *Client) shouldRetry(resp *http.Response, err error, attempt int) bool {
 	return false
 }
 
+// backoff executes this operation.
 func (c *Client) backoff(attempt int) {
 	delay := c.minRetryDelay
 	for i := 0; i < attempt; i++ {
@@ -525,6 +545,7 @@ func (c *Client) backoff(attempt int) {
 	time.Sleep(delay)
 }
 
+// checkBreaker executes this operation.
 func (c *Client) checkBreaker() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -541,6 +562,7 @@ func (c *Client) checkBreaker() error {
 	return nil
 }
 
+// noteFailure executes this operation.
 func (c *Client) noteFailure() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -551,6 +573,7 @@ func (c *Client) noteFailure() {
 	}
 }
 
+// noteSuccess executes this operation.
 func (c *Client) noteSuccess() {
 	c.mu.Lock()
 	defer c.mu.Unlock()

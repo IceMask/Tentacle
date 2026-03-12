@@ -43,6 +43,7 @@ type Client struct {
 	channelID string
 }
 
+// NewHub executes this operation.
 func NewHub(cache *redis.Cache) *Hub {
 	return &Hub{
 		cache:         cache,
@@ -55,6 +56,7 @@ func NewHub(cache *redis.Cache) *Hub {
 	}
 }
 
+// Run executes this operation.
 func (h *Hub) Run(ctx context.Context) {
 	for {
 		select {
@@ -70,11 +72,13 @@ func (h *Hub) Run(ctx context.Context) {
 	}
 }
 
+// Stop executes this operation.
 func (h *Hub) Stop() {
 	close(h.stopCh)
 	h.logger.Info("websocket hub stopped")
 }
 
+// registerClient executes this operation.
 func (h *Hub) registerClient(ctx context.Context, client *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -107,6 +111,7 @@ func (h *Hub) registerClient(ctx context.Context, client *Client) {
 		"total_clients", len(sub.clients))
 }
 
+// unregisterClient executes this operation.
 func (h *Hub) unregisterClient(client *Client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

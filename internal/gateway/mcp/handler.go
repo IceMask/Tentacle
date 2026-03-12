@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 
+	"mcp_for_appium/internal/devicefarm"
 	"mcp_for_appium/internal/orchestrator"
 )
 
@@ -151,6 +152,18 @@ func (h *MCPHandler) executeTool(ctx context.Context, toolName string, arguments
 		return h.handlePressBack(ctx, arguments)
 	case "hideKeyboard":
 		return h.handleHideKeyboard(ctx, arguments)
+	case "scheduleDeviceFarmRun":
+		return h.handleScheduleDeviceFarmRun(ctx, arguments)
+	case "createDeviceFarmUpload":
+		return h.handleCreateDeviceFarmUpload(ctx, arguments)
+	case "getDeviceFarmUpload":
+		return h.handleGetDeviceFarmUpload(ctx, arguments)
+	case "getDeviceFarmRuntimeContext":
+		return h.handleGetDeviceFarmRuntimeContext(ctx, arguments)
+	case "getDeviceFarmRun":
+		return h.handleGetDeviceFarmRun(ctx, arguments)
+	case "adbShell":
+		return h.handleAdbShell(ctx, arguments)
 	default:
 		return nil, &MCPError{
 			Code:    -32601,
@@ -159,13 +172,133 @@ func (h *MCPHandler) executeTool(ctx context.Context, toolName string, arguments
 	}
 }
 
+// handleScheduleDeviceFarmRun executes this operation.
+func (h *MCPHandler) handleScheduleDeviceFarmRun(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		RunName        string `json:"runName"`
+		ProjectARN     string `json:"projectArn"`
+		AppARN         string `json:"appArn"`
+		DevicePoolARN  string `json:"devicePoolArn"`
+		TestType       string `json:"testType"`
+		TestPackageARN string `json:"testPackageArn"`
+		TestSpecARN    string `json:"testSpecArn"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+
+	result, err := h.orch.ScheduleDeviceFarmRun(ctx, devicefarm.ScheduleRunRequest{
+		RunName:        args.RunName,
+		ProjectARN:     args.ProjectARN,
+		AppARN:         args.AppARN,
+		DevicePoolARN:  args.DevicePoolARN,
+		TestType:       args.TestType,
+		TestPackageARN: args.TestPackageARN,
+		TestSpecARN:    args.TestSpecARN,
+	})
+	if err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to schedule device farm run", Data: err.Error()}
+	}
+	return result, nil
+}
+
+// handleCreateDeviceFarmUpload executes this operation.
+func (h *MCPHandler) handleCreateDeviceFarmUpload(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		ProjectARN  string `json:"projectArn"`
+		Name        string `json:"name"`
+		Type        string `json:"type"`
+		ContentType string `json:"contentType"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+
+	result, err := h.orch.CreateDeviceFarmUpload(ctx, devicefarm.CreateUploadRequest{
+		ProjectARN:  args.ProjectARN,
+		Name:        args.Name,
+		Type:        args.Type,
+		ContentType: args.ContentType,
+	})
+	if err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to create device farm upload", Data: err.Error()}
+	}
+	return result, nil
+}
+
+// handleGetDeviceFarmUpload executes this operation.
+func (h *MCPHandler) handleGetDeviceFarmUpload(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		UploadARN string `json:"uploadArn"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+
+	result, err := h.orch.GetDeviceFarmUpload(ctx, args.UploadARN)
+	if err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to get device farm upload", Data: err.Error()}
+	}
+	return result, nil
+}
+
+// handleGetDeviceFarmRuntimeContext executes this operation.
+func (h *MCPHandler) handleGetDeviceFarmRuntimeContext(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		ProjectARN string `json:"projectArn"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+
+	result, err := h.orch.GetDeviceFarmRuntimeContext(ctx, args.ProjectARN)
+	if err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to get device farm runtime context", Data: err.Error()}
+	}
+	return result, nil
+}
+
+// handleGetDeviceFarmRun executes this operation.
+func (h *MCPHandler) handleGetDeviceFarmRun(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		RunARN string `json:"runArn"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+
+	result, err := h.orch.GetDeviceFarmRun(ctx, args.RunARN)
+	if err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to get device farm run", Data: err.Error()}
+	}
+	return result, nil
+}
+
+// handleAdbShell executes this operation.
+func (h *MCPHandler) handleAdbShell(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	var args struct {
+		DeviceSerial string   `json:"deviceSerial"`
+		Command      []string `json:"command"`
+	}
+	if err := json.Unmarshal(arguments, &args); err != nil {
+		return nil, &MCPError{Code: -32602, Message: "Invalid arguments", Data: err.Error()}
+	}
+
+	result, err := h.orch.AdbShell(ctx, args.DeviceSerial, args.Command)
+	if err != nil {
+		return nil, &MCPError{Code: -32000, Message: "Failed to execute adb shell command", Data: err.Error()}
+	}
+	return result, nil
+}
+
 // Business method handlers
 
+// handleStartSession executes this operation.
 func (h *MCPHandler) handleStartSession(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
-		ProjectID  string                 `json:"projectId"`
-		ActorID    string                 `json:"actorId"`
-		Labels     map[string]string      `json:"labels"`
+		ProjectID   string                 `json:"projectId"`
+		ActorID     string                 `json:"actorId"`
+		Labels      map[string]string      `json:"labels"`
 		W3cCapsJson map[string]interface{} `json:"w3cCapsJson"`
 	}
 
@@ -194,6 +327,7 @@ func (h *MCPHandler) handleStartSession(ctx context.Context, arguments json.RawM
 	}, nil
 }
 
+// handleExecutePlan executes this operation.
 func (h *MCPHandler) handleExecutePlan(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string          `json:"sessionId"`
@@ -225,6 +359,7 @@ func (h *MCPHandler) handleExecutePlan(ctx context.Context, arguments json.RawMe
 	}, nil
 }
 
+// handleEndSession executes this operation.
 func (h *MCPHandler) handleEndSession(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string `json:"sessionId"`
@@ -251,6 +386,7 @@ func (h *MCPHandler) handleEndSession(ctx context.Context, arguments json.RawMes
 	}, nil
 }
 
+// handleGetSemanticSnapshot executes this operation.
 func (h *MCPHandler) handleGetSemanticSnapshot(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string `json:"sessionId"`
@@ -276,6 +412,7 @@ func (h *MCPHandler) handleGetSemanticSnapshot(ctx context.Context, arguments js
 	return result, nil
 }
 
+// handleTakeScreenshot executes this operation.
 func (h *MCPHandler) handleTakeScreenshot(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID    string `json:"sessionId"`
@@ -302,6 +439,7 @@ func (h *MCPHandler) handleTakeScreenshot(ctx context.Context, arguments json.Ra
 	return result, nil
 }
 
+// handleCancelPlan executes this operation.
 func (h *MCPHandler) handleCancelPlan(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		TraceID string `json:"traceId"`
@@ -327,6 +465,7 @@ func (h *MCPHandler) handleCancelPlan(ctx context.Context, arguments json.RawMes
 	}, nil
 }
 
+// handleGetTrace executes this operation.
 func (h *MCPHandler) handleGetTrace(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		TraceID string `json:"traceId"`
@@ -354,6 +493,7 @@ func (h *MCPHandler) handleGetTrace(ctx context.Context, arguments json.RawMessa
 	}, nil
 }
 
+// handleHealthCheck executes this operation.
 func (h *MCPHandler) handleHealthCheck(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	return h.orch.HealthCheck(ctx), nil
 }
@@ -487,6 +627,7 @@ func formatToolResult(toolName string, result interface{}) string {
 
 // Interactive element operation handlers
 
+// handleFindElement executes this operation.
 func (h *MCPHandler) handleFindElement(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string `json:"sessionId"`
@@ -503,6 +644,7 @@ func (h *MCPHandler) handleFindElement(ctx context.Context, arguments json.RawMe
 	return map[string]interface{}{"elementId": elementID}, nil
 }
 
+// handleClickElement executes this operation.
 func (h *MCPHandler) handleClickElement(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string `json:"sessionId"`
@@ -517,6 +659,7 @@ func (h *MCPHandler) handleClickElement(ctx context.Context, arguments json.RawM
 	return map[string]interface{}{"success": true}, nil
 }
 
+// handleSendKeysToElement executes this operation.
 func (h *MCPHandler) handleSendKeysToElement(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string `json:"sessionId"`
@@ -532,6 +675,7 @@ func (h *MCPHandler) handleSendKeysToElement(ctx context.Context, arguments json
 	return map[string]interface{}{"success": true}, nil
 }
 
+// handleClearElement executes this operation.
 func (h *MCPHandler) handleClearElement(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string `json:"sessionId"`
@@ -546,6 +690,7 @@ func (h *MCPHandler) handleClearElement(ctx context.Context, arguments json.RawM
 	return map[string]interface{}{"success": true}, nil
 }
 
+// handleGetElementText executes this operation.
 func (h *MCPHandler) handleGetElementText(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string `json:"sessionId"`
@@ -561,6 +706,7 @@ func (h *MCPHandler) handleGetElementText(ctx context.Context, arguments json.Ra
 	return map[string]interface{}{"text": text}, nil
 }
 
+// handleGetElementAttribute executes this operation.
 func (h *MCPHandler) handleGetElementAttribute(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string `json:"sessionId"`
@@ -577,6 +723,7 @@ func (h *MCPHandler) handleGetElementAttribute(ctx context.Context, arguments js
 	return map[string]interface{}{"attribute": args.Attribute, "value": value}, nil
 }
 
+// handleIsElementDisplayed executes this operation.
 func (h *MCPHandler) handleIsElementDisplayed(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string `json:"sessionId"`
@@ -592,6 +739,7 @@ func (h *MCPHandler) handleIsElementDisplayed(ctx context.Context, arguments jso
 	return map[string]interface{}{"displayed": displayed}, nil
 }
 
+// handleTap executes this operation.
 func (h *MCPHandler) handleTap(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string `json:"sessionId"`
@@ -607,6 +755,7 @@ func (h *MCPHandler) handleTap(ctx context.Context, arguments json.RawMessage) (
 	return map[string]interface{}{"success": true}, nil
 }
 
+// handleSwipe executes this operation.
 func (h *MCPHandler) handleSwipe(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID  string `json:"sessionId"`
@@ -628,6 +777,7 @@ func (h *MCPHandler) handleSwipe(ctx context.Context, arguments json.RawMessage)
 	return map[string]interface{}{"success": true}, nil
 }
 
+// handleLongPress executes this operation.
 func (h *MCPHandler) handleLongPress(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID  string `json:"sessionId"`
@@ -646,6 +796,7 @@ func (h *MCPHandler) handleLongPress(ctx context.Context, arguments json.RawMess
 	return map[string]interface{}{"success": true}, nil
 }
 
+// handlePressBack executes this operation.
 func (h *MCPHandler) handlePressBack(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string `json:"sessionId"`
@@ -659,6 +810,7 @@ func (h *MCPHandler) handlePressBack(ctx context.Context, arguments json.RawMess
 	return map[string]interface{}{"success": true}, nil
 }
 
+// handleHideKeyboard executes this operation.
 func (h *MCPHandler) handleHideKeyboard(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
 		SessionID string `json:"sessionId"`

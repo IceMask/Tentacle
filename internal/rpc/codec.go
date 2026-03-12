@@ -6,6 +6,7 @@ import (
 	"google.golang.org/grpc/encoding"
 )
 
+// init executes this operation.
 func init() {
 	encoding.RegisterCodec(jsonCodec{})
 }
@@ -15,14 +16,17 @@ func init() {
 // grpc.CallContentSubtype("json") and servers will pick it up automatically.
 type jsonCodec struct{}
 
+// Marshal executes this operation.
 func (jsonCodec) Marshal(v interface{}) ([]byte, error) {
 	return json.Marshal(v)
 }
 
+// Unmarshal executes this operation.
 func (jsonCodec) Unmarshal(data []byte, v interface{}) error {
 	return json.Unmarshal(data, v)
 }
 
+// Name executes this operation.
 func (jsonCodec) Name() string {
 	return "json"
 }

@@ -12,13 +12,13 @@ import (
 )
 
 type Executor struct {
-	appium       AppiumClient
-	stepTimeout  time.Duration
-	autoWaitMax  time.Duration
-	retryMax     int
+	appium         AppiumClient
+	stepTimeout    time.Duration
+	autoWaitMax    time.Duration
+	retryMax       int
 	retryMinJitter time.Duration
 	retryMaxJitter time.Duration
-	onEvent      func(StepEvent)
+	onEvent        func(StepEvent)
 }
 
 type AppiumClient interface {
@@ -29,6 +29,7 @@ type AppiumClient interface {
 	PageSource(ctx context.Context) (string, error)
 }
 
+// NewExecutor executes this operation.
 func NewExecutor(appium AppiumClient, stepTimeout time.Duration, autoWaitMax time.Duration, onEvent func(StepEvent)) *Executor {
 	if stepTimeout <= 0 {
 		stepTimeout = 30 * time.Second
@@ -37,13 +38,13 @@ func NewExecutor(appium AppiumClient, stepTimeout time.Duration, autoWaitMax tim
 		autoWaitMax = 5 * time.Second
 	}
 	return &Executor{
-		appium:       appium,
-		stepTimeout:  stepTimeout,
-		autoWaitMax:  autoWaitMax,
-		retryMax:     3,
+		appium:         appium,
+		stepTimeout:    stepTimeout,
+		autoWaitMax:    autoWaitMax,
+		retryMax:       3,
 		retryMinJitter: 200 * time.Millisecond,
 		retryMaxJitter: 1200 * time.Millisecond,
-		onEvent:      onEvent,
+		onEvent:        onEvent,
 	}
 }
 
@@ -60,14 +61,15 @@ type StepMetrics struct {
 }
 
 type StepEvent struct {
-	StepIndex    int          `json:"stepIndex"`
-	Status       string       `json:"status"`
-	Message      string       `json:"message"`
-	Metrics      StepMetrics  `json:"metrics"`
-	ArtifactRefs []string     `json:"artifactRefs,omitempty"`
-	Phase        string       `json:"phase,omitempty"`
+	StepIndex    int         `json:"stepIndex"`
+	Status       string      `json:"status"`
+	Message      string      `json:"message"`
+	Metrics      StepMetrics `json:"metrics"`
+	ArtifactRefs []string    `json:"artifactRefs,omitempty"`
+	Phase        string      `json:"phase,omitempty"`
 }
 
+// Execute executes this operation.
 func (e *Executor) Execute(ctx context.Context, plan []PlanStep) error {
 	for i, step := range plan {
 		start := time.Now()
@@ -125,6 +127,7 @@ func (e *Executor) Execute(ctx context.Context, plan []PlanStep) error {
 	return nil
 }
 
+// executeClick executes this operation.
 func (e *Executor) executeClick(ctx context.Context, stepIndex int, step PlanStep, start time.Time) error {
 	var lastErr error
 	for attempt := 1; attempt <= e.retryMax; attempt++ {
@@ -156,6 +159,7 @@ func (e *Executor) executeClick(ctx context.Context, stepIndex int, step PlanSte
 	return lastErr
 }
 
+// executeSendKeys executes this operation.
 func (e *Executor) executeSendKeys(ctx context.Context, stepIndex int, step PlanStep, start time.Time) error {
 	var params struct {
 		Text string `json:"text"`
@@ -194,6 +198,7 @@ func (e *Executor) executeSendKeys(ctx context.Context, stepIndex int, step Plan
 	return lastErr
 }
 
+// findWithAutoWait executes this operation.
 func (e *Executor) findWithAutoWait(ctx context.Context, selector string) (string, int, int, error) {
 	if selector == "" {
 		return "", 0, 0, errors.New(errors.CodePlanInvalid, "selector is required")
@@ -226,6 +231,7 @@ func (e *Executor) findWithAutoWait(ctx context.Context, selector string) (strin
 	}
 }
 
+// selectorStrategies executes this operation.
 func selectorStrategies(selector string) []string {
 	lower := strings.ToLower(selector)
 	switch {
@@ -242,6 +248,7 @@ func selectorStrategies(selector string) []string {
 	}
 }
 
+// selectorValue executes this operation.
 func selectorValue(selector string) string {
 	lower := strings.ToLower(selector)
 	switch {
@@ -258,12 +265,14 @@ func selectorValue(selector string) string {
 	}
 }
 
+// emit executes this operation.
 func (e *Executor) emit(ev StepEvent) {
 	if e.onEvent != nil {
 		e.onEvent(ev)
 	}
 }
 
+// emitSuccess executes this operation.
 func (e *Executor) emitSuccess(stepIndex int, msg string, start time.Time, metrics StepMetrics) {
 	if metrics.ElapsedMs == 0 {
 		metrics.ElapsedMs = time.Since(start).Milliseconds()
@@ -276,6 +285,7 @@ func (e *Executor) emitSuccess(stepIndex int, msg string, start time.Time, metri
 	})
 }
 
+// emitFailure executes this operation.
 func (e *Executor) emitFailure(ctx context.Context, stepIndex int, err error, start time.Time) {
 	artifactRefs := []string{}
 	if e.appium != nil {
@@ -295,10 +305,12 @@ func (e *Executor) emitFailure(ctx context.Context, stepIndex int, err error, st
 	})
 }
 
+// isTransient executes this operation.
 func (e *Executor) isTransient(err error) bool {
 	return errors.IsCode(err, errors.CodeAppTimeout) || errors.IsCode(err, errors.CodeStoreConn)
 }
 
+// backoff executes this operation.
 func (e *Executor) backoff(attempt int) {
 	if attempt <= 0 {
 		return

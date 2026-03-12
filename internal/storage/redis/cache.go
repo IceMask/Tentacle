@@ -14,6 +14,7 @@ type Cache struct {
 	client *redis.Client
 }
 
+// NewCache executes this operation.
 func NewCache(cfg config.RedisConfig) (*Cache, error) {
 	client := redis.NewClient(&redis.Options{
 		Addr:     cfg.Addr,
@@ -31,6 +32,7 @@ func NewCache(cfg config.RedisConfig) (*Cache, error) {
 	return &Cache{client: client}, nil
 }
 
+// Close executes this operation.
 func (c *Cache) Close() error {
 	return c.client.Close()
 }
@@ -54,6 +56,7 @@ func (c *Cache) CheckAndSet(ctx context.Context, key string, value string, ttl t
 	return false, val, nil
 }
 
+// AcquireConcurrencySlot executes this operation.
 func (c *Cache) AcquireConcurrencySlot(ctx context.Context, key string, limit int) (bool, error) {
 	// Simple implementation: INCR and check against limit.
 	// Need to handle TTL for slots to avoid leaks if worker crashes?
@@ -84,6 +87,7 @@ func (c *Cache) AcquireConcurrencySlot(ctx context.Context, key string, limit in
 	return res == 1, nil
 }
 
+// ReleaseConcurrencySlot executes this operation.
 func (c *Cache) ReleaseConcurrencySlot(ctx context.Context, key string) error {
 	// DECR, ensure not below 0
 	script := `
@@ -226,6 +230,11 @@ func (c *Cache) Set(ctx context.Context, key string, value interface{}, ttl time
 // SetNX sets key if not exists
 func (c *Cache) SetNX(ctx context.Context, key string, value interface{}, ttl time.Duration) (bool, error) {
 	return c.client.SetNX(ctx, key, value, ttl).Result()
+}
+
+// Del deletes one or more keys.
+func (c *Cache) Del(ctx context.Context, keys ...string) error {
+	return c.client.Del(ctx, keys...).Err()
 }
 
 // Incr increments a key and sets TTL on first creation; returns the new value.

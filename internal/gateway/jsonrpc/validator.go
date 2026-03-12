@@ -21,12 +21,14 @@ type Validator struct {
 	loadErr error
 }
 
+// NewValidator executes this operation.
 func NewValidator() *Validator {
 	return &Validator{
 		schemas: make(map[string]*gojsonschema.Schema),
 	}
 }
 
+// Validate executes this operation.
 func (v *Validator) Validate(method string, params json.RawMessage) error {
 	if v == nil {
 		return nil
@@ -56,6 +58,7 @@ func (v *Validator) Validate(method string, params json.RawMessage) error {
 	return nil
 }
 
+// loadSchemas executes this operation.
 func (v *Validator) loadSchemas() {
 	entries, err := schemasFS.ReadDir("schemas")
 	if err != nil {

@@ -66,6 +66,7 @@ func (s *GRPCServer) CancelPlan(_ context.Context, req *rpc.CancelPlanRequest) (
 	return &rpc.CancelPlanResponse{Status: "cancelled"}, nil
 }
 
+// runPlan executes this operation.
 func (s *GRPCServer) runPlan(traceID string, _ string, planRaw json.RawMessage) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.planMu.Lock()

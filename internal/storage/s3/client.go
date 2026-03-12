@@ -1,8 +1,8 @@
 package s3
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"time"
 
 	"mcp_for_appium/internal/config"
@@ -19,6 +19,7 @@ type Client struct {
 	bucket   string
 }
 
+// NewClient executes this operation.
 func NewClient(ctx context.Context, cfg config.S3Config) (*Client, error) {
 	opts := []func(*awsconfig.LoadOptions) error{
 		awsconfig.WithRegion(cfg.Region),
@@ -62,6 +63,7 @@ func NewClient(ctx context.Context, cfg config.S3Config) (*Client, error) {
 	}, nil
 }
 
+// PresignPut executes this operation.
 func (c *Client) PresignPut(ctx context.Context, key string, contentType string, lifetime time.Duration) (string, error) {
 	req, err := c.presign.PresignPutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(c.bucket),
@@ -74,6 +76,7 @@ func (c *Client) PresignPut(ctx context.Context, key string, contentType string,
 	return req.URL, nil
 }
 
+// PresignGet executes this operation.
 func (c *Client) PresignGet(ctx context.Context, key string, lifetime time.Duration) (string, error) {
 	req, err := c.presign.PresignGetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(c.bucket),
@@ -85,6 +88,7 @@ func (c *Client) PresignGet(ctx context.Context, key string, lifetime time.Durat
 	return req.URL, nil
 }
 
+// PutObject executes this operation.
 func (c *Client) PutObject(ctx context.Context, key string, contentType string, data []byte) error {
 	_, err := c.s3Client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(c.bucket),

@@ -22,6 +22,7 @@ type HMACValidator struct {
 	nonceStore  util.IdempotencyStore
 }
 
+// NewHMACValidator executes this operation.
 func NewHMACValidator(secretStore func(string) (string, error), nonceStore util.IdempotencyStore) *HMACValidator {
 	return &HMACValidator{
 		secretStore: secretStore,

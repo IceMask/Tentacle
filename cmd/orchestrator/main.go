@@ -15,6 +15,7 @@ import (
 	"mcp_for_appium/internal/telemetry"
 )
 
+// main is the entry point for this binary.
 func main() {
 	// 加载配置
 	cfg, err := config.Load("config.yaml")
@@ -51,7 +52,11 @@ func main() {
 
 	// 4. Init Service
 	// 构造 orchestrator 服务，内部包含 dispatcher/registry
-	svc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, pgDAO, redisCache, s3Client)
+	if cfg.Orchestrator.ExecutionMode != orchestrator.ExecutionModeDistributed {
+		log.Printf("forcing execution mode to %q for standalone orchestrator", orchestrator.ExecutionModeDistributed)
+		cfg.Orchestrator.ExecutionMode = orchestrator.ExecutionModeDistributed
+	}
+	svc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)
 
 	// 5. Start Service (dispatcher and registry monitor)
 	// 启动后台循环

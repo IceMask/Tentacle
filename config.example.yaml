@@ -1,118 +1,72 @@
-# MCP Mobile Worker Configuration Example
-# Copy this file to config.yaml and adjust the values
+# MCP for Appium unified configuration template.
+# Keep this file and local config.yaml in sync for predictable debugging behavior.
 
 gateway:
   port: 8080
-  # Enable TLS (optional)
-  # tlsCert: /path/to/cert.pem
-  # tlsKey: /path/to/key.pem
+  enable_tls: false
+  tls_cert_file: ""
+  tls_key_file: ""
+  shutdown_timeout: 30s
 
 orchestrator:
-  # Worker pool configuration
-  workerPool:
-    maxSize: 10
-    idleTimeout: 300s  # 5 minutes
-
-  # Timeout configuration
-  timeout:
-    step: 30s
-    plan: 10m
-    cancel: 1s
-
-  # Auto-wait configuration
-  wait:
-    auto:
-      max: 5s
+  grpc_port: 9090
+  plan_timeout: 10m
+  step_timeout: 30s
+  auto_wait_max: 5s
+  snapshot_ttl: 1.5s
+  # monolith: gateway embeds orchestrator execution
+  # distributed: standalone orchestrator dispatches to workers
+  execution_mode: monolith
 
 worker:
-  # Appium server URL
-  appiumURL: "http://localhost:4723"
-
-  # Concurrency limits
-  maxConcurrent: 5
-
-  # Timeout configuration
-  timeout:
-    appiumRequest: 8s
-    sessionSetup: 30s
-
-  # Retry configuration
-  retry:
-    maxAttempts: 3
-    jitter:
-      min: 200ms
-      max: 1200ms
+  appium_url: http://127.0.0.1:4723
+  concurrency: 4
+  heartbeat_interval: 10s
+  tags:
+    platform: android
+  orchestrator_addr: 127.0.0.1:9090
+  grpc_port: 9092
 
 storage:
   postgres:
-    host: localhost
-    port: 5432
-    database: mcp_mobile_worker
-    user: postgres
-    password: postgres
-    # SSL mode: disable, require, verify-ca, verify-full
-    sslMode: disable
-    maxConns: 25
-    maxIdleTime: 15m
+    dsn: postgres://postgres:postgres@127.0.0.1:5432/mcp_mobile_worker?sslmode=disable
+    max_open_conns: 25
+    max_idle_conns: 5
+    conn_max_lifetime: 5m
 
   redis:
-    addr: localhost:6379
+    addr: 127.0.0.1:6379
     password: ""
     db: 0
-    poolSize: 10
-    minIdleConns: 2
 
   s3:
-    endpoint: s3.amazonaws.com
     region: us-east-1
     bucket: mcp-artifacts
-    # Access credentials (use environment variables in production)
-    # accessKeyID: YOUR_ACCESS_KEY
-    # secretAccessKey: YOUR_SECRET_KEY
-    # Or use IAM role / instance profile
+    access_key_id: ""
+    secret_access_key: ""
+    endpoint: ""
+    force_path_style: false
+
+auth:
+  enable_pat: true
+  enable_oidc: false
+  jwks_url: ""
+  audience: ""
+
+aws:
+  region: us-west-2
+  # Optional shared profile name (e.g. devicefarm-sso)
+  profile: ""
+
+devicefarm:
+  # disabled | test_grid | run_api
+  mode: disabled
+  project_arn: ""
+  test_grid_project_arn: ""
+  # Applied when mode=test_grid and grid URL is generated
+  url_expires_seconds: 600
 
 telemetry:
-  # Log level: debug, info, warn, error
-  logLevel: info
-
-  # Structured logging format
-  logFormat: json
-
-  # Prometheus metrics endpoint
-  metricsEnabled: true
-  metricsPort: 9090
-
-  # OpenTelemetry tracing (optional)
-  # tracing:
-  #   enabled: true
-  #   endpoint: localhost:4317
-  #   serviceName: mcp-mobile-worker
-
-# Security configuration
-security:
-  # Authentication methods
-  auth:
-    # PAT (Personal Access Token)
-    pat:
-      enabled: true
-      # tokens are stored in database
-
-    # OIDC (OpenID Connect)
-    oidc:
-      enabled: false
-      # issuer: https://your-idp.com
-      # audience: mcp-mobile-worker
-      # jwksURL: https://your-idp.com/.well-known/jwks.json
-
-    # HMAC signature
-    hmac:
-      enabled: false
-      # secret stored in environment variable: MCP_HMAC_SECRET
-      timeWindow: 5m  # ±5 minutes
-
-  # TLS configuration
-  tls:
-    enabled: false
-    # cert: /path/to/cert.pem
-    # key: /path/to/key.pem
-    # ca: /path/to/ca.pem  # for mTLS
+  log_level: info
+  otlp_endpoint: ""
+  metrics_port: 9091

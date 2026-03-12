@@ -11,7 +11,7 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 
 - ✅ **标准 MCP 协议支持**：实现 Anthropic MCP 标准（协议版本 2024-11-05）
 - ✅ **stdio 传输模式**：通过 `gateway --stdio` 启动，支持 Claude Desktop 配置
-- ✅ **MCP Tools 注册表**：8 个核心业务方法作为 Tools 暴露给 LLM
+- ✅ **MCP Tools 注册表**：20 个工具（会话/执行/元素/手势/实用）暴露给 LLM
 - ✅ **向后兼容**：保持原有 HTTP/REST/gRPC/WebSocket 接口不变
 
 ### 快速开始
@@ -59,14 +59,21 @@ curl -X POST http://localhost:8080/jsonrpc \
 
 通过 MCP 协议可用的工具：
 
-1. **startSession** - 创建移动设备测试会话
-2. **executePlan** - 执行自动化测试计划
-3. **endSession** - 关闭会话释放资源
-4. **getSemanticSnapshot** - 获取 UI 元素树快照
-5. **takeScreenshot** - 对设备屏幕截图
-6. **cancelPlan** - 取消正在执行的计划
-7. **getTrace** - 获取执行记录详情
-8. **healthCheck** - 检查服务健康状态
+- 共 **26** 个工具（截至 2026-02-26）
+- 核心会话/执行工具：`startSession` `executePlan` `endSession` `cancelPlan` `getTrace`
+- 交互式元素工具：`findElement` `clickElement` `sendKeysToElement` `clearElement` `getElementText` `getElementAttribute` `isElementDisplayed`
+- 手势工具：`tap` `swipe` `longPress` `pressBack` `hideKeyboard`
+- 实用工具：`getSemanticSnapshot` `takeScreenshot` `healthCheck`
+- Device Farm 工具：`createDeviceFarmUpload` `getDeviceFarmUpload` `getDeviceFarmRuntimeContext` `scheduleDeviceFarmRun` `getDeviceFarmRun`
+- 设备调试工具：`adbShell`
+
+### Device Farm 参数缓存说明（run_api 模式）
+
+- 服务端按 `projectArn` 维度缓存以下 ARN：`appArn` `testPackageArn` `devicePoolArn`
+- 缓存 TTL：**24 小时**
+- 上传元数据（用于把 uploadArn 归类为 app/test package）缓存 TTL：**2 小时**
+- 调用优先级：客户端显式参数 > 服务端缓存 > 默认/兜底逻辑
+- `getDeviceFarmRuntimeContext` 可供客户端 Agent 先探测当前可复用上下文，再决定是否补齐参数
 
 ### 文档
 
@@ -76,6 +83,7 @@ curl -X POST http://localhost:8080/jsonrpc \
 
 ## 系统架构
 
+```mermaid
 flowchart TD
   %% ========= Ingress =========
   A[Client<br/>REST / JSON-RPC] --> B[Gateway]
@@ -141,3 +149,4 @@ flowchart TD
 
   %% notes
   class S3,T,M faded
+```

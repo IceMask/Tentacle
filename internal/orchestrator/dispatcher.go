@@ -32,6 +32,8 @@ const (
 	cancelledTraceTTL    = time.Hour
 	retryKeyPrefix       = "retries:trace:"
 	retryKeyTTL          = 10 * time.Minute
+	inflightTracePrefix  = "inflight:trace:"
+	inflightTraceTTL     = 2 * time.Hour
 )
 
 type Dispatcher struct {
@@ -44,6 +46,7 @@ type Dispatcher struct {
 	workerClientMu sync.Mutex
 }
 
+// NewDispatcher executes this operation.
 func NewDispatcher(cache *redis.Cache, registry *WorkerRegistry, executor PlanExecutor) *Dispatcher {
 	return &Dispatcher{
 		cache:         cache,
@@ -232,8 +235,9 @@ func (d *Dispatcher) dispatchToWorker(ctx context.Context, traceID, projectID, s
 		d.logger.WarnContext(ctx, "no available worker",
 			"trace_id", traceID,
 			"project_id", projectID)
-		// Return nil so we do NOT ACK — message stays for auto-claim retry.
-		return nil
+		// Return a transient scheduling error so upstream retry logic keeps
+		// the message pending for later auto-claim re-dispatch.
+		return errors.New(errors.CodeSchedNoWorker, "no available worker")
 	}
 
 	client, err := d.getWorkerClient(w.Address)
@@ -256,6 +260,12 @@ func (d *Dispatcher) dispatchToWorker(ctx context.Context, traceID, projectID, s
 	d.logger.InfoContext(ctx, "dispatched to worker",
 		"trace_id", traceID,
 		"worker_id", w.ID)
+	if err := d.cache.Set(ctx, inflightTracePrefix+traceID, w.Address, inflightTraceTTL); err != nil {
+		d.logger.WarnContext(ctx, "failed to persist inflight trace assignment",
+			"trace_id", traceID,
+			"worker_id", w.ID,
+			"error", err)
+	}
 	return nil
 }
 
@@ -321,6 +331,7 @@ func isTerminalError(err error) bool {
 	return false
 }
 
+// stringValue executes this operation.
 func stringValue(v interface{}) string {
 	if v == nil {
 		return ""
@@ -335,6 +346,7 @@ func stringValue(v interface{}) string {
 	}
 }
 
+// intValue executes this operation.
 func intValue(v interface{}) int64 {
 	switch t := v.(type) {
 	case int64:
@@ -365,6 +377,43 @@ func (d *Dispatcher) CancelPlan(ctx context.Context, traceID string) error {
 	d.logger.InfoContext(ctx, "cancellation marker set",
 		"trace_id", traceID)
 	return nil
+}
+
+// CancelDispatchedPlan forwards cancel requests to the assigned worker when the
+// trace is currently known to be in-flight in distributed mode.
+// Returns true when a worker cancel RPC was successfully issued.
+func (d *Dispatcher) CancelDispatchedPlan(ctx context.Context, traceID string) (bool, error) {
+	address, err := d.cache.Get(ctx, inflightTracePrefix+traceID)
+	if err != nil {
+		if err.Error() == "redis: nil" {
+			return false, nil
+		}
+		return false, errors.Wrap(errors.CodeStoreRead, "failed to get inflight trace assignment", err)
+	}
+	if address == "" {
+		return false, nil
+	}
+
+	client, err := d.getWorkerClient(address)
+	if err != nil {
+		return false, errors.Wrap(errors.CodeSchedNoWorker, "failed to connect to assigned worker", err)
+	}
+
+	resp, err := client.CancelPlan(ctx, &rpc.CancelPlanRequest{TraceID: traceID})
+	if err != nil {
+		return false, errors.Wrap(errors.CodeInternal, "worker CancelPlan RPC failed", err)
+	}
+
+	switch resp.Status {
+	case "cancelled":
+		_ = d.cache.Del(ctx, inflightTracePrefix+traceID)
+		return true, nil
+	case "not_found":
+		_ = d.cache.Del(ctx, inflightTracePrefix+traceID)
+		return false, nil
+	default:
+		return false, errors.New(errors.CodeInternal, "worker returned unexpected cancel status: "+resp.Status)
+	}
 }
 
 // getWorkerClient returns a cached gRPC client for the given worker address,

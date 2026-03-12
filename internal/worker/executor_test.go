@@ -19,6 +19,7 @@ type mockAppiumClient struct {
 	pageSourceFunc  func(ctx context.Context) (string, error)
 }
 
+// FindElement executes this operation.
 func (m *mockAppiumClient) FindElement(ctx context.Context, strategy, selector string) (string, error) {
 	if m.findElementFunc != nil {
 		return m.findElementFunc(ctx, strategy, selector)
@@ -26,6 +27,7 @@ func (m *mockAppiumClient) FindElement(ctx context.Context, strategy, selector s
 	return "element-123", nil
 }
 
+// Click executes this operation.
 func (m *mockAppiumClient) Click(ctx context.Context, elementID string) error {
 	if m.clickFunc != nil {
 		return m.clickFunc(ctx, elementID)
@@ -33,6 +35,7 @@ func (m *mockAppiumClient) Click(ctx context.Context, elementID string) error {
 	return nil
 }
 
+// SendKeys executes this operation.
 func (m *mockAppiumClient) SendKeys(ctx context.Context, elementID, text string) error {
 	if m.sendKeysFunc != nil {
 		return m.sendKeysFunc(ctx, elementID, text)
@@ -40,6 +43,7 @@ func (m *mockAppiumClient) SendKeys(ctx context.Context, elementID, text string)
 	return nil
 }
 
+// Screenshot executes this operation.
 func (m *mockAppiumClient) Screenshot(ctx context.Context) ([]byte, error) {
 	if m.screenshotFunc != nil {
 		return m.screenshotFunc(ctx)
@@ -47,6 +51,7 @@ func (m *mockAppiumClient) Screenshot(ctx context.Context) ([]byte, error) {
 	return []byte("fake-screenshot"), nil
 }
 
+// PageSource executes this operation.
 func (m *mockAppiumClient) PageSource(ctx context.Context) (string, error) {
 	if m.pageSourceFunc != nil {
 		return m.pageSourceFunc(ctx)

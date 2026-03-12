@@ -34,6 +34,7 @@ func MaskSecureFields(fields map[string]interface{}) map[string]interface{} {
 	return masked
 }
 
+// isSensitiveKey executes this operation.
 func isSensitiveKey(k string) bool {
 	k = strings.ToLower(k)
 	return strings.Contains(k, "token") ||

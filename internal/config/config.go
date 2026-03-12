@@ -9,8 +9,22 @@ type Config struct {
 	Orchestrator OrchestratorConfig `yaml:"orchestrator"`
 	Worker       WorkerConfig       `yaml:"worker"`
 	Storage      StorageConfig      `yaml:"storage"`
+	AWS          AWSConfig          `yaml:"aws"`
+	DeviceFarm   DeviceFarmConfig   `yaml:"devicefarm"`
 	Auth         AuthConfig         `yaml:"auth"`
 	Telemetry    TelemetryConfig    `yaml:"telemetry"`
+}
+
+type AWSConfig struct {
+	Region  string `yaml:"region" env:"AWS__REGION" default:"us-west-2"`
+	Profile string `yaml:"profile" env:"AWS__PROFILE"`
+}
+
+type DeviceFarmConfig struct {
+	Mode               string `yaml:"mode" env:"DEVICEFARM__MODE" default:"disabled"` // disabled|test_grid|run_api
+	ProjectARN         string `yaml:"project_arn" env:"DEVICEFARM__PROJECT_ARN"`
+	TestGridProjectARN string `yaml:"test_grid_project_arn" env:"DEVICEFARM__TEST_GRID_PROJECT_ARN"`
+	URLExpiresSeconds  int    `yaml:"url_expires_seconds" env:"DEVICEFARM__URL_EXPIRES_SECONDS" default:"600"`
 }
 
 type GatewayConfig struct {
@@ -22,11 +36,12 @@ type GatewayConfig struct {
 }
 
 type OrchestratorConfig struct {
-	GRPCPort    int           `yaml:"grpc_port" env:"ORCHESTRATOR__GRPC_PORT" default:"9090"`
-	PlanTimeout time.Duration `yaml:"plan_timeout" env:"ORCHESTRATOR__PLAN_TIMEOUT" default:"10m"`
-	StepTimeout time.Duration `yaml:"step_timeout" env:"ORCHESTRATOR__STEP_TIMEOUT" default:"30s"`
-	AutoWaitMax time.Duration `yaml:"auto_wait_max" env:"ORCHESTRATOR__AUTO_WAIT_MAX" default:"5s"`
-	SnapshotTTL time.Duration `yaml:"snapshot_ttl" env:"ORCHESTRATOR__SNAPSHOT_TTL" default:"1.5s"`
+	GRPCPort      int           `yaml:"grpc_port" env:"ORCHESTRATOR__GRPC_PORT" default:"9090"`
+	PlanTimeout   time.Duration `yaml:"plan_timeout" env:"ORCHESTRATOR__PLAN_TIMEOUT" default:"10m"`
+	StepTimeout   time.Duration `yaml:"step_timeout" env:"ORCHESTRATOR__STEP_TIMEOUT" default:"30s"`
+	AutoWaitMax   time.Duration `yaml:"auto_wait_max" env:"ORCHESTRATOR__AUTO_WAIT_MAX" default:"5s"`
+	SnapshotTTL   time.Duration `yaml:"snapshot_ttl" env:"ORCHESTRATOR__SNAPSHOT_TTL" default:"1.5s"`
+	ExecutionMode string        `yaml:"execution_mode" env:"ORCHESTRATOR__EXECUTION_MODE" default:"monolith"`
 }
 
 type WorkerConfig struct {

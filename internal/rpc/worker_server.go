@@ -27,6 +27,7 @@ var workerServiceDesc = grpc.ServiceDesc{
 	Streams: []grpc.StreamDesc{},
 }
 
+// workerExecutePlanHandler executes this operation.
 func workerExecutePlanHandler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ExecutePlanRequest)
 	if err := dec(in); err != nil {
@@ -41,6 +42,7 @@ func workerExecutePlanHandler(srv interface{}, ctx context.Context, dec func(int
 	})
 }
 
+// workerCancelPlanHandler executes this operation.
 func workerCancelPlanHandler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CancelPlanRequest)
 	if err := dec(in); err != nil {

@@ -1,0 +1,25 @@
+{
+  "name": "adbShell",
+  "description": "Executes a whitelisted adb shell command against a connected Android device and returns command output.",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "deviceSerial": {
+        "type": "string",
+        "description": "Optional target device serial passed to adb -s."
+      },
+      "command": {
+        "type": "array",
+        "description": "Tokenized adb shell command. First token must be in the command whitelist.",
+        "items": {
+          "type": "string"
+        },
+        "minItems": 1
+      }
+    },
+    "required": [
+      "command"
+    ]
+  }
+}

@@ -1,3 +1,6 @@
+//go:build tools
+// +build tools
+
 package main
 
 import (
@@ -6,6 +9,7 @@ import (
 	"mcp_for_appium/internal/gateway/mcp"
 )
 
+// main is the entry point for this binary.
 func main() {
 	// Create tool registry
 	registry := mcp.NewToolRegistry()

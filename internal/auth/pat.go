@@ -19,6 +19,7 @@ type PATValidator struct {
 	lookup HashLookup
 }
 
+// NewPATValidator executes this operation.
 func NewPATValidator(lookup HashLookup) *PATValidator {
 	return &PATValidator{lookup: lookup}
 }

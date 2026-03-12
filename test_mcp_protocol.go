@@ -1,3 +1,6 @@
+//go:build tools
+// +build tools
+
 package main
 
 import (
@@ -7,6 +10,7 @@ import (
 	"mcp_for_appium/internal/gateway/mcp"
 )
 
+// main is the entry point for this binary.
 func main() {
 	fmt.Println("=== MCP Protocol Test ===\n")
 	ctx := context.Background()
@@ -140,6 +144,7 @@ func main() {
 	fmt.Println("      - S3 storage (or compatible)")
 }
 
+// min executes this operation.
 func min(a, b int) int {
 	if a < b {
 		return a

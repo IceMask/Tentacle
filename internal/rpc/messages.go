@@ -13,7 +13,7 @@ type ExecutePlanRequest struct {
 
 // ExecutePlanResponse is returned by the worker after accepting or rejecting the plan.
 type ExecutePlanResponse struct {
-	Status  string `json:"status"`  // "accepted" | "error"
+	Status  string `json:"status"` // "accepted" | "error"
 	Message string `json:"message,omitempty"`
 }
 
@@ -24,7 +24,7 @@ type CancelPlanRequest struct {
 
 // CancelPlanResponse is returned by the worker after processing the cancellation.
 type CancelPlanResponse struct {
-	Status  string `json:"status"`  // "cancelled" | "not_found"
+	Status  string `json:"status"` // "cancelled" | "not_found"
 	Message string `json:"message,omitempty"`
 }
 

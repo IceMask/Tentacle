@@ -12,6 +12,7 @@ import (
 
 var defaultLogger *slog.Logger
 
+// init executes this operation.
 func init() {
 	// Default to text handler for dev, can be changed to JSON
 	defaultLogger = slog.New(slog.NewJSONHandler(os.Stdout, nil))

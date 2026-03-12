@@ -11,6 +11,7 @@ type Handler struct {
 	upgrader websocket.Upgrader
 }
 
+// NewHandler executes this operation.
 func NewHandler(hub *Hub) *Handler {
 	return &Handler{
 		hub: hub,
@@ -20,6 +21,7 @@ func NewHandler(hub *Hub) *Handler {
 	}
 }
 
+// ServeHTTP executes this operation.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	traceID := r.URL.Query().Get("traceId")
 	if traceID == "" {

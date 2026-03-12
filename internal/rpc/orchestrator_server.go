@@ -28,6 +28,7 @@ var orchestratorServiceDesc = grpc.ServiceDesc{
 	Streams: []grpc.StreamDesc{},
 }
 
+// orchestratorRegisterWorkerHandler executes this operation.
 func orchestratorRegisterWorkerHandler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(RegisterWorkerRequest)
 	if err := dec(in); err != nil {
@@ -42,6 +43,7 @@ func orchestratorRegisterWorkerHandler(srv interface{}, ctx context.Context, dec
 	})
 }
 
+// orchestratorHeartbeatHandler executes this operation.
 func orchestratorHeartbeatHandler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(HeartbeatRequest)
 	if err := dec(in); err != nil {

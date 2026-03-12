@@ -19,6 +19,7 @@ import (
 	"mcp_for_appium/internal/worker"
 )
 
+// main is the entry point for this binary.
 func main() {
 	cfg, err := config.Load("config.yaml")
 	if err != nil {
@@ -90,6 +91,7 @@ func main() {
 	grpcSrv.GracefulStop()
 }
 
+// heartbeatLoop executes this operation.
 func heartbeatLoop(ctx context.Context, client *rpc.OrchestratorClient, workerID string, interval time.Duration, svc *worker.GRPCServer) {
 	logger := telemetry.Logger()
 	ticker := time.NewTicker(interval)

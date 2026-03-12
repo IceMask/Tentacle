@@ -16,13 +16,14 @@ import (
 )
 
 type Router struct {
-	orch            *orchestrator.Service
-	cache           *redis.Cache
-	capService      *capabilities.Service
-	hmacValidator   *auth.HMACValidator
-	idempotencyTTL  time.Duration
+	orch           *orchestrator.Service
+	cache          *redis.Cache
+	capService     *capabilities.Service
+	hmacValidator  *auth.HMACValidator
+	idempotencyTTL time.Duration
 }
 
+// NewRouter executes this operation.
 func NewRouter(orch *orchestrator.Service, cache *redis.Cache, capSvc *capabilities.Service) *Router {
 	return &Router{
 		orch:           orch,
@@ -32,10 +33,12 @@ func NewRouter(orch *orchestrator.Service, cache *redis.Cache, capSvc *capabilit
 	}
 }
 
+// SetHMACValidator executes this operation.
 func (rt *Router) SetHMACValidator(validator *auth.HMACValidator) {
 	rt.hmacValidator = validator
 }
 
+// RegisterRoutes executes this operation.
 func (rt *Router) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/sessions", rt.handleSessions)
 	mux.HandleFunc("/api/v1/plans:execute", rt.handlePlanExecute)
@@ -45,6 +48,7 @@ func (rt *Router) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/capabilities", rt.handleCapabilities)
 }
 
+// handleSessions executes this operation.
 func (rt *Router) handleSessions(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		body, err := io.ReadAll(r.Body)
@@ -84,6 +88,7 @@ func (rt *Router) handleSessions(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
+// handlePlanExecute executes this operation.
 func (rt *Router) handlePlanExecute(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		body, err := io.ReadAll(r.Body)
@@ -124,6 +129,7 @@ func (rt *Router) handlePlanExecute(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
+// handlePlanCancel executes this operation.
 func (rt *Router) handlePlanCancel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -154,6 +160,7 @@ func (rt *Router) handlePlanCancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"success": true})
 }
 
+// handleTraces executes this operation.
 func (rt *Router) handleTraces(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/v1/traces/")
 	if path == "" {
@@ -190,6 +197,7 @@ func (rt *Router) handleTraces(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleArtifacts executes this operation.
 func (rt *Router) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -209,6 +217,7 @@ func (rt *Router) handleArtifacts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"artifacts": artifacts})
 }
 
+// handleCapabilities executes this operation.
 func (rt *Router) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -221,12 +230,14 @@ func (rt *Router) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rt.capService.List(r.Context()))
 }
 
+// writeJSON executes this operation.
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// verifyHMAC executes this operation.
 func (rt *Router) verifyHMAC(r *http.Request, body []byte) error {
 	if rt.hmacValidator == nil {
 		return nil
@@ -242,6 +253,7 @@ func (rt *Router) verifyHMAC(r *http.Request, body []byte) error {
 	return err
 }
 
+// maybeReturnIdempotent executes this operation.
 func (rt *Router) maybeReturnIdempotent(w http.ResponseWriter, r *http.Request, body []byte) bool {
 	if rt.cache == nil {
 		return false
@@ -269,6 +281,7 @@ func (rt *Router) maybeReturnIdempotent(w http.ResponseWriter, r *http.Request, 
 	return true
 }
 
+// storeIdempotent executes this operation.
 func (rt *Router) storeIdempotent(r *http.Request, payload interface{}) {
 	if rt.cache == nil {
 		return

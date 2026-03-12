@@ -1,0 +1,39 @@
+{
+  "name": "scheduleDeviceFarmRun",
+  "description": "Schedules a mobile test run on AWS Device Farm run_api mode. appArn/testPackageArn/devicePoolArn are preferred from client input, but the server will fallback to per-project cached ARNs when omitted (cache TTL: 24h). Returns run metadata including runArn.",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "runName": {
+        "type": "string",
+        "description": "Optional human-readable run name. Auto-generated when omitted."
+      },
+      "projectArn": {
+        "type": "string",
+        "description": "Optional Device Farm project ARN override. Defaults to config devicefarm.project_arn when omitted."
+      },
+      "appArn": {
+        "type": "string",
+        "description": "Optional app upload ARN. When omitted, server tries cached app ARN for the project."
+      },
+      "devicePoolArn": {
+        "type": "string",
+        "description": "Optional device pool ARN. Server tries cached pool ARN first; if still empty it falls back to first available pool in the project."
+      },
+      "testType": {
+        "type": "string",
+        "description": "Optional Device Farm test type. Defaults to APPIUM_NODE."
+      },
+      "testPackageArn": {
+        "type": "string",
+        "description": "Optional test package upload ARN. When omitted, server tries cached test package ARN for the project."
+      },
+      "testSpecArn": {
+        "type": "string",
+        "description": "Optional ARN of a custom test spec."
+      }
+    },
+    "required": []
+  }
+}

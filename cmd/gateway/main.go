@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/auth"
+	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/gateway/capabilities"
 	"mcp_for_appium/internal/gateway/jsonrpc"
 	"mcp_for_appium/internal/gateway/rest"
@@ -29,6 +29,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// main is the entry point for this binary.
 func main() {
 	// Parse command line flags
 	stdioMode := flag.Bool("stdio", false, "Run in stdio mode for MCP protocol")
@@ -66,6 +67,9 @@ func runStdioMode(cfg *config.Config) {
 
 	// Initialize dependencies (minimal setup for stdio mode)
 	ctx := context.Background()
+	if cfg.Orchestrator.ExecutionMode == orchestrator.ExecutionModeDistributed {
+		log.Fatalf("stdio mode currently supports only %q execution mode", orchestrator.ExecutionModeMonolith)
+	}
 
 	pgDAO, err := postgres.NewDAO(ctx, cfg.Storage.Postgres)
 	if err != nil {
@@ -80,7 +84,7 @@ func runStdioMode(cfg *config.Config) {
 		log.Fatalf("failed to init s3: %v", err)
 	}
 
-	orchSvc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, pgDAO, redisCache, s3Client)
+	orchSvc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)
 	if err := orchSvc.Start(ctx); err != nil {
 		log.Fatalf("failed to start orchestrator: %v", err)
 	}
@@ -114,7 +118,10 @@ func runStdioMode(cfg *config.Config) {
 func runHTTPMode(cfg *config.Config) {
 
 	// Monolith mode: gateway embeds the orchestrator Service directly.
-	// In a distributed deployment, replace with an rpc.OrchestratorClient.
+	// Distributed mode (gateway -> external orchestrator) is not wired yet.
+	if cfg.Orchestrator.ExecutionMode == orchestrator.ExecutionModeDistributed {
+		log.Fatalf("gateway HTTP mode currently supports only %q execution mode", orchestrator.ExecutionModeMonolith)
+	}
 
 	pgDAO, err := postgres.NewDAO(context.Background(), cfg.Storage.Postgres)
 	if err != nil {
@@ -129,7 +136,7 @@ func runHTTPMode(cfg *config.Config) {
 		log.Fatalf("failed to init s3: %v", err)
 	}
 
-	orchSvc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, pgDAO, redisCache, s3Client)
+	orchSvc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)
 
 	// 启动 orchestrator 内部逻辑（单体模式）
 	ctx := context.Background()
@@ -197,6 +204,7 @@ func runHTTPMode(cfg *config.Config) {
 	}
 }
 
+// writeJSON executes this operation.
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

@@ -19,6 +19,7 @@ type Handler struct {
 	validator  *Validator
 }
 
+// NewHandler executes this operation.
 func NewHandler(orch *orchestrator.Service, capSvc *capabilities.Service) *Handler {
 	return &Handler{
 		orch:       orch,
@@ -433,6 +434,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// writeError executes this operation.
 func (h *Handler) writeError(w http.ResponseWriter, id interface{}, code int, msg string, data interface{}) {
 	h.writeResponse(w, Response{
 		JSONRPC: "2.0",
@@ -445,6 +447,7 @@ func (h *Handler) writeError(w http.ResponseWriter, id interface{}, code int, ms
 	})
 }
 
+// writeResponse executes this operation.
 func (h *Handler) writeResponse(w http.ResponseWriter, resp Response) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)

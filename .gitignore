@@ -28,6 +28,7 @@ coverage*
 # Local config
 .env
 .env.local
+config.yaml
 
 # 临时报告文档
 *_PROGRESS.md
