@@ -15,6 +15,7 @@ import (
 	"mcp_for_appium/internal/gateway/jsonrpc"
 	"mcp_for_appium/internal/gateway/mcp"
 	"mcp_for_appium/internal/orchestrator"
+	"mcp_for_appium/internal/telemetry"
 )
 
 // Transport handles stdio-based JSON-RPC communication for MCP protocol
@@ -32,7 +33,7 @@ func NewTransport(orch *orchestrator.Service, capSvc *capabilities.Service) *Tra
 		handler: jsonrpc.NewHandler(orch, capSvc),
 		stdin:   os.Stdin,
 		stdout:  os.Stdout,
-		stderr:  os.Stderr,
+		stderr:  telemetry.StdLogWriter(), // Route stdio transport diagnostics to configured std log destinations (stderr + optional file).
 	}
 }
 

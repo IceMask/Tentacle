@@ -43,7 +43,8 @@ func main() {
 	}
 
 	// 初始化日志与遥测
-	telemetry.InitLogger(cfg.Telemetry.LogLevel)
+	telemetry.InitLogger(cfg.Telemetry.LogLevel, cfg.Telemetry.LogFile) // Initialize structured logging with optional file sink.
+	log.SetOutput(telemetry.StdLogWriter())                              // Mirror standard-library logs into the configured log destinations.
 	shutdownTracer := telemetry.InitTracer("gateway", cfg.Telemetry.OTLPEndpoint)
 	defer func() {
 		_ = shutdownTracer(context.Background())
@@ -62,7 +63,7 @@ func main() {
 // runStdioMode runs the gateway in stdio mode for MCP protocol
 func runStdioMode(cfg *config.Config) {
 	// Set log output to stderr (stdout is reserved for JSON-RPC)
-	log.SetOutput(os.Stderr)
+	log.SetOutput(telemetry.StdLogWriter()) // Keep stdio transport diagnostics in the shared configured log writer.
 	log.Println("Starting MCP gateway in stdio mode...")
 
 	// Initialize dependencies (minimal setup for stdio mode)

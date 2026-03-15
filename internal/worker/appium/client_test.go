@@ -115,6 +115,58 @@ func TestStartSession_MissingSessionID(t *testing.T) {
 	}
 }
 
+// TestStartSession_DefaultTimeoutApplied tests that StartSession enforces an internal timeout when caller has no deadline.
+func TestStartSession_DefaultTimeoutApplied(t *testing.T) {
+	originalTimeout := defaultStartSessionTimeout                         // Save global timeout so the test can restore shared state.
+	defaultStartSessionTimeout = 50 * time.Millisecond                    // Shrink timeout to keep the test fast and deterministic.
+	defer func() { defaultStartSessionTimeout = originalTimeout }()       // Restore global timeout after test completion.
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { // Simulate a slow Appium /session endpoint.
+		time.Sleep(200 * time.Millisecond) // Delay beyond test timeout to force deadline handling.
+		w.WriteHeader(http.StatusOK)       // Return nominal success if not canceled, though client should timeout first.
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"value": map[string]interface{}{"sessionId": "late-session"},
+		}) // Keep response shape valid so failure reason is timeout, not decoding.
+	}))
+	defer server.Close() // Close test server resources.
+
+	client := NewClient(server.URL) // Build client against the slow test server.
+	client.maxRetries = 0           // Disable retries to make timeout path deterministic.
+
+	_, err := client.StartSession(context.Background(), map[string]interface{}{"platformName": "Android"}) // Call without deadline to trigger default timeout.
+	if err == nil {                                                                                          // Enforce timeout failure expectation.
+		t.Fatal("Expected startSession timeout error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "timeout") { // Assert returned error clearly communicates timeout semantics.
+		t.Fatalf("Expected timeout in error message, got: %v", err)
+	}
+}
+
+// TestStartSession_InvalidCapabilities_MappedToConfigInvalid tests that vendor-prefix capability errors map to config-invalid code.
+func TestStartSession_InvalidCapabilities_MappedToConfigInvalid(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { // Simulate Appium capability validation failure.
+		w.WriteHeader(http.StatusBadRequest) // Return HTTP 400 for invalid capability payload.
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"value": map[string]interface{}{
+				"error":   "invalid argument",
+				"message": "All non-standard capabilities should have a vendor prefix.",
+			},
+		}) // Match Appium's capability-prefix error shape.
+	}))
+	defer server.Close() // Close server after assertions.
+
+	client := NewClient(server.URL) // Create test client pointing to mock Appium server.
+	client.maxRetries = 0           // Disable retries to keep failure classification straightforward.
+
+	_, err := client.StartSession(context.Background(), map[string]interface{}{"platformName": "Android"}) // Trigger mock validation error.
+	if err == nil {                                                                                          // Ensure error path is exercised.
+		t.Fatal("Expected capability validation error")
+	}
+	if !strings.Contains(err.Error(), "E.CONFIG.INVALID") { // Assert mapped internal code is configuration-invalid.
+		t.Fatalf("Expected E.CONFIG.INVALID, got: %v", err)
+	}
+}
+
 // TestDeleteSession tests session deletion
 func TestDeleteSession(t *testing.T) {
 	deleted := false

@@ -25,7 +25,8 @@ func main() {
 
 	// 2. Init Telemetry
 	// 初始化日志（Tracing 待接入）
-	telemetry.InitLogger(cfg.Telemetry.LogLevel)
+	telemetry.InitLogger(cfg.Telemetry.LogLevel, cfg.Telemetry.LogFile) // Initialize structured logging with optional file sink.
+	log.SetOutput(telemetry.StdLogWriter())                              // Route standard log package output to configured sinks.
 	shutdownTracer := telemetry.InitTracer("orchestrator", cfg.Telemetry.OTLPEndpoint)
 	defer func() {
 		_ = shutdownTracer(context.Background())

@@ -26,7 +26,8 @@ func main() {
 		log.Fatalf("failed to load config: %v", err)
 	}
 
-	telemetry.InitLogger(cfg.Telemetry.LogLevel)
+	telemetry.InitLogger(cfg.Telemetry.LogLevel, cfg.Telemetry.LogFile) // Initialize structured logging with optional file sink.
+	log.SetOutput(telemetry.StdLogWriter())                              // Route standard log messages to configured sinks too.
 	logger := telemetry.Logger()
 
 	workerID := uuid.New().String()

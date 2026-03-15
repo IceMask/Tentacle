@@ -177,7 +177,14 @@ type JSONRPCError struct {
 func MapToJSONRPC(err error) *JSONRPCError {
 	e, ok := err.(*Error)
 	if !ok {
-		return &JSONRPCError{Code: -32603, Message: "Internal error", Data: err.Error()}
+		return &JSONRPCError{ // Return unknown error types with raw text for direct diagnostics.
+			Code:    -32603, // Use JSON-RPC internal error code for non-standard error wrappers.
+			Message: "Internal error",
+			Data: map[string]interface{}{ // Return structured data instead of plain string for consistency with MCP.
+				"internalCode": "",          // Leave code empty when no standardized internal code is available.
+				"rawError":     err.Error(), // Preserve original/native error for clients.
+			},
+		}
 	}
 
 	var code int
@@ -196,10 +203,13 @@ func MapToJSONRPC(err error) *JSONRPCError {
 		code = -32603 // Internal error
 	}
 
-	return &JSONRPCError{
-		Code:    code,
-		Message: e.Message,
-		Data:    string(e.Code),
+	return &JSONRPCError{ // Return mapped JSON-RPC error with internal and raw details.
+		Code:    code,      // Keep mapped transport-level JSON-RPC code.
+		Message: e.Message, // Keep concise business-facing message.
+		Data: map[string]interface{}{ // Include both stable internal code and full wrapped chain.
+			"internalCode": string(e.Code), // Expose standardized internal code for programmatic handling.
+			"rawError":     e.Error(),      // Expose full wrapped error string for debugging/root-cause analysis.
+		},
 	}
 }
 

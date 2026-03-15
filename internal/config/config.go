@@ -89,7 +89,8 @@ type AuthConfig struct {
 }
 
 type TelemetryConfig struct {
-	LogLevel     string `yaml:"log_level" env:"TELEMETRY__LOG_LEVEL" default:"info"`
-	OTLPEndpoint string `yaml:"otlp_endpoint" env:"TELEMETRY__OTLP_ENDPOINT"`
-	MetricsPort  int    `yaml:"metrics_port" env:"TELEMETRY__METRICS_PORT" default:"9091"`
+	LogLevel     string `yaml:"log_level" env:"TELEMETRY__LOG_LEVEL" default:"info"` // Control minimum log verbosity emitted by the process.
+	LogFile      string `yaml:"log_file" env:"TELEMETRY__LOG_FILE"`                   // Optional absolute or relative file path for persistent JSON logs.
+	OTLPEndpoint string `yaml:"otlp_endpoint" env:"TELEMETRY__OTLP_ENDPOINT"`         // Optional OTLP collector endpoint for distributed tracing export.
+	MetricsPort  int    `yaml:"metrics_port" env:"TELEMETRY__METRICS_PORT" default:"9091"` // Prometheus metrics HTTP port.
 }

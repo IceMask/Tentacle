@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"mcp_for_appium/internal/errors"
 	"mcp_for_appium/internal/gateway/capabilities"
 	"mcp_for_appium/internal/gateway/mcp"
 	"mcp_for_appium/internal/orchestrator"
 	"mcp_for_appium/internal/storage/postgres"
+	"mcp_for_appium/internal/telemetry"
 )
 
 type Handler struct {
@@ -46,6 +48,10 @@ type Response struct {
 // ProcessRequest processes a JSON-RPC request and returns the result or error
 // This method is used by both HTTP and stdio transports
 func (h *Handler) ProcessRequest(ctx context.Context, req *Request) (interface{}, error) {
+	logger := telemetry.WithContext(ctx) // Build context-enriched logger so per-request logs carry trace ids when available.
+	startedAt := time.Now()              // Capture dispatch start timestamp for duration reporting.
+	logger.Info("jsonrpc process begin", "method", req.Method, "id", req.ID) // Log every JSON-RPC method entry for step-by-step tracing.
+
 	var result interface{}
 	var err error
 
@@ -380,9 +386,11 @@ func (h *Handler) ProcessRequest(ctx context.Context, req *Request) (interface{}
 	}
 
 	if err != nil {
+		logger.Error("jsonrpc process failed", "method", req.Method, "id", req.ID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log method failures with latency and root error.
 		return nil, err
 	}
 
+	logger.Info("jsonrpc process done", "method", req.Method, "id", req.ID, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful completion with total dispatch latency.
 	return result, nil
 }
 

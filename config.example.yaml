@@ -68,5 +68,6 @@ devicefarm:
 
 telemetry:
   log_level: info
+  log_file: "/tmp/mcp_for_appium/mcp.log"
   otlp_endpoint: ""
   metrics_port: 9091

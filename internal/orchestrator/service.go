@@ -142,14 +142,18 @@ func (s *Service) Stop() {
 func (s *Service) StartSession(ctx context.Context, projectID string, caps map[string]interface{}) (*postgres.Session, error) {
 	ctx, span := otel.Tracer("orchestrator").Start(ctx, "StartSession")
 	defer span.End()
+	startedAt := time.Now() // Capture method start for duration logging.
+	s.logger.InfoContext(ctx, "orchestrator StartSession begin", "project_id", projectID, "caps_keys", len(caps)) // Log method entry with high-signal inputs.
 
 	if s.appiumURL == "" {
+		s.logger.ErrorContext(ctx, "orchestrator StartSession failed", "project_id", projectID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", "appium_url is empty") // Log configuration failures explicitly.
 		return nil, errors.New(errors.CodeConfigMissing, "appium_url is empty")
 	}
 
 	app := appium.NewClient(s.appiumURL)
 	appiumSessionID, err := app.StartSession(ctx, caps)
 	if err != nil {
+		s.logger.ErrorContext(ctx, "orchestrator StartSession failed", "project_id", projectID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log upstream Appium failures with method latency.
 		return nil, errors.Wrap(errors.CodeInternal, "failed to start appium session", err)
 	}
 
@@ -168,6 +172,7 @@ func (s *Service) StartSession(ctx context.Context, projectID string, caps map[s
 
 	if err := s.dao.CreateSession(ctx, sess); err != nil {
 		_ = app.DeleteSession(ctx)
+		s.logger.ErrorContext(ctx, "orchestrator StartSession failed", "project_id", projectID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log persistence failure before returning.
 		return nil, errors.Wrap(errors.CodeInternal, "failed to create session", err)
 	}
 
@@ -182,6 +187,7 @@ func (s *Service) StartSession(ctx context.Context, projectID string, caps map[s
 	s.appiumMap[sessID] = app
 	s.appiumMu.Unlock()
 
+	s.logger.InfoContext(ctx, "orchestrator StartSession done", "project_id", projectID, "session_id", sessID, "appium_session_id", appiumSessionID, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful method completion and key identifiers.
 	return sess, nil
 }
 
@@ -194,13 +200,17 @@ func (s *Service) ExecutePlan(ctx context.Context, sessionID string, plan json.R
 func (s *Service) ExecutePlanWithTrace(ctx context.Context, sessionID string, traceID string, plan json.RawMessage) (string, error) {
 	ctx, span := otel.Tracer("orchestrator").Start(ctx, "ExecutePlan")
 	defer span.End()
+	startedAt := time.Now() // Capture method start for duration logging.
+	s.logger.InfoContext(ctx, "orchestrator ExecutePlan begin", "session_id", sessionID, "trace_id", traceID, "plan_bytes", len(plan)) // Log entry to execution scheduling path.
 
 	// 1. Validate Session
 	sess, err := s.dao.GetSession(ctx, sessionID)
 	if err != nil {
+		s.logger.ErrorContext(ctx, "orchestrator ExecutePlan failed", "session_id", sessionID, "trace_id", traceID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log session lookup failure.
 		return "", err
 	}
 	if sess.Status == "ended" {
+		s.logger.ErrorContext(ctx, "orchestrator ExecutePlan failed", "session_id", sessionID, "trace_id", traceID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", "session ended") // Log invalid session state before returning.
 		return "", errors.New(errors.CodeSessionDead, "session ended")
 	}
 
@@ -217,14 +227,17 @@ func (s *Service) ExecutePlanWithTrace(ctx context.Context, sessionID string, tr
 		UpdatedAt: time.Now(),
 	}
 	if err := s.dao.CreateTrace(ctx, trace); err != nil {
+		s.logger.ErrorContext(ctx, "orchestrator ExecutePlan failed", "session_id", sessionID, "trace_id", traceID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log trace creation failures.
 		return "", errors.Wrap(errors.CodeInternal, "failed to create trace", err)
 	}
 
 	// 3. Enqueue Plan
 	if err := s.dispatcher.EnqueuePlan(ctx, sess.ProjectID, sessionID, traceID, plan); err != nil {
+		s.logger.ErrorContext(ctx, "orchestrator ExecutePlan failed", "session_id", sessionID, "trace_id", traceID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log enqueue failures for queue-level troubleshooting.
 		return "", errors.Wrap(errors.CodeInternal, "failed to enqueue plan", err)
 	}
 
+	s.logger.InfoContext(ctx, "orchestrator ExecutePlan done", "session_id", sessionID, "trace_id", traceID, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful method completion.
 	return traceID, nil
 }
 
@@ -247,12 +260,16 @@ func (s *Service) GetSession(ctx context.Context, sessionID string) (*postgres.S
 func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 	ctx, span := otel.Tracer("orchestrator").Start(ctx, "EndSession")
 	defer span.End()
+	startedAt := time.Now() // Capture method start for duration logging.
+	s.logger.InfoContext(ctx, "orchestrator EndSession begin", "session_id", sessionID) // Log session shutdown method entry.
 
 	sess, err := s.dao.GetSession(ctx, sessionID)
 	if err != nil {
+		s.logger.ErrorContext(ctx, "orchestrator EndSession failed", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log lookup failures before returning.
 		return err
 	}
 	if sess.Status == "ended" {
+		s.logger.InfoContext(ctx, "orchestrator EndSession done", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds(), "already_ended", true) // Log idempotent completion path.
 		return nil
 	}
 
@@ -271,9 +288,11 @@ func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 	}
 
 	if err := s.dao.EndSession(ctx, sessionID, time.Now()); err != nil {
+		s.logger.ErrorContext(ctx, "orchestrator EndSession failed", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log DB write failures.
 		return errors.Wrap(errors.CodeStoreWrite, "failed to end session", err)
 	}
 
+	s.logger.InfoContext(ctx, "orchestrator EndSession done", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful session termination.
 	return nil
 }
 
@@ -849,8 +868,12 @@ func (s *Service) GetDeviceFarmRuntimeContext(ctx context.Context, projectARN st
 
 // AdbShell executes this operation.
 func (s *Service) AdbShell(ctx context.Context, deviceSerial string, command []string) (map[string]interface{}, error) {
+	startedAt := time.Now() // Capture method start for per-command latency logging.
+	s.logger.InfoContext(ctx, "orchestrator AdbShell begin", "device_serial", strings.TrimSpace(deviceSerial), "command", command) // Log adb command invocation.
+
 	// Ensure a non-empty command body before attempting adb invocation.
 	if len(command) == 0 {
+		s.logger.ErrorContext(ctx, "orchestrator AdbShell failed", "device_serial", strings.TrimSpace(deviceSerial), "duration_ms", time.Since(startedAt).Milliseconds(), "error", "adb command must not be empty") // Log empty command validation failure.
 		return nil, errors.New(errors.CodePlanInvalid, "adb command must not be empty")
 	}
 
@@ -870,6 +893,7 @@ func (s *Service) AdbShell(ctx context.Context, deviceSerial string, command []s
 	}
 	// Reject non-whitelisted commands to reduce risk from arbitrary shell execution.
 	if !allowed[command[0]] {
+		s.logger.ErrorContext(ctx, "orchestrator AdbShell failed", "device_serial", strings.TrimSpace(deviceSerial), "duration_ms", time.Since(startedAt).Milliseconds(), "error", "adb command is not in allowed whitelist", "command_head", command[0]) // Log whitelist rejections with command head.
 		return nil, errors.New(errors.CodePermissionDenied, "adb command is not in allowed whitelist")
 	}
 
@@ -885,14 +909,17 @@ func (s *Service) AdbShell(ctx context.Context, deviceSerial string, command []s
 	// Execute the command and collect merged stdout/stderr for diagnostics.
 	out, err := exec.CommandContext(ctx, "adb", args...).CombinedOutput()
 	if err != nil {
+		s.logger.ErrorContext(ctx, "orchestrator AdbShell failed", "device_serial", strings.TrimSpace(deviceSerial), "duration_ms", time.Since(startedAt).Milliseconds(), "error", err, "output_bytes", len(out)) // Log execution failure and output size.
 		return nil, errors.Wrap(errors.CodeInternal, "adb shell command failed: "+strings.TrimSpace(string(out)), err)
 	}
 
 	// Return raw command output so callers can parse device response text.
-	return map[string]interface{}{
+	result := map[string]interface{}{ // Build command success payload after subprocess completion.
 		"success": true,
 		"output":  string(out),
-	}, nil
+	}
+	s.logger.InfoContext(ctx, "orchestrator AdbShell done", "device_serial", strings.TrimSpace(deviceSerial), "duration_ms", time.Since(startedAt).Milliseconds(), "output_bytes", len(out)) // Log successful command completion and output size.
+	return result, nil
 }
 
 func deviceFarmProjectCacheSuffix(projectARN string) string {

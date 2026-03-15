@@ -3,10 +3,14 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"regexp"
 	"strings"
+	"time"
 
 	"mcp_for_appium/internal/devicefarm"
 	"mcp_for_appium/internal/orchestrator"
+	"mcp_for_appium/internal/telemetry"
 )
 
 // MCPHandler handles MCP protocol methods
@@ -72,6 +76,9 @@ func (h *MCPHandler) ToolsList(ctx context.Context, params json.RawMessage) (int
 
 // ToolsCall handles the tools/call request
 func (h *MCPHandler) ToolsCall(ctx context.Context, params json.RawMessage) (interface{}, error) {
+	logger := telemetry.WithContext(ctx) // Build per-request logger with trace metadata when available.
+	startedAt := time.Now()              // Capture tool call start for duration logging.
+
 	var p struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -84,20 +91,23 @@ func (h *MCPHandler) ToolsCall(ctx context.Context, params json.RawMessage) (int
 			Data:    err.Error(),
 		}
 	}
+	logger.Info("mcp tools/call begin", "tool", p.Name) // Log tool invocation entry before validation and execution.
 
 	// Validate tool exists and arguments
 	if err := h.registry.Validate(p.Name, p.Arguments); err != nil {
+		logger.Error("mcp tools/call validate failed", "tool", p.Name, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log schema/validation failures as explicit step failures.
 		return nil, err
 	}
 
 	// Route to the appropriate business method
 	result, err := h.executeTool(ctx, p.Name, p.Arguments)
 	if err != nil {
-		return nil, err
+		logger.Error("mcp tools/call execute failed", "tool", p.Name, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log tool execution failures with elapsed time.
+		return nil, normalizeToolError(p.Name, err) // Normalize per-tool errors into structured MCP payloads.
 	}
 
 	// Wrap result in MCP format
-	return map[string]interface{}{
+	response := map[string]interface{}{ // Build MCP success payload after tool execution completes.
 		"content": []map[string]interface{}{
 			{
 				"type": "text",
@@ -105,7 +115,91 @@ func (h *MCPHandler) ToolsCall(ctx context.Context, params json.RawMessage) (int
 			},
 		},
 		"isError": false,
-	}, nil
+	}
+	logger.Info("mcp tools/call done", "tool", p.Name, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful tool completion with elapsed time.
+	return response, nil                                                                                        // Return standard MCP response and nil error.
+}
+
+// internalCodePattern matches internal error markers like [E.CONFIG.MISSING] inside wrapped error strings.
+var internalCodePattern = regexp.MustCompile(`\[(E\.[A-Z0-9._]+)\]`) // Compile once to avoid per-request regex allocations.
+
+// normalizeToolError executes this operation.
+func normalizeToolError(toolName string, err error) error {
+	if mcpErr, ok := err.(*MCPError); ok { // Reuse existing MCP error objects produced by handler methods.
+		rawError := stringifyErrorData(mcpErr.Data, err) // Preserve the most specific raw error text for users and debugging.
+		data := map[string]interface{}{                  // Return structured data so clients can render richer diagnostics.
+			"interface":    "tools/call",                        // Identify the failed interface category for consumers.
+			"tool":         toolName,                            // Identify the exact failing tool for quick triage.
+			"rawError":     rawError,                            // Keep original downstream/native error message if available.
+			"internalCode": extractInternalCode(rawError),       // Parse standardized internal code when present.
+			"hint":         toolFailureHint(toolName, rawError), // Add actionable hint without hiding source error.
+		}
+		mcpErr.Data = data // Overwrite flat string data with structured details while keeping top-level MCP code/message.
+		return mcpErr      // Return same MCPError instance to preserve code/message semantics.
+	}
+
+	// Convert non-MCP errors to MCP server errors with full context.
+	return &MCPError{ // Wrap unknown error types so clients still receive consistent diagnostic fields.
+		Code:    -32000, // Use server error code for unexpected tool execution failures.
+		Message: "Tool execution failed",
+		Data: map[string]interface{}{
+			"interface":    "tools/call",                           // Mark this as a tool-call execution failure.
+			"tool":         toolName,                               // Include tool name for routing/debugging on client side.
+			"rawError":     err.Error(),                            // Preserve original error text from lower layers.
+			"internalCode": extractInternalCode(err.Error()),       // Extract internal code when wrapped text includes it.
+			"hint":         toolFailureHint(toolName, err.Error()), // Provide lightweight next-step guidance.
+		},
+	}
+}
+
+// stringifyErrorData executes this operation.
+func stringifyErrorData(data interface{}, fallback error) string {
+	if s, ok := data.(string); ok && strings.TrimSpace(s) != "" { // Prefer explicit string data set by existing handlers.
+		return s // Keep exact handler-provided message to avoid losing details.
+	}
+	if data != nil { // Serialize non-string payloads for backward-compatible visibility.
+		if raw, err := json.Marshal(data); err == nil { // Best-effort JSON serialization for arbitrary data payloads.
+			return string(raw) // Return serialized payload as diagnostic raw text.
+		}
+	}
+	return fallback.Error() // Fallback to the wrapped error text when no data payload exists.
+}
+
+// extractInternalCode executes this operation.
+func extractInternalCode(raw string) string {
+	matches := internalCodePattern.FindAllStringSubmatch(raw, -1) // Collect all embedded internal codes from wrapped error chains.
+	if len(matches) == 0 {                                         // Return empty code when source text has no standardized marker.
+		return ""
+	}
+	last := matches[len(matches)-1] // Use the innermost/root cause code from the wrapped chain.
+	if len(last) == 2 {             // Ensure capture group exists before indexing.
+		return last[1] // Return root internal code value like E.CONFIG.INVALID.
+	}
+	return "" // Fall back to empty when regex capture format is unexpected.
+}
+
+// toolFailureHint executes this operation.
+func toolFailureHint(toolName string, raw string) string {
+	lower := strings.ToLower(raw) // Normalize for substring matching across mixed-case provider errors.
+	switch {                      // Match common environment/provider failures first.
+	case strings.Contains(lower, "could not resolve host"), strings.Contains(lower, "no such host"):
+		return "Check DNS/network egress from the server runtime."
+	case strings.Contains(lower, "connection refused"):
+		return "Target service is not listening; verify host/port and process health."
+	case strings.Contains(lower, "role \"postgres\" does not exist"):
+		return "Update storage.postgres.dsn or create the postgres role locally."
+	case strings.Contains(lower, "appium_url is empty"):
+		return "Set worker.appium_url in config.yaml."
+	case strings.Contains(lower, "non-standard capabilities should have a vendor prefix"):
+		return "Use W3C caps with appium: prefixes (for example appium:udid, appium:automationName)."
+	case strings.Contains(lower, "devicefarm mode is not run_api"):
+		return "Set devicefarm.mode=run_api before calling Device Farm tools."
+	case strings.Contains(lower, "devicefarm client not initialized"):
+		return "Verify aws.region/profile credentials and Device Farm config."
+	case strings.Contains(lower, "exec: \"adb\": executable file not found"):
+		return "Install Android platform-tools and ensure adb is in PATH."
+	}
+	return fmt.Sprintf("Inspect rawError for %s and fix the upstream dependency/configuration.", toolName) // Provide a deterministic fallback hint.
 }
 
 // executeTool routes tool calls to business logic
