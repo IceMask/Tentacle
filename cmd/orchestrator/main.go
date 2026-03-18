@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/orchestrator"
+	"mcp_for_appium/internal/startup"
 	"mcp_for_appium/internal/storage/postgres"
 	"mcp_for_appium/internal/storage/redis"
 	"mcp_for_appium/internal/storage/s3"
@@ -22,11 +24,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+	if cfg.Orchestrator.ExecutionMode != orchestrator.ExecutionModeDistributed { // Preserve the current standalone-binary behavior by normalizing to distributed mode before validation runs.
+		log.Printf("forcing execution mode to %q for standalone orchestrator", orchestrator.ExecutionModeDistributed) // Surface the effective runtime mode so operators can see the normalization.
+		cfg.Orchestrator.ExecutionMode = orchestrator.ExecutionModeDistributed                                        // Apply the effective mode before startup preflight checks inspect the config.
+	}
+	if err := startup.ValidateOrchestratorStartup(cfg); err != nil { // Reject malformed startup config before telemetry or dependency initialization begins.
+		log.Fatalf("orchestrator startup preflight failed: %v", err) // Stop immediately so no background loops or listeners start with invalid config.
+	}
 
 	// 2. Init Telemetry
 	// 初始化日志（Tracing 待接入）
 	telemetry.InitLogger(cfg.Telemetry.LogLevel, cfg.Telemetry.LogFile) // Initialize structured logging with optional file sink.
-	log.SetOutput(telemetry.StdLogWriter())                              // Route standard log package output to configured sinks.
+	log.SetOutput(telemetry.StdLogWriter())                             // Route standard log package output to configured sinks.
 	shutdownTracer := telemetry.InitTracer("orchestrator", cfg.Telemetry.OTLPEndpoint)
 	defer func() {
 		_ = shutdownTracer(context.Background())
@@ -53,11 +62,12 @@ func main() {
 
 	// 4. Init Service
 	// 构造 orchestrator 服务，内部包含 dispatcher/registry
-	if cfg.Orchestrator.ExecutionMode != orchestrator.ExecutionModeDistributed {
-		log.Printf("forcing execution mode to %q for standalone orchestrator", orchestrator.ExecutionModeDistributed)
-		cfg.Orchestrator.ExecutionMode = orchestrator.ExecutionModeDistributed
-	}
 	svc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)
+	preflightCtx, preflightCancel := context.WithTimeout(context.Background(), 5*time.Second) // Bound dependency probes so standalone startup fails fast when a required dependency is unavailable.
+	defer preflightCancel()                                                                   // Release the dependency-check timeout resources after startup validation finishes.
+	if err := startup.CheckS3BucketAccess(preflightCtx, s3Client); err != nil {               // Verify the artifact bucket exists and is reachable before the orchestrator starts background loops.
+		log.Fatalf("orchestrator startup preflight failed for s3: %v", err) // Stop immediately so later artifact operations do not fail only after runtime traffic begins.
+	}
 
 	// 5. Start Service (dispatcher and registry monitor)
 	// 启动后台循环

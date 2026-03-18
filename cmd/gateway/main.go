@@ -21,6 +21,7 @@ import (
 	"mcp_for_appium/internal/gateway/stdio"
 	"mcp_for_appium/internal/gateway/websocket"
 	"mcp_for_appium/internal/orchestrator"
+	"mcp_for_appium/internal/startup"
 	"mcp_for_appium/internal/storage/postgres"
 	"mcp_for_appium/internal/storage/redis"
 	"mcp_for_appium/internal/storage/s3"
@@ -41,10 +42,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+	if err := startup.ValidateGatewayStartup(cfg, *stdioMode); err != nil { // Reject malformed startup config before telemetry or dependency initialization begins.
+		log.Fatalf("gateway startup preflight failed: %v", err) // Stop immediately so no listener starts with an invalid runtime configuration.
+	}
 
 	// 初始化日志与遥测
 	telemetry.InitLogger(cfg.Telemetry.LogLevel, cfg.Telemetry.LogFile) // Initialize structured logging with optional file sink.
-	log.SetOutput(telemetry.StdLogWriter())                              // Mirror standard-library logs into the configured log destinations.
+	log.SetOutput(telemetry.StdLogWriter())                             // Mirror standard-library logs into the configured log destinations.
 	shutdownTracer := telemetry.InitTracer("gateway", cfg.Telemetry.OTLPEndpoint)
 	defer func() {
 		_ = shutdownTracer(context.Background())
@@ -83,6 +87,14 @@ func runStdioMode(cfg *config.Config) {
 	s3Client, err := s3.NewClient(ctx, cfg.Storage.S3)
 	if err != nil {
 		log.Fatalf("failed to init s3: %v", err)
+	}
+	preflightCtx, preflightCancel := context.WithTimeout(ctx, 5*time.Second)    // Bound dependency probes so startup fails fast instead of hanging indefinitely on unavailable services.
+	defer preflightCancel()                                                     // Release the dependency-check timeout resources after startup validation finishes.
+	if err := startup.CheckS3BucketAccess(preflightCtx, s3Client); err != nil { // Verify the artifact bucket exists and is reachable before accepting stdio traffic.
+		log.Fatalf("stdio startup preflight failed for s3: %v", err) // Stop immediately so later artifact writes do not fail on the first real request.
+	}
+	if err := startup.CheckAppiumReachability(preflightCtx, cfg.Worker.AppiumURL); err != nil { // Verify the embedded Appium dependency is reachable before the monolith orchestrator starts.
+		log.Fatalf("stdio startup preflight failed for appium: %v", err) // Stop immediately so session creation does not fail only after the first user request.
 	}
 
 	orchSvc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)
@@ -135,6 +147,14 @@ func runHTTPMode(cfg *config.Config) {
 	s3Client, err := s3.NewClient(context.Background(), cfg.Storage.S3)
 	if err != nil {
 		log.Fatalf("failed to init s3: %v", err)
+	}
+	preflightCtx, preflightCancel := context.WithTimeout(context.Background(), 5*time.Second) // Bound dependency probes so HTTP startup fails fast when a required dependency is unavailable.
+	defer preflightCancel()                                                                   // Release the dependency-check timeout resources after startup validation finishes.
+	if err := startup.CheckS3BucketAccess(preflightCtx, s3Client); err != nil {               // Verify the artifact bucket exists and is reachable before the HTTP server starts.
+		log.Fatalf("http startup preflight failed for s3: %v", err) // Stop immediately so artifact operations do not fail only after requests arrive.
+	}
+	if err := startup.CheckAppiumReachability(preflightCtx, cfg.Worker.AppiumURL); err != nil { // Verify the embedded Appium dependency is reachable before the monolith orchestrator starts.
+		log.Fatalf("http startup preflight failed for appium: %v", err) // Stop immediately so session creation does not fail only after requests arrive.
 	}
 
 	orchSvc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)

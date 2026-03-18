@@ -15,6 +15,7 @@ import (
 
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/rpc"
+	"mcp_for_appium/internal/startup"
 	"mcp_for_appium/internal/telemetry"
 	"mcp_for_appium/internal/worker"
 )
@@ -25,10 +26,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
+	if err := startup.ValidateWorkerStartup(cfg); err != nil { // Reject malformed startup config before any listener or registration logic begins.
+		log.Fatalf("worker startup preflight failed: %v", err) // Stop immediately so the worker never advertises itself with invalid runtime settings.
+	}
 
 	telemetry.InitLogger(cfg.Telemetry.LogLevel, cfg.Telemetry.LogFile) // Initialize structured logging with optional file sink.
-	log.SetOutput(telemetry.StdLogWriter())                              // Route standard log messages to configured sinks too.
+	log.SetOutput(telemetry.StdLogWriter())                             // Route standard log messages to configured sinks too.
 	logger := telemetry.Logger()
+	preflightCtx, preflightCancel := context.WithTimeout(context.Background(), 5*time.Second)   // Bound the Appium reachability probe so worker startup fails fast on unavailable devices.
+	defer preflightCancel()                                                                     // Release the dependency-check timeout resources after startup validation finishes.
+	if err := startup.CheckAppiumReachability(preflightCtx, cfg.Worker.AppiumURL); err != nil { // Verify the configured Appium endpoint is reachable before the worker starts serving plans.
+		log.Fatalf("worker startup preflight failed for appium: %v", err) // Stop immediately so the worker does not register as healthy while its primary dependency is down.
+	}
 
 	workerID := uuid.New().String()
 

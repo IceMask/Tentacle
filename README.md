@@ -11,8 +11,15 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 
 - ✅ **标准 MCP 协议支持**：实现 Anthropic MCP 标准（协议版本 2024-11-05）
 - ✅ **stdio 传输模式**：通过 `gateway --stdio` 启动，支持 Claude Desktop 配置
-- ✅ **MCP Tools 注册表**：20 个工具（会话/执行/元素/手势/实用）暴露给 LLM
+- ✅ **MCP Tools 注册表**：26 个工具（会话/执行/元素/手势/实用/Device Farm/调试）暴露给 LLM
 - ✅ **向后兼容**：保持原有 HTTP/REST/gRPC/WebSocket 接口不变
+
+### 当前运行边界
+
+- 推荐运行模式：`monolith`
+- `distributed`：**experimental**，当前不建议作为生产入口模式
+- Gateway 的 HTTP 与 `stdio` 入口当前都以 `monolith` 为正式支持模式
+- JSON-RPC 预留方法 `replay` `subscribe` `unsubscribe` 当前仍未实现
 
 ### 快速开始
 
@@ -55,17 +62,42 @@ curl -X POST http://localhost:8080/jsonrpc \
   }'
 ```
 
+#### 3. 初始化 PostgreSQL Schema
+
+在首次启动 `gateway` 或 `orchestrator` 之前，先应用仓库自带的 schema migration：
+
+```bash
+export DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/mcp_mobile_worker?sslmode=disable'
+psql "$DATABASE_URL" -f internal/storage/postgres/migrations/001_init.sql
+psql "$DATABASE_URL" -f internal/storage/postgres/migrations/002_audit_logs.sql
+```
+
+迁移目录说明见：
+
+- [internal/storage/postgres/migrations/README.md](./internal/storage/postgres/migrations/README.md)
+
+如需做完整的 migration 回放验证，可以直接运行：
+
+```bash
+go run ./cmd/migration_replay_check
+```
+
 ### MCP Tools 列表
 
 通过 MCP 协议可用的工具：
 
-- 共 **26** 个工具（截至 2026-02-26）
+- 共 **26** 个工具（截至 2026-03-16）
 - 核心会话/执行工具：`startSession` `executePlan` `endSession` `cancelPlan` `getTrace`
 - 交互式元素工具：`findElement` `clickElement` `sendKeysToElement` `clearElement` `getElementText` `getElementAttribute` `isElementDisplayed`
 - 手势工具：`tap` `swipe` `longPress` `pressBack` `hideKeyboard`
 - 实用工具：`getSemanticSnapshot` `takeScreenshot` `healthCheck`
 - Device Farm 工具：`createDeviceFarmUpload` `getDeviceFarmUpload` `getDeviceFarmRuntimeContext` `scheduleDeviceFarmRun` `getDeviceFarmRun`
 - 设备调试工具：`adbShell`
+
+补充说明：
+
+- 上述 **26 个** 名称是当前实际可发现的 MCP tools
+- JSON-RPC schema 中还保留了 `replay` `subscribe` `unsubscribe` 三个方法名，但它们当前 **未实现**，不计入可用 MCP tools 集
 
 ### Device Farm 参数缓存说明（run_api 模式）
 
@@ -80,6 +112,7 @@ curl -X POST http://localhost:8080/jsonrpc \
 - [需求说明 v4.3](./requirements.v4.3.md)
 - [架构设计 v4.3](./module_v4.3_design.md)
 - [详细文档](./appium_mcp_docs_v4_3_detailed/)
+- [PostgreSQL Migrations](./internal/storage/postgres/migrations/README.md)
 
 ## 系统架构
 

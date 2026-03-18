@@ -3,6 +3,7 @@ package s3
 import (
 	"bytes"
 	"context"
+	"strings"
 	"time"
 
 	"mcp_for_appium/internal/config"
@@ -61,6 +62,18 @@ func NewClient(ctx context.Context, cfg config.S3Config) (*Client, error) {
 		presign:  s3.NewPresignClient(client),
 		bucket:   cfg.Bucket,
 	}, nil
+}
+
+// ValidateBucket verifies that the configured bucket name is present and reachable for metadata requests.
+func (c *Client) ValidateBucket(ctx context.Context) error {
+	if strings.TrimSpace(c.bucket) == "" { // Reject an empty bucket name before any request is signed or sent to the object store.
+		return errors.New(errors.CodeConfigMissing, "s3 bucket is empty") // Surface the missing bucket as a startup configuration error.
+	}
+	if _, err := c.s3Client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(c.bucket)}); err != nil { // Probe the configured bucket so missing or inaccessible buckets fail during startup instead of the first artifact upload.
+		return errors.Wrap(errors.CodeStoreConn, "failed to access s3 bucket", err) // Surface bucket reachability or permission failures as storage connection errors.
+	}
+
+	return nil // Return success once the configured bucket has been verified successfully.
 }
 
 // PresignPut executes this operation.

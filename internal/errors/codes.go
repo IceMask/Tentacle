@@ -99,6 +99,17 @@ func Wrap(code ErrorCode, msg string, err error) *Error {
 	return &Error{Code: code, Message: msg, Err: err}
 }
 
+// WrapPreservingCode creates a new Error that keeps the wrapped internal error code when one already exists.
+func WrapPreservingCode(msg string, err error) *Error {
+	if err == nil { // Fall back to a plain internal error when the caller does not provide a wrapped cause.
+		return &Error{Code: CodeInternal, Message: msg} // Return a stable internal-code wrapper so callers never receive a nil error value.
+	}
+	if code, ok := CodeOf(err); ok { // Reuse the wrapped standardized code so higher layers preserve transport mapping semantics.
+		return &Error{Code: code, Message: msg, Err: err} // Keep the original code while still adding the higher-level context message.
+	}
+	return &Error{Code: CodeInternal, Message: msg, Err: err} // Default to the internal code when the wrapped error is not one of the repository-standardized errors.
+}
+
 // MapToGRPC maps an internal error to a gRPC status error.
 func MapToGRPC(err error) error {
 	e, ok := err.(*Error)

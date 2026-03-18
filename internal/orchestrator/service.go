@@ -100,7 +100,8 @@ func NewService(cfg config.OrchestratorConfig, workerCfg config.WorkerConfig, aw
 	if mode == ExecutionModeMonolith {
 		executor = svc
 	}
-	dispatcher := NewDispatcher(cache, registry, executor)
+	dispatcher := NewDispatcher(cache, registry, executor, cfg.PlanTimeout) // Pass the configured plan timeout into dispatcher so distributed in-flight traces can be closed when workers never report a result.
+	dispatcher.finalizer = svc                                              // Wire the service's durable terminalization helper into dispatcher-owned terminal paths before the service starts processing queue messages.
 	svc.dispatcher = dispatcher
 
 	return svc
@@ -142,7 +143,7 @@ func (s *Service) Stop() {
 func (s *Service) StartSession(ctx context.Context, projectID string, caps map[string]interface{}) (*postgres.Session, error) {
 	ctx, span := otel.Tracer("orchestrator").Start(ctx, "StartSession")
 	defer span.End()
-	startedAt := time.Now() // Capture method start for duration logging.
+	startedAt := time.Now()                                                                                       // Capture method start for duration logging.
 	s.logger.InfoContext(ctx, "orchestrator StartSession begin", "project_id", projectID, "caps_keys", len(caps)) // Log method entry with high-signal inputs.
 
 	if s.appiumURL == "" {
@@ -154,7 +155,7 @@ func (s *Service) StartSession(ctx context.Context, projectID string, caps map[s
 	appiumSessionID, err := app.StartSession(ctx, caps)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "orchestrator StartSession failed", "project_id", projectID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log upstream Appium failures with method latency.
-		return nil, errors.Wrap(errors.CodeInternal, "failed to start appium session", err)
+		return nil, errors.WrapPreservingCode("failed to start appium session", err)                                                                               // Preserve the downstream Appium timeout/not-found code so gateway transports keep the correct external status mapping.
 	}
 
 	// 1. Create Session in DB
@@ -200,7 +201,7 @@ func (s *Service) ExecutePlan(ctx context.Context, sessionID string, plan json.R
 func (s *Service) ExecutePlanWithTrace(ctx context.Context, sessionID string, traceID string, plan json.RawMessage) (string, error) {
 	ctx, span := otel.Tracer("orchestrator").Start(ctx, "ExecutePlan")
 	defer span.End()
-	startedAt := time.Now() // Capture method start for duration logging.
+	startedAt := time.Now()                                                                                                            // Capture method start for duration logging.
 	s.logger.InfoContext(ctx, "orchestrator ExecutePlan begin", "session_id", sessionID, "trace_id", traceID, "plan_bytes", len(plan)) // Log entry to execution scheduling path.
 
 	// 1. Validate Session
@@ -256,19 +257,19 @@ func (s *Service) GetSession(ctx context.Context, sessionID string) (*postgres.S
 	return s.dao.GetSession(ctx, sessionID)
 }
 
-// EndSession executes this operation.
+// EndSession marks the persisted session as ended exactly once, then releases the cached Appium session and Redis mapping.
 func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 	ctx, span := otel.Tracer("orchestrator").Start(ctx, "EndSession")
 	defer span.End()
-	startedAt := time.Now() // Capture method start for duration logging.
+	startedAt := time.Now()                                                             // Capture method start for duration logging.
 	s.logger.InfoContext(ctx, "orchestrator EndSession begin", "session_id", sessionID) // Log session shutdown method entry.
 
-	sess, err := s.dao.GetSession(ctx, sessionID)
-	if err != nil {
+	ended, err := s.markSessionEnded(ctx, sessionID, time.Now()) // Persist the terminal session state first so concurrent callers observe idempotent completion from the database record.
+	if err != nil {                                              // Stop before touching the in-memory Appium session map when the persisted session transition fails.
 		s.logger.ErrorContext(ctx, "orchestrator EndSession failed", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log lookup failures before returning.
 		return err
 	}
-	if sess.Status == "ended" {
+	if !ended { // Treat repeated end-session requests as successful no-ops once another caller has already completed the transition.
 		s.logger.InfoContext(ctx, "orchestrator EndSession done", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds(), "already_ended", true) // Log idempotent completion path.
 		return nil
 	}
@@ -287,16 +288,11 @@ func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 			"error", err)
 	}
 
-	if err := s.dao.EndSession(ctx, sessionID, time.Now()); err != nil {
-		s.logger.ErrorContext(ctx, "orchestrator EndSession failed", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log DB write failures.
-		return errors.Wrap(errors.CodeStoreWrite, "failed to end session", err)
-	}
-
 	s.logger.InfoContext(ctx, "orchestrator EndSession done", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful session termination.
 	return nil
 }
 
-// CancelPlan executes this operation.
+// CancelPlan cancels local execution, propagates cancellation to distributed workers when needed, and marks active traces as cancelled without clobbering terminal states.
 func (s *Service) CancelPlan(ctx context.Context, traceID string) error {
 	s.planMu.Lock()
 	cancel := s.planCancel[traceID]
@@ -319,8 +315,12 @@ func (s *Service) CancelPlan(ctx context.Context, traceID string) error {
 	}
 
 	_ = s.dispatcher.CancelPlan(ctx, traceID)
-	if err := s.dao.UpdateTraceStatus(ctx, traceID, "cancelled"); err != nil {
-		return errors.Wrap(errors.CodeStoreWrite, "failed to update trace status", err)
+	cancelled, err := s.finalizeTrace(ctx, traceID, []string{"pending", "running"}, "cancelled", "trace cancelled", nil, 0) // Persist the cancelled terminal state together with one final trace event so replay consumers see a durable terminal marker.
+	if err != nil {                                                                                                         // Stop immediately when the transactional terminalization helper fails.
+		return err // Preserve the wrapped storage error produced by the optimistic transition helper.
+	}
+	if !cancelled { // Keep cancel idempotent when another worker or caller has already moved the trace to a terminal state.
+		s.logger.InfoContext(ctx, "cancel ignored because trace is already terminal", "trace_id", traceID) // Emit a low-noise informational log so operators can distinguish ignored cancels from failures.
 	}
 
 	return nil
@@ -528,7 +528,7 @@ func (s *Service) storeArtifact(ctx context.Context, traceID string, key string,
 	}, nil
 }
 
-// ExecuteDispatchedPlan executes this operation.
+// ExecuteDispatchedPlan runs a queued plan for an existing session and drives the trace through guarded lifecycle transitions from pending to running to a terminal state.
 func (s *Service) ExecuteDispatchedPlan(ctx context.Context, traceID string, sessionID string, plan json.RawMessage) error {
 	ctx, span := otel.Tracer("orchestrator").Start(ctx, "ExecuteDispatchedPlan")
 	defer span.End()
@@ -544,19 +544,23 @@ func (s *Service) ExecuteDispatchedPlan(ctx context.Context, traceID string, ses
 		s.planMu.Unlock()
 	}()
 
-	if err := s.dao.UpdateTraceStatus(runCtx, traceID, "running"); err != nil {
-		return errors.Wrap(errors.CodeStoreWrite, "failed to update trace status", err)
+	transitioned, err := s.transitionTraceStatus(runCtx, traceID, []string{"pending"}, "running") // Move the trace into running only if no concurrent cancel or terminal transition has already won.
+	if err != nil {                                                                               // Surface storage-layer compare-and-swap failures before plan parsing begins.
+		return err // Preserve the wrapped storage error from the optimistic transition helper.
+	}
+	if !transitioned { // Reject execution when the trace is no longer in the expected pending state.
+		return errors.New(errors.CodeStateConflict, "trace is not pending") // Return a stable state-conflict error instead of overwriting another terminal state.
 	}
 
 	steps, err := worker.ParsePlan(plan)
 	if err != nil {
-		_ = s.dao.UpdateTraceStatus(runCtx, traceID, "failed")
+		_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "trace failed before execution started", err, 0) // Persist the failed terminal state and matching final event before returning the plan-parse error.
 		return err
 	}
 
 	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
-		_ = s.dao.UpdateTraceStatus(runCtx, traceID, "failed")
+		_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "trace failed before acquiring the session client", err, 0) // Persist the failed terminal state and final event without overwriting a concurrent cancellation result.
 		return err
 	}
 
@@ -587,22 +591,23 @@ func (s *Service) ExecuteDispatchedPlan(ctx context.Context, traceID string, ses
 			telemetry.ErrorCodeTotal.WithLabelValues(string(code), "orchestrator").Inc()
 		}
 		if errors.IsCode(err, errors.CodeSessionDead) || errors.IsCode(err, errors.CodeSessionBroken) {
-			_ = s.dao.UpdateTraceStatus(runCtx, traceID, "failed")
+			_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "trace failed because the session became unusable", err, 0) // Persist the failed terminal state and final event without clobbering a concurrent cancellation or other terminal transition.
 			telemetry.ExecuteLatency.WithLabelValues("", "", "failed").Observe(elapsed)
 			return err
 		}
 		if runCtx.Err() == context.Canceled || runCtx.Err() == context.DeadlineExceeded {
-			_ = s.dao.UpdateTraceStatus(runCtx, traceID, "cancelled")
+			_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "cancelled", "trace cancelled during execution", err, 0) // Persist cancellation as the winning terminal state together with one final trace event.
 			telemetry.ExecuteLatency.WithLabelValues("", "", "failed").Observe(elapsed)
 			return err
 		}
 		telemetry.ExecuteLatency.WithLabelValues("", "", "failed").Observe(elapsed)
-		_ = s.dao.UpdateTraceStatus(runCtx, traceID, "failed")
+		_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "trace failed during execution", err, 0) // Persist the failed terminal state and final event without clobbering a concurrent terminal state update.
 		return err
 	}
 
 	telemetry.ExecuteLatency.WithLabelValues("", "", "passed").Observe(elapsed)
-	return s.dao.UpdateTraceStatus(runCtx, traceID, "completed")
+	_, err = s.finalizeTrace(runCtx, traceID, []string{"running"}, "completed", "trace completed", nil, 0) // Persist the completed terminal state together with one final trace event when this executor still owns the running state.
+	return err                                                                                             // Return any storage-layer failure while treating a lost race to another terminal state as a successful no-op.
 }
 
 // Interactive element operations
@@ -868,7 +873,7 @@ func (s *Service) GetDeviceFarmRuntimeContext(ctx context.Context, projectARN st
 
 // AdbShell executes this operation.
 func (s *Service) AdbShell(ctx context.Context, deviceSerial string, command []string) (map[string]interface{}, error) {
-	startedAt := time.Now() // Capture method start for per-command latency logging.
+	startedAt := time.Now()                                                                                                        // Capture method start for per-command latency logging.
 	s.logger.InfoContext(ctx, "orchestrator AdbShell begin", "device_serial", strings.TrimSpace(deviceSerial), "command", command) // Log adb command invocation.
 
 	// Ensure a non-empty command body before attempting adb invocation.
