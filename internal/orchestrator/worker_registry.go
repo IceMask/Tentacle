@@ -182,6 +182,28 @@ func (r *WorkerRegistry) ListAvailable(ctx context.Context) ([]*WorkerNode, erro
 	return workers, nil
 }
 
+// HealthSummary returns the current in-memory worker health counts used by the orchestrator health endpoint.
+func (r *WorkerRegistry) HealthSummary() workerRegistryHealthSummary {
+	summary := workerRegistryHealthSummary{} // Allocate the mutable summary that will accumulate worker counts across the registry snapshot.
+	r.workers.Range(func(key, value interface{}) bool {
+		worker := value.(*WorkerNode) // Read one cached worker entry so this snapshot can classify its current health state.
+		summary.Total++               // Count every cached worker regardless of health state so callers can see total fleet size.
+		switch worker.Status {        // Bucket the worker by its current health state so health output can report healthy, degraded, and offline capacity separately.
+		case "healthy":
+			summary.Healthy++ // Count workers that are currently considered healthy and assignable.
+		case "degraded":
+			summary.Degraded++ // Count workers that are still known but have missed enough heartbeats to lose full trust.
+		case "offline":
+			summary.Offline++ // Count workers that have missed enough heartbeats to be treated as offline.
+		default:
+			summary.Unknown++ // Count any unexpected state explicitly so health output reveals registry-state drift instead of hiding it.
+		}
+		return true // Continue iterating until every cached worker has been included in the summary snapshot.
+	})
+
+	return summary // Return the completed registry snapshot for health-check reporting.
+}
+
 // StartMonitor starts monitoring worker heartbeats
 func (r *WorkerRegistry) StartMonitor(ctx context.Context) {
 	go r.monitorLoop(ctx)

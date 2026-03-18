@@ -422,40 +422,6 @@ func (s *Service) TakeScreenshot(ctx context.Context, sessionID string, traceID 
 	return result, nil
 }
 
-// HealthCheck executes this operation.
-func (s *Service) HealthCheck(ctx context.Context) map[string]interface{} {
-	status := "healthy"
-	issues := []string{}
-	checks := map[string]string{}
-	healthValue := 2.0
-
-	if err := s.dao.Ping(ctx); err != nil {
-		status = "degraded"
-		healthValue = 1.0
-		checks["database"] = "error"
-		issues = append(issues, "postgres")
-	} else {
-		checks["database"] = "ok"
-	}
-
-	if err := s.cache.Ping(ctx); err != nil {
-		status = "degraded"
-		healthValue = 1.0
-		checks["redis"] = "error"
-		issues = append(issues, "redis")
-	} else {
-		checks["redis"] = "ok"
-	}
-
-	telemetry.HealthStatus.WithLabelValues("orchestrator").Set(healthValue)
-
-	return map[string]interface{}{
-		"status": status,
-		"issues": issues,
-		"checks": checks,
-	}
-}
-
 // getAppiumClient executes this operation.
 func (s *Service) getAppiumClient(ctx context.Context, sessionID string) (*appium.Client, error) {
 	s.appiumMu.Lock()

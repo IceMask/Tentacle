@@ -158,6 +158,21 @@ func (c *Cache) XAck(ctx context.Context, stream, group, messageID string) error
 	return c.client.XAck(ctx, stream, group, messageID).Err()
 }
 
+// XLen returns the retained entry count for one Redis stream.
+func (c *Cache) XLen(ctx context.Context, stream string) (int64, error) {
+	return c.client.XLen(ctx, stream).Result() // Return the stream length exactly as Redis reports it so health checks can inspect retained queue depth.
+}
+
+// XPendingCount returns the number of pending entries currently owned by one consumer group for one stream.
+func (c *Cache) XPendingCount(ctx context.Context, stream, group string) (int64, error) {
+	summary, err := c.client.XPending(ctx, stream, group).Result() // Ask Redis for the consumer-group pending summary so health checks can inspect stuck queue work.
+	if err != nil {                                                // Preserve Redis failures so callers can decide whether to degrade health output or ignore missing groups.
+		return 0, err // Return the raw Redis error so higher layers can distinguish missing groups from real cache failures.
+	}
+
+	return summary.Count, nil // Return the pending-entry count reported by Redis for the requested stream and consumer group.
+}
+
 // XAutoClaim claims messages idle for minIdleTime
 func (c *Cache) XAutoClaim(ctx context.Context, stream, group, consumer string, minIdleTime time.Duration, start string, count int64) ([]StreamMessage, error) {
 	args := &redis.XAutoClaimArgs{

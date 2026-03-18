@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -629,6 +630,41 @@ func (d *Dispatcher) cleanupRetryState(ctx context.Context, traceID string) {
 			"trace_id", traceID,
 			"error", err)
 	}
+}
+
+// HealthSummary returns queue and in-flight counts used by the orchestrator health endpoint.
+func (d *Dispatcher) HealthSummary(ctx context.Context) (queueHealthSummary, error) {
+	summary := queueHealthSummary{Shards: numShards} // Seed the queue snapshot with the fixed shard count so health output always reports how many streams were inspected.
+	for i := 0; i < numShards; i++ {                 // Inspect every dispatcher shard so queue health reflects the whole stream set instead of a single shard.
+		stream := d.streamName(i)                  // Resolve the Redis stream name for the current shard before querying retained and pending counts.
+		retained, err := d.cache.XLen(ctx, stream) // Read the retained entry count so health output can reveal whether the stream is growing unexpectedly.
+		if err != nil {                            // Stop immediately when Redis cannot report the retained count for one shard because the queue snapshot is then incomplete.
+			return queueHealthSummary{}, errors.Wrap(errors.CodeStoreRead, "failed to inspect queue stream length", err) // Surface the queue-inspection failure through the standard storage-read error contract.
+		}
+		summary.RetainedMessages += retained // Accumulate the retained entries across all shards so operators can see total stream depth at a glance.
+
+		pending, err := d.cache.XPendingCount(ctx, stream, consumerGroup) // Read the consumer-group pending count so health output can reveal stuck claimed work.
+		if err != nil {                                                   // Ignore missing-group errors but surface any other Redis failure because it hides queue state.
+			if !isMissingConsumerGroupError(err) { // Treat missing groups as zero pending entries because a newly started dispatcher may not have created them yet.
+				return queueHealthSummary{}, errors.Wrap(errors.CodeStoreRead, "failed to inspect queue pending count", err) // Surface real Redis failures through the standard storage-read error contract.
+			}
+		} else {
+			summary.PendingMessages += pending // Accumulate the pending entries across all shards once Redis has reported the count successfully.
+		}
+	}
+
+	keys, err := d.cache.Keys(ctx, inflightTracePrefix+"*") // Load every in-flight assignment key so health output can report how many distributed traces are currently active.
+	if err != nil {                                         // Stop immediately when Redis cannot list the in-flight assignment keys because the execution-health snapshot is incomplete.
+		return queueHealthSummary{}, errors.Wrap(errors.CodeStoreRead, "failed to inspect inflight trace assignments", err) // Surface the key-listing failure through the standard storage-read error contract.
+	}
+	summary.InflightTraces = len(keys) // Record the current number of distributed traces that are still tracked as in-flight after queue ACK.
+
+	return summary, nil // Return the completed queue and in-flight snapshot for health-check reporting.
+}
+
+// isMissingConsumerGroupError returns true when a queue-inspection error only means the Redis stream group has not been created yet.
+func isMissingConsumerGroupError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "NOGROUP") // Match the Redis consumer-group missing error so health checks can treat never-started streams as zero pending instead of hard-failing.
 }
 
 // getWorkerClient returns a cached gRPC client for the given worker address,

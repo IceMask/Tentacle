@@ -195,7 +195,8 @@ func runHTTPMode(cfg *config.Config) {
 	restRouter.RegisterRoutes(mux)
 	mux.Handle("/ws/plan-events", websocket.NewHandler(wsHub))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, orchSvc.HealthCheck(r.Context()))
+		payload := orchSvc.HealthCheck(r.Context())      // Evaluate the live orchestrator health snapshot before deciding the HTTP status code returned by /healthz.
+		writeJSON(w, healthHTTPStatus(payload), payload) // Return HTTP 503 only when the orchestrator reports a down state so callers can distinguish degraded from unavailable service.
 	})
 	mux.Handle("/metrics", promhttp.Handler())
 
@@ -230,4 +231,13 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// healthHTTPStatus maps the structured orchestrator health payload to the HTTP status returned by /healthz.
+func healthHTTPStatus(payload map[string]interface{}) int {
+	if payload["status"] == "down" { // Return 503 only when the orchestrator explicitly reports a down state that should fail upstream readiness checks.
+		return http.StatusServiceUnavailable // Surface unavailable health directly through the HTTP status code so load balancers and probes react correctly.
+	}
+
+	return http.StatusOK // Return 200 for healthy and degraded states so non-fatal capability issues remain inspectable without ejecting the instance immediately.
 }
