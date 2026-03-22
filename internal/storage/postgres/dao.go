@@ -56,9 +56,9 @@ func (d *DAO) Ping(ctx context.Context) error {
 // CreateSession executes this operation.
 func (d *DAO) CreateSession(ctx context.Context, s *Session) error {
 	_, err := d.pool.Exec(ctx, `
-		INSERT INTO sessions (id, project_id, status, capabilities, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, s.ID, s.ProjectID, s.Status, s.Capabilities, s.CreatedAt, s.UpdatedAt)
+		INSERT INTO sessions (id, project_id, tenant_id, subject_id, status, capabilities, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, s.ID, s.ProjectID, s.TenantID, s.SubjectID, s.Status, s.Capabilities, s.CreatedAt, s.UpdatedAt) // Persist the optional tenant and subject ownership metadata together with the session so later resource access can validate ownership.
 	return err
 }
 
@@ -66,9 +66,9 @@ func (d *DAO) CreateSession(ctx context.Context, s *Session) error {
 func (d *DAO) GetSession(ctx context.Context, id string) (*Session, error) {
 	s := &Session{}
 	err := d.pool.QueryRow(ctx, `
-		SELECT id, project_id, status, capabilities, created_at, updated_at, ended_at
+		SELECT id, project_id, tenant_id, subject_id, status, capabilities, created_at, updated_at, ended_at
 		FROM sessions WHERE id = $1
-	`, id).Scan(&s.ID, &s.ProjectID, &s.Status, &s.Capabilities, &s.CreatedAt, &s.UpdatedAt, &s.EndedAt)
+	`, id).Scan(&s.ID, &s.ProjectID, &s.TenantID, &s.SubjectID, &s.Status, &s.Capabilities, &s.CreatedAt, &s.UpdatedAt, &s.EndedAt) // Load the persisted ownership metadata together with the session lifecycle fields so callers can authorize access.
 	if err != nil {
 		return nil, errors.Wrap(errors.CodeSessionNotFound, "session not found", err)
 	}
@@ -90,9 +90,9 @@ func (d *DAO) EndSession(ctx context.Context, id string, endedAt time.Time) erro
 // CreateTrace executes this operation.
 func (d *DAO) CreateTrace(ctx context.Context, t *Trace) error {
 	_, err := d.pool.Exec(ctx, `
-		INSERT INTO traces (id, session_id, project_id, status, current_attempt, terminal_reason, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, t.ID, t.SessionID, t.ProjectID, t.Status, t.CurrentAttempt, t.TerminalReason, t.CreatedAt, t.UpdatedAt) // Persist the trace together with its distributed-attempt and terminal-reason state so callback guards have a stable source of truth.
+		INSERT INTO traces (id, session_id, project_id, tenant_id, subject_id, status, current_attempt, terminal_reason, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`, t.ID, t.SessionID, t.ProjectID, t.TenantID, t.SubjectID, t.Status, t.CurrentAttempt, t.TerminalReason, t.CreatedAt, t.UpdatedAt) // Persist the trace together with inherited ownership metadata plus its distributed-attempt and terminal-reason state so callback guards and resource access checks share one source of truth.
 	return err // Return the raw insert result so higher layers preserve the existing repository error contract.
 }
 
@@ -100,9 +100,9 @@ func (d *DAO) CreateTrace(ctx context.Context, t *Trace) error {
 func (d *DAO) GetTrace(ctx context.Context, id string) (*Trace, error) {
 	t := &Trace{} // Allocate the destination trace model before scanning the persisted lifecycle and attempt state.
 	err := d.pool.QueryRow(ctx, `
-		SELECT id, session_id, project_id, status, current_attempt, terminal_reason, created_at, updated_at
+		SELECT id, session_id, project_id, tenant_id, subject_id, status, current_attempt, terminal_reason, created_at, updated_at
 		FROM traces WHERE id = $1
-	`, id).Scan(&t.ID, &t.SessionID, &t.ProjectID, &t.Status, &t.CurrentAttempt, &t.TerminalReason, &t.CreatedAt, &t.UpdatedAt) // Load the persisted trace state, current attempt, and terminal reason in one query for callers.
+	`, id).Scan(&t.ID, &t.SessionID, &t.ProjectID, &t.TenantID, &t.SubjectID, &t.Status, &t.CurrentAttempt, &t.TerminalReason, &t.CreatedAt, &t.UpdatedAt) // Load the persisted trace state, ownership metadata, current attempt, and terminal reason in one query for callers.
 	if err != nil { // Preserve the existing trace-not-found contract when PostgreSQL cannot return the requested row.
 		return nil, errors.Wrap(errors.CodeTraceNotFound, "trace not found", err) // Wrap lookup failures with the stable trace-not-found code used by gateway transports.
 	}

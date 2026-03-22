@@ -1,8 +1,10 @@
-# MCP for Appium unified configuration template.
+# MCP for Appium local-development configuration template.
 # Keep this file and local config.yaml in sync for predictable debugging behavior.
 
 gateway:
   port: 8080
+  # Local development keeps TLS disabled explicitly.
+  # For production-facing defaults, start from config.production.example.yaml instead.
   enable_tls: false
   tls_cert_file: ""
   tls_key_file: ""
@@ -55,6 +57,8 @@ websocket:
 
 rpc:
   security:
+    # Local development keeps insecure explicitly enabled for convenience.
+    # For production-facing defaults, start from config.production.example.yaml instead.
     # insecure | tls | mtls
     mode: insecure
     server_cert_file: ""

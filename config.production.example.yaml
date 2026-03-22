@@ -1,0 +1,96 @@
+# MCP for Appium production-oriented configuration template.
+# Start from this file for staging or production deployments and only relax these settings deliberately for local development.
+
+gateway:
+  port: 8443
+  enable_tls: true
+  tls_cert_file: /etc/mcp_for_appium/tls/server.crt
+  tls_key_file: /etc/mcp_for_appium/tls/server.key
+  shutdown_timeout: 30s
+
+orchestrator:
+  grpc_port: 9090
+  plan_timeout: 10m
+  step_timeout: 30s
+  auto_wait_max: 5s
+  snapshot_ttl: 1.5s
+  execution_mode: monolith
+
+worker:
+  appium_url: http://127.0.0.1:4723
+  concurrency: 4
+  heartbeat_interval: 10s
+  advertise_addr: worker-1.internal.example.com:9092
+  tags:
+    platform: android
+  orchestrator_addr: orchestrator.internal.example.com:9090
+  grpc_port: 9092
+
+storage:
+  postgres:
+    dsn: postgres://postgres:postgres@postgres.internal.example.com:5432/mcp_mobile_worker?sslmode=disable
+    max_open_conns: 25
+    max_idle_conns: 5
+    conn_max_lifetime: 5m
+
+  redis:
+    addr: redis.internal.example.com:6379
+    password: ""
+    db: 0
+
+  s3:
+    region: us-east-1
+    bucket: mcp-artifacts
+    access_key_id: ""
+    secret_access_key: ""
+    endpoint: ""
+    force_path_style: false
+
+websocket:
+  subscription_token_ttl: 60s
+
+rpc:
+  security:
+    # insecure | tls | mtls
+    mode: tls
+    server_cert_file: /etc/mcp_for_appium/tls/rpc-server.crt
+    server_key_file: /etc/mcp_for_appium/tls/rpc-server.key
+    client_cert_file: ""
+    client_key_file: ""
+    ca_file: /etc/mcp_for_appium/tls/ca.crt
+    server_name: orchestrator.internal.example.com
+    auth_token: change-me
+
+auth:
+  pat:
+    # disabled | static | postgres
+    mode: postgres
+    static_tokens: {}
+  oidc:
+    issuer_url: https://issuer.example.com
+    audience: mcp-for-appium
+    jwks_url_override: ""
+  hmac:
+    # disabled | static | postgres
+    key_source: postgres
+    static_key_id: ""
+    static_secret: ""
+    window: 5m
+    nonce_ttl: 15m
+
+aws:
+  region: us-west-2
+  profile: ""
+
+devicefarm:
+  # disabled | test_grid | run_api
+  mode: disabled
+  project_arn: ""
+  test_grid_project_arn: ""
+  url_expires_seconds: 600
+
+telemetry:
+  log_level: info
+  log_file: /var/log/mcp_for_appium/mcp.log
+  otlp_endpoint: ""
+  metrics_port: 9091

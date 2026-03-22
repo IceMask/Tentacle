@@ -59,11 +59,11 @@ func (d *DAO) WithTx(ctx context.Context, fn func(*TxDAO) error) error {
 func (d *TxDAO) GetSessionForUpdate(ctx context.Context, id string) (*Session, error) {
 	session := &Session{} // Allocate the destination struct before scanning the locked row.
 	err := d.tx.QueryRow(ctx, `
-		SELECT id, project_id, status, capabilities, created_at, updated_at, ended_at
+		SELECT id, project_id, tenant_id, subject_id, status, capabilities, created_at, updated_at, ended_at
 		FROM sessions
 		WHERE id = $1
 		FOR UPDATE
-	`, id).Scan(&session.ID, &session.ProjectID, &session.Status, &session.Capabilities, &session.CreatedAt, &session.UpdatedAt, &session.EndedAt) // Lock the session row so concurrent end-session calls serialize on the same record.
+	`, id).Scan(&session.ID, &session.ProjectID, &session.TenantID, &session.SubjectID, &session.Status, &session.Capabilities, &session.CreatedAt, &session.UpdatedAt, &session.EndedAt) // Lock the session row together with its ownership metadata so authorization and lifecycle mutations serialize on the same record.
 	if err != nil { // Convert missing-row and query failures into the repository's session-not-found contract.
 		return nil, errors.Wrap(errors.CodeSessionNotFound, "session not found", err) // Preserve the wrapped database error while keeping the existing caller-facing code path stable.
 	}
@@ -75,11 +75,11 @@ func (d *TxDAO) GetSessionForUpdate(ctx context.Context, id string) (*Session, e
 func (d *TxDAO) GetTraceForUpdate(ctx context.Context, id string) (*Trace, error) {
 	trace := &Trace{} // Allocate the destination trace model before scanning the locked row returned by PostgreSQL.
 	err := d.tx.QueryRow(ctx, `
-		SELECT id, session_id, project_id, status, current_attempt, terminal_reason, created_at, updated_at
+		SELECT id, session_id, project_id, tenant_id, subject_id, status, current_attempt, terminal_reason, created_at, updated_at
 		FROM traces
 		WHERE id = $1
 		FOR UPDATE
-	`, id).Scan(&trace.ID, &trace.SessionID, &trace.ProjectID, &trace.Status, &trace.CurrentAttempt, &trace.TerminalReason, &trace.CreatedAt, &trace.UpdatedAt) // Lock the trace row so attempt checks and state updates observe one serialized view of execution ownership.
+	`, id).Scan(&trace.ID, &trace.SessionID, &trace.ProjectID, &trace.TenantID, &trace.SubjectID, &trace.Status, &trace.CurrentAttempt, &trace.TerminalReason, &trace.CreatedAt, &trace.UpdatedAt) // Lock the trace row together with its ownership metadata so authorization and attempt checks observe one serialized view.
 	if err != nil { // Convert missing-row and query failures into the repository's trace-not-found contract.
 		return nil, errors.Wrap(errors.CodeTraceNotFound, "trace not found", err) // Preserve the wrapped PostgreSQL failure while keeping the caller-facing code stable.
 	}

@@ -57,6 +57,9 @@ func (s *SubscriptionTokenStore) Issue(ctx context.Context, subject *auth.Subjec
 	if subject == nil { // Reject missing authenticated subjects because subscription tokens must always be bound to a caller identity.
 		return nil, errors.New(errors.CodeUnauthenticated, "authenticated subject is required") // Surface the missing subject as an authentication failure instead of issuing an anonymous token.
 	}
+	if strings.TrimSpace(subject.ID) == "" { // Reject subjects without a stable identifier because later audit and ownership checks must be able to attribute the issued token to one principal.
+		return nil, errors.New(errors.CodeUnauthenticated, "authenticated subject id is required") // Surface the missing subject identifier as an authentication failure instead of issuing an unauditable token.
+	}
 
 	normalizedTraceID := strings.TrimSpace(traceID) // Normalize the requested trace ID so empty and whitespace-only values behave consistently.
 	if normalizedTraceID == "" {                    // Reject missing trace IDs because every subscription token must bind to exactly one trace.

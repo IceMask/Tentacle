@@ -42,6 +42,7 @@ type fakeAppiumServer struct {
 	baseURL         string
 	sessionID       string
 	recordedCaps    map[string]interface{}
+	usedSessionIDs  []string
 	foundSelectors  []string
 	clickedElements []string
 	sendKeysTexts   []string
@@ -123,6 +124,7 @@ func (f *fakeAppiumServer) handleSessionScoped(w http.ResponseWriter, r *http.Re
 			return                                            // Stop handling once the malformed find-element payload has been rejected.
 		}
 		f.mu.Lock()                                                                                                                                     // Protect the fake Appium server state because find-element requests can be called repeatedly by auto-wait logic.
+		f.usedSessionIDs = append(f.usedSessionIDs, sessionID)                                                                                          // Record the scoped Appium session id so integration tests can verify which underlying session every command targeted.
 		f.foundSelectors = append(f.foundSelectors, payload.Using+":"+payload.Value)                                                                    // Record the lookup strategy and selector so the executed plan can be asserted later.
 		f.mu.Unlock()                                                                                                                                   // Release the fake Appium server state lock before writing the HTTP response.
 		writeJSONResponse(w, http.StatusOK, map[string]interface{}{"value": map[string]string{"element-6066-11e4-a52e-4f735466cecf": f.findElementID}}) // Return one W3C element response so the production Appium client can extract the element identifier.
@@ -131,6 +133,7 @@ func (f *fakeAppiumServer) handleSessionScoped(w http.ResponseWriter, r *http.Re
 	if len(parts) == 4 && parts[1] == "element" && parts[3] == "click" && r.Method == http.MethodPost { // Handle POST /session/{id}/element/{elementId}/click used by the production click path.
 		elementID := parts[2]                                                                          // Read the clicked element identifier from the session-scoped path.
 		f.mu.Lock()                                                                                    // Protect the fake Appium server state because click requests can race with later assertions.
+		f.usedSessionIDs = append(f.usedSessionIDs, sessionID)                                         // Record the scoped Appium session id so integration tests can verify which underlying session every command targeted.
 		f.clickedElements = append(f.clickedElements, elementID)                                       // Record the clicked element identifier so the executed plan can be asserted later.
 		f.mu.Unlock()                                                                                  // Release the fake Appium server state lock before writing the HTTP response.
 		writeJSONResponse(w, http.StatusOK, map[string]interface{}{"value": map[string]interface{}{}}) // Return one successful empty-value W3C response for the click action.
@@ -145,16 +148,23 @@ func (f *fakeAppiumServer) handleSessionScoped(w http.ResponseWriter, r *http.Re
 			return                                            // Stop handling once the malformed send-keys payload has been rejected.
 		}
 		f.mu.Lock()                                                                                    // Protect the fake Appium server state because send-keys requests can race with later assertions.
+		f.usedSessionIDs = append(f.usedSessionIDs, sessionID)                                         // Record the scoped Appium session id so integration tests can verify which underlying session every command targeted.
 		f.sendKeysTexts = append(f.sendKeysTexts, payload.Text)                                        // Record the entered text so the executed plan can be asserted later.
 		f.mu.Unlock()                                                                                  // Release the fake Appium server state lock before writing the HTTP response.
 		writeJSONResponse(w, http.StatusOK, map[string]interface{}{"value": map[string]interface{}{}}) // Return one successful empty-value W3C response for the send-keys action.
 		return                                                                                         // Stop handling once the send-keys response has been written.
 	}
 	if len(parts) == 2 && parts[1] == "screenshot" && r.Method == http.MethodGet { // Handle GET /session/{id}/screenshot used only if failure paths attempt artifact capture.
+		f.mu.Lock()                                                                                                                        // Protect the fake Appium server state because screenshots can race with later assertions in artifact-focused tests.
+		f.usedSessionIDs = append(f.usedSessionIDs, sessionID)                                                                             // Record the scoped Appium session id so integration tests can verify which underlying session every command targeted.
+		f.mu.Unlock()                                                                                                                      // Release the fake Appium server state lock before writing the HTTP response.
 		writeJSONResponse(w, http.StatusOK, map[string]interface{}{"value": base64.StdEncoding.EncodeToString([]byte("fake-screenshot"))}) // Return one valid base64 screenshot payload so unexpected failure-path captures still decode correctly.
 		return                                                                                                                             // Stop handling once the screenshot response has been written.
 	}
 	if len(parts) == 2 && parts[1] == "source" && r.Method == http.MethodGet { // Handle GET /session/{id}/source so snapshot and debug paths can succeed if touched unexpectedly.
+		f.mu.Lock()                                                                          // Protect the fake Appium server state because source reads can race with later assertions in snapshot-focused tests.
+		f.usedSessionIDs = append(f.usedSessionIDs, sessionID)                               // Record the scoped Appium session id so integration tests can verify which underlying session every command targeted.
+		f.mu.Unlock()                                                                        // Release the fake Appium server state lock before writing the HTTP response.
 		writeJSONResponse(w, http.StatusOK, map[string]interface{}{"value": "<hierarchy/>"}) // Return one minimal page source payload so unexpected source reads still decode correctly.
 		return                                                                               // Stop handling once the source response has been written.
 	}
@@ -371,14 +381,15 @@ func TestMonolithStartExecuteTraceEndFlow(t *testing.T) {
 		t.Fatalf("expected session status ended, got %s", persistedSession.Status) // Surface the actual session state so teardown regressions are easy to diagnose.
 	}
 
-	harness.appium.mu.Lock()                                                     // Protect the recorded fake Appium state while the final assertions read the accumulated side effects.
-	recordedCaps := harness.appium.recordedCaps                                  // Copy the recorded capability payload so assertions can proceed after the lock is released.
-	recordedSelectors := append([]string(nil), harness.appium.foundSelectors...) // Copy the recorded selector list so assertions can proceed after the lock is released.
-	recordedClicks := append([]string(nil), harness.appium.clickedElements...)   // Copy the recorded click list so assertions can proceed after the lock is released.
-	recordedSendKeys := append([]string(nil), harness.appium.sendKeysTexts...)   // Copy the recorded send-keys list so assertions can proceed after the lock is released.
-	recordedDeletes := append([]string(nil), harness.appium.deletedSessions...)  // Copy the recorded delete-session list so assertions can proceed after the lock is released.
-	harness.appium.mu.Unlock()                                                   // Release the fake Appium server state lock before running assertions.
-	if recordedCaps["platformName"] != "Android" {                               // Assert that StartSession forwarded the requested capabilities into the fake Appium server.
+	harness.appium.mu.Lock()                                                           // Protect the recorded fake Appium state while the final assertions read the accumulated side effects.
+	recordedCaps := harness.appium.recordedCaps                                        // Copy the recorded capability payload so assertions can proceed after the lock is released.
+	recordedCommandSessions := append([]string(nil), harness.appium.usedSessionIDs...) // Copy the recorded command-scoped Appium session ids so assertions can verify the same underlying session serviced every action.
+	recordedSelectors := append([]string(nil), harness.appium.foundSelectors...)       // Copy the recorded selector list so assertions can proceed after the lock is released.
+	recordedClicks := append([]string(nil), harness.appium.clickedElements...)         // Copy the recorded click list so assertions can proceed after the lock is released.
+	recordedSendKeys := append([]string(nil), harness.appium.sendKeysTexts...)         // Copy the recorded send-keys list so assertions can proceed after the lock is released.
+	recordedDeletes := append([]string(nil), harness.appium.deletedSessions...)        // Copy the recorded delete-session list so assertions can proceed after the lock is released.
+	harness.appium.mu.Unlock()                                                         // Release the fake Appium server state lock before running assertions.
+	if recordedCaps["platformName"] != "Android" {                                     // Assert that StartSession forwarded the requested capabilities into the fake Appium server.
 		t.Fatalf("expected fake appium to receive Android capabilities, got %#v", recordedCaps) // Surface the actual capabilities so session-creation regressions are easy to diagnose.
 	}
 	if len(recordedSelectors) < 2 || recordedSelectors[0] != "id:username" || recordedSelectors[1] != "xpath://button[@id='submit']" { // Assert that the production executor resolved the expected selectors through the fake Appium server.
@@ -386,6 +397,14 @@ func TestMonolithStartExecuteTraceEndFlow(t *testing.T) {
 	}
 	if len(recordedSendKeys) != 1 || recordedSendKeys[0] != "demo-user" { // Assert that the production executor forwarded the sendKeys text into the fake Appium server.
 		t.Fatalf("expected fake appium sendKeys text demo-user, got %#v", recordedSendKeys) // Surface the actual send-keys calls so executor regressions are easy to diagnose.
+	}
+	if len(recordedCommandSessions) < 3 { // Assert that the fake Appium server saw the command-scoped requests needed by the monolith execution flow.
+		t.Fatalf("expected at least 3 recorded command session ids, got %#v", recordedCommandSessions) // Surface the actual command-scoped session list so execution regressions are easy to diagnose.
+	}
+	for _, commandSessionID := range recordedCommandSessions { // Assert that every executor command stayed bound to the Appium session created during StartSession.
+		if commandSessionID != "appium-session-1" { // Fail when any command unexpectedly targeted a different Appium session than the one created by StartSession.
+			t.Fatalf("expected every command to target appium-session-1, got %#v", recordedCommandSessions) // Surface the complete command-scoped session list so session-routing regressions are easy to diagnose.
+		}
 	}
 	if len(recordedClicks) != 1 || recordedClicks[0] != "element-123" { // Assert that the production executor clicked the fake element returned by the fake Appium server.
 		t.Fatalf("expected fake appium click on element-123, got %#v", recordedClicks) // Surface the actual click calls so executor regressions are easy to diagnose.

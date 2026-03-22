@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"mcp_for_appium/internal/auth"
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/errors"
 	"mcp_for_appium/internal/storage/postgres"
@@ -158,11 +159,34 @@ func (h *traceTerminalHarness) seedPendingTrace(t *testing.T) (string, string) {
 	if err := h.dao.CreateSession(ctx, &postgres.Session{ID: sessionID, ProjectID: "test-project", Status: "created", Capabilities: []byte(`{"platformName":"Android"}`), CreatedAt: now, UpdatedAt: now}); err != nil { // Insert one active session row because trace execution and cancellation require a live session record.
 		t.Fatalf("failed to seed session: %v", err) // Surface the seed failure because the test cannot exercise trace terminalization without a session row.
 	}
+	if err := h.cache.Set(ctx, appiumSessionKeyPrefix+sessionID, "seeded-appium-session", appiumSessionKeyTTL); err != nil { // Seed one matching Appium session mapping because distributed dispatch now resolves the worker-facing Appium session id from Redis before RPC dispatch.
+		t.Fatalf("failed to seed appium session mapping: %v", err) // Surface the mapping failure because distributed dispatch tests cannot exercise the real worker-session attachment path without it.
+	}
 	if err := h.dao.CreateTrace(ctx, &postgres.Trace{ID: traceID, SessionID: sessionID, ProjectID: "test-project", Status: "pending", CreatedAt: now, UpdatedAt: now}); err != nil { // Insert one pending trace row because every terminalization test starts from the pending lifecycle state.
 		t.Fatalf("failed to seed trace: %v", err) // Surface the seed failure because the test cannot exercise terminal transitions without a trace row.
 	}
 
 	return sessionID, traceID // Return the seeded identifiers so the test can call the service or dispatcher paths under test.
+}
+
+// seedOwnedPendingTrace inserts one active session and one pending trace that both belong to the supplied tenant and subject identifiers.
+func (h *traceTerminalHarness) seedOwnedPendingTrace(t *testing.T, tenantID string, subjectID string) (string, string) {
+	ctx := context.Background()   // Use one shared background context because the seed writes run synchronously inside the current test.
+	now := time.Now().UTC()       // Capture one stable timestamp so the related session and trace rows stay chronologically consistent.
+	sessionID := uuid.NewString() // Generate one unique session identifier so concurrent or repeated test runs never collide on primary keys.
+	traceID := uuid.NewString()   // Generate one unique trace identifier linked to the seeded session.
+
+	if err := h.dao.CreateSession(ctx, &postgres.Session{ID: sessionID, ProjectID: "test-project", TenantID: tenantID, SubjectID: subjectID, Status: "created", Capabilities: []byte(`{"platformName":"Android"}`), CreatedAt: now, UpdatedAt: now}); err != nil { // Insert one owned active session row so the authorization tests can validate exact ownership checks.
+		t.Fatalf("failed to seed owned session: %v", err) // Surface the seed failure because the authorization test cannot run without the owned session row.
+	}
+	if err := h.cache.Set(ctx, appiumSessionKeyPrefix+sessionID, "owned-appium-session", appiumSessionKeyTTL); err != nil { // Seed the matching Appium session mapping because session-scoped authorization tests still route through the real client-restore path.
+		t.Fatalf("failed to seed owned appium session mapping: %v", err) // Surface the mapping failure because the authorization test cannot exercise the session helper without it.
+	}
+	if err := h.dao.CreateTrace(ctx, &postgres.Trace{ID: traceID, SessionID: sessionID, ProjectID: "test-project", TenantID: tenantID, SubjectID: subjectID, Status: "pending", CreatedAt: now, UpdatedAt: now}); err != nil { // Insert one owned pending trace row so the authorization tests can validate exact ownership checks.
+		t.Fatalf("failed to seed owned trace: %v", err) // Surface the seed failure because the authorization test cannot run without the owned trace row.
+	}
+
+	return sessionID, traceID // Return the seeded identifiers so the authorization tests can call the production service paths under test.
 }
 
 // loadTraceAndEvents reads the current trace row plus its ordered events for terminalization assertions.
@@ -275,5 +299,31 @@ func TestHandleDispatchErrorFinalizesAfterRetriesExhausted(t *testing.T) {
 	}
 	if payload["terminalStatus"] != "failed" { // Fail the test when the final event payload does not record the failed terminal status.
 		t.Fatalf("expected terminal payload status failed, got %#v", payload["terminalStatus"]) // Surface the unexpected payload field because replay consumers may inspect the payload for terminal metadata.
+	}
+}
+
+// TestExecutePlanWithTraceRejectsDifferentSubject verifies that authenticated callers cannot schedule plans against sessions owned by another subject.
+func TestExecutePlanWithTraceRejectsDifferentSubject(t *testing.T) {
+	harness := newTraceTerminalHarness(t)                                                                                // Start one isolated orchestrator test harness so this test can exercise the real session-authorization path.
+	sessionID, _ := harness.seedOwnedPendingTrace(t, "tenant-a", "subject-owner")                                        // Seed one owned session so the authorization helper can compare the authenticated caller against persisted ownership metadata.
+	ctx := auth.WithSubject(context.Background(), &auth.Subject{ID: "subject-other", TenantID: "tenant-a", Type: "pat"}) // Attach a different authenticated subject from the same tenant so the exact subject-ownership rule is exercised.
+
+	if _, err := harness.service.ExecutePlanWithTrace(ctx, sessionID, "", json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`)); err == nil { // Attempt to schedule a plan against the owned session with the wrong authenticated subject.
+		t.Fatal("expected session ownership check to reject executePlanWithTrace") // Surface the missing authorization failure because cross-subject session access must not be allowed.
+	} else if !errors.IsCode(err, errors.CodePermissionDenied) { // Fail when the returned error does not preserve the stable permission-denied code expected by transports.
+		t.Fatalf("expected permission denied, got %v", err) // Surface the unexpected error because transport mapping depends on the stable authorization code.
+	}
+}
+
+// TestGetTraceRejectsDifferentSubject verifies that authenticated callers cannot read traces owned by another subject.
+func TestGetTraceRejectsDifferentSubject(t *testing.T) {
+	harness := newTraceTerminalHarness(t)                                                                                // Start one isolated orchestrator test harness so this test can exercise the real trace-authorization path.
+	_, traceID := harness.seedOwnedPendingTrace(t, "tenant-a", "subject-owner")                                          // Seed one owned trace so the authorization helper can compare the authenticated caller against persisted ownership metadata.
+	ctx := auth.WithSubject(context.Background(), &auth.Subject{ID: "subject-other", TenantID: "tenant-a", Type: "pat"}) // Attach a different authenticated subject from the same tenant so the exact subject-ownership rule is exercised.
+
+	if _, _, err := harness.service.GetTrace(ctx, traceID); err == nil { // Attempt to read the owned trace with the wrong authenticated subject.
+		t.Fatal("expected trace ownership check to reject getTrace") // Surface the missing authorization failure because cross-subject trace reads must not be allowed.
+	} else if !errors.IsCode(err, errors.CodePermissionDenied) { // Fail when the returned error does not preserve the stable permission-denied code expected by transports.
+		t.Fatalf("expected permission denied, got %v", err) // Surface the unexpected error because transport mapping depends on the stable authorization code.
 	}
 }

@@ -1,29 +1,46 @@
 # MCP Mobile Worker - Appium 自动化测试平台
 
-> **版本**: v4.3
+> **发布阶段**: `v0.x` 预发布
+> **当前实现口径**: `v4.4` 需求/设计基线
 > **协议支持**: 标准 MCP (Model Context Protocol) + JSON-RPC + REST + gRPC + WebSocket
 
 ## 概述
 
 MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，支持 iOS 和 Android 自动化测试。通过标准 MCP 协议，可直接被 Claude Desktop 等 AI 工具发现和调用。
 
-### v4.3 新特性
+### 当前发布定位
 
 - ✅ **标准 MCP 协议支持**：实现 Anthropic MCP 标准（协议版本 2024-11-05）
 - ✅ **stdio 传输模式**：通过 `gateway --stdio` 启动，支持 Claude Desktop 配置
 - ✅ **MCP Tools 注册表**：26 个工具（会话/执行/元素/手势/实用/Device Farm/调试）暴露给 LLM
 - ✅ **向后兼容**：保持原有 HTTP/REST/gRPC/WebSocket 接口不变
+- ✅ **当前 GA 候选模式**：`monolith`
+- ⚠️ **distributed**：功能已补齐 ownership lease、结果回传、worker 恢复、stale-result protection 与端到端回归，但首个稳定版仍明确按 `experimental` 管理
 
 ### 当前运行边界
 
 - 推荐运行模式：`monolith`
-- `distributed`：**experimental**，当前不建议作为生产入口模式
+- `distributed`：**experimental**，`v1.0.0` 首个稳定版仍不作为生产 GA 入口模式
 - Gateway 的 HTTP 与 `stdio` 入口当前都以 `monolith` 为正式支持模式
 - JSON-RPC 预留方法 `replay` `subscribe` `unsubscribe` 当前仍未实现
 
+### 功能矩阵
+
+| 能力 | 当前级别 | 说明 |
+| --- | --- | --- |
+| `monolith` 执行模式 | `GA candidate` | 当前推荐的正式运行模式 |
+| `distributed` 执行模式 | `experimental` | 已具备结果回传、lease、worker 恢复与 distributed E2E，但首个稳定版仍按实验特性发布 |
+| MCP `stdio` | `GA candidate` | 可供 Claude Desktop 等 MCP 客户端发现和调用 |
+| HTTP JSON-RPC / REST | `GA candidate` | 主链路可用 |
+| WebSocket 事件订阅 | `GA candidate` | 浏览器需先换短时 subscription token，trace 订阅已校验持久化 ownership |
+| `replay` / `subscribe` / `unsubscribe` JSON-RPC 方法 | `planned` | schema 预留，尚未实现 |
+| PAT / OIDC / HMAC 鉴权 | `GA candidate` | 已有权威模型与安全边界，但仍建议先按受控环境启用 |
+| Device Farm `run_api` / `test_grid` | `experimental` | 建议按具体环境验证后再进入生产 |
+| Screenshot / artifact 持久化 | `GA candidate` | monolith 主链路和 artifact 集成链都已覆盖 |
+
 ### 快速开始
 
-#### 1. 作为 MCP Server 使用（Claude Desktop 集成）
+#### 1. 本地开发：作为 MCP Server 使用（Claude Desktop 集成）
 
 在 Claude Desktop 配置文件中添加：
 
@@ -45,10 +62,10 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
 - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
-#### 2. 作为 HTTP 服务使用
+#### 2. 本地开发：作为 HTTP 服务使用
 
 ```bash
-# 启动 HTTP 服务器模式（默认）
+# 启动 HTTP 服务器模式（默认，本地调试可使用明文 HTTP）
 ./gateway --config config.yaml
 
 # 访问 JSON-RPC 端点
@@ -73,6 +90,7 @@ psql "$DATABASE_URL" -f internal/storage/postgres/migrations/002_audit_logs.sql
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/004_pat_tokens.sql
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/005_hmac_keys.sql
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/006_trace_execution_state.sql
+psql "$DATABASE_URL" -f internal/storage/postgres/migrations/007_trace_session_ownership.sql
 ```
 
 迁移目录说明见：
@@ -104,6 +122,19 @@ go test ./internal/integration -count=1 -v
 - `getTrace`
 - `endSession`
 
+如需运行 distributed 端到端链路验证，可以直接运行：
+
+```bash
+go test ./internal/integration -run TestDistributedFlowEndToEnd -count=1 -v
+```
+
+### 生产部署默认建议
+
+- 生产环境外部流量应启用 TLS，不建议继续使用 README 上面的本地明文 HTTP 示例作为生产部署参考
+- 内部 RPC 推荐至少使用 `tls`，不要把 `insecure` 当成生产默认
+- 浏览器 WebSocket 应走短时 subscription token，不应直接暴露长期 PAT / OIDC Bearer
+- 生产推荐配置请以 [config.production.example.yaml](./config.production.example.yaml) 为基线，本地联调用 [config.example.yaml](./config.example.yaml) 做显式降级
+
 ### MCP Tools 列表
 
 通过 MCP 协议可用的工具：
@@ -131,9 +162,13 @@ go test ./internal/integration -count=1 -v
 
 ### 文档
 
-- [需求说明 v4.3](./requirements.v4.3.md)
-- [架构设计 v4.3](./module_v4.3_design.md)
-- [详细文档](./appium_mcp_docs_v4_3_detailed/)
+- [需求说明 v4.4](./requirements.v4.4.md)
+- [架构设计 v4.4](./module_v4.4_design.md)
+- [需求说明 v4.3（历史基线）](./requirements.v4.3.md)
+- [架构设计 v4.3（历史基线）](./module_v4.3_design.md)
+- [详细文档 v4.3（实现细节参考，需结合 v4.4 阅读）](./appium_mcp_docs_v4_3_detailed/)
+- [本地开发配置示例](./config.example.yaml)
+- [生产部署配置示例](./config.production.example.yaml)
 - [PostgreSQL Migrations](./internal/storage/postgres/migrations/README.md)
 - [Changelog](./CHANGELOG.md)
 - [Release Notes v1.0.0 Draft](./RELEASE_NOTES_v1.0.0.md)

@@ -8,6 +8,8 @@ import (
 type Session struct {
 	ID           string
 	ProjectID    string
+	TenantID     string
+	SubjectID    string
 	Status       string
 	Capabilities []byte // JSON
 	CreatedAt    time.Time
@@ -19,6 +21,8 @@ type Trace struct {
 	ID             string
 	SessionID      string
 	ProjectID      string
+	TenantID       string
+	SubjectID      string
 	Status         string
 	CurrentAttempt int64
 	TerminalReason *string

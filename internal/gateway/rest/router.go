@@ -226,6 +226,10 @@ func (rt *Router) handleTraceSubscribe(w http.ResponseWriter, r *http.Request, t
 		writeAPIError(w, http.StatusUnauthorized, "authentication required", nil) // Return structured auth failure for requests that reached the endpoint without a subject context.
 		return                                                                    // Stop after the auth failure because token issuance requires a caller identity.
 	}
+	if _, _, err := rt.orch.GetTrace(r.Context(), traceID); err != nil { // Load the authoritative trace through the orchestrator before issuing a token so the request must pass persisted ownership validation.
+		writeAPIError(w, errors.MapToHTTP(err), "failed to authorize trace subscription", err) // Surface missing or unauthorized traces before any short-lived WebSocket token is minted.
+		return                                                                                 // Stop after the authorization failure because the caller must not receive a usable subscription token.
+	}
 
 	issuedToken, err := rt.subscriptionTokenStore.Issue(r.Context(), subject, traceID) // Issue the short-lived opaque token bound to the caller and requested trace ID.
 	if err != nil {                                                                    // Stop immediately when token issuance fails because no WebSocket subscription can be established without it.

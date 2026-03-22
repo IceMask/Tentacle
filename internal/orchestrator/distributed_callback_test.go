@@ -15,7 +15,7 @@ func TestDistributedCallbacksFinalizeAcceptedTrace(t *testing.T) {
 	harness := newTraceTerminalHarness(t) // Start one isolated orchestrator harness so this test can exercise real DAO, Redis, and distributed callback handling.
 	defer harness.service.Stop()          // Stop any background dispatcher resources the harness service may have started or allocated once the test finishes.
 
-	_, traceID := harness.seedPendingTrace(t)                 // Seed one pending trace because distributed dispatch should start from the queued lifecycle state.
+	sessionID, traceID := harness.seedPendingTrace(t)         // Seed one pending trace because distributed dispatch should start from the queued lifecycle state and now resolve a real Appium session mapping.
 	workerAddress, stopWorker := startAcceptedWorkerServer(t) // Start one fake worker that immediately accepts the distributed ExecutePlan RPC.
 	defer stopWorker()                                        // Ensure the loopback fake worker is stopped after the test completes.
 
@@ -24,9 +24,9 @@ func TestDistributedCallbacksFinalizeAcceptedTrace(t *testing.T) {
 		t.Fatalf("failed to register fake worker: %v", err) // Surface worker-registration failures because the distributed dispatch path cannot run without an assignable worker.
 	}
 
-	harness.service.dispatcher.executor = nil                                                                                                                                                            // Force the dispatcher onto the distributed RPC path even though the shared harness defaults to monolith execution mode.
-	harness.service.dispatcher.planTimeout = time.Minute                                                                                                                                                 // Keep the plan timeout comfortably above the callback test duration so no watchdog timeout interferes with this success path.
-	if err := harness.service.dispatcher.dispatchToWorker(context.Background(), traceID, "test-project", "unused-session", string(json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`))); err != nil { // Dispatch one valid-looking distributed plan payload through the real worker-assignment and ExecutePlan RPC path.
+	harness.service.dispatcher.executor = nil                                                                                                                                                     // Force the dispatcher onto the distributed RPC path even though the shared harness defaults to monolith execution mode.
+	harness.service.dispatcher.planTimeout = time.Minute                                                                                                                                          // Keep the plan timeout comfortably above the callback test duration so no watchdog timeout interferes with this success path.
+	if err := harness.service.dispatcher.dispatchToWorker(context.Background(), traceID, "test-project", sessionID, string(json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`))); err != nil { // Dispatch one valid-looking distributed plan payload through the real worker-assignment and ExecutePlan RPC path using the seeded platform session id.
 		t.Fatalf("expected distributed dispatch to succeed, got error: %v", err) // Surface unexpected dispatch failures because callback finalization requires an accepted in-flight trace first.
 	}
 
@@ -102,7 +102,7 @@ func TestDistributedCallbacksRejectStaleAttempt(t *testing.T) {
 	harness := newTraceTerminalHarness(t) // Start one isolated orchestrator harness so this test can exercise real DAO, Redis, and distributed callback handling.
 	defer harness.service.Stop()          // Stop any background dispatcher resources the harness service may have started or allocated once the test finishes.
 
-	_, traceID := harness.seedPendingTrace(t)                 // Seed one pending trace because distributed dispatch should start from the queued lifecycle state.
+	sessionID, traceID := harness.seedPendingTrace(t)         // Seed one pending trace because distributed dispatch should start from the queued lifecycle state and now resolve a real Appium session mapping.
 	workerAddress, stopWorker := startAcceptedWorkerServer(t) // Start one fake worker that immediately accepts the distributed ExecutePlan RPC.
 	defer stopWorker()                                        // Ensure the loopback fake worker is stopped after the test completes.
 
@@ -111,9 +111,9 @@ func TestDistributedCallbacksRejectStaleAttempt(t *testing.T) {
 		t.Fatalf("failed to register fake worker: %v", err) // Surface worker-registration failures because the distributed dispatch path cannot run without an assignable worker.
 	}
 
-	harness.service.dispatcher.executor = nil                                                                                                                                                            // Force the dispatcher onto the distributed RPC path even though the shared harness defaults to monolith execution mode.
-	harness.service.dispatcher.planTimeout = time.Minute                                                                                                                                                 // Keep the plan timeout comfortably above the callback test duration so no watchdog timeout interferes with this stale-callback path.
-	if err := harness.service.dispatcher.dispatchToWorker(context.Background(), traceID, "test-project", "unused-session", string(json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`))); err != nil { // Dispatch one valid-looking distributed plan payload through the real worker-assignment and ExecutePlan RPC path.
+	harness.service.dispatcher.executor = nil                                                                                                                                                     // Force the dispatcher onto the distributed RPC path even though the shared harness defaults to monolith execution mode.
+	harness.service.dispatcher.planTimeout = time.Minute                                                                                                                                          // Keep the plan timeout comfortably above the callback test duration so no watchdog timeout interferes with this stale-callback path.
+	if err := harness.service.dispatcher.dispatchToWorker(context.Background(), traceID, "test-project", sessionID, string(json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`))); err != nil { // Dispatch one valid-looking distributed plan payload through the real worker-assignment and ExecutePlan RPC path using the seeded platform session id.
 		t.Fatalf("expected distributed dispatch to succeed, got error: %v", err) // Surface unexpected dispatch failures because stale-callback rejection requires an accepted in-flight trace first.
 	}
 

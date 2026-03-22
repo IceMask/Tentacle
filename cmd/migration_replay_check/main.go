@@ -165,9 +165,11 @@ func verifySchema(ctx context.Context, conn *pgx.Conn) ([]string, []string) {
 		"idx_plan_events_trace_created_at",
 		"idx_sessions_project_created_at",
 		"idx_sessions_status_updated_at",
+		"idx_sessions_tenant_subject_created_at",
 		"idx_traces_project_status_attempt_updated_at",
 		"idx_traces_project_status_updated_at",
 		"idx_traces_session_created_at",
+		"idx_traces_tenant_subject_created_at",
 	}
 
 	actualTables := mustQueryNames(ctx, conn, "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = ANY($1)", expectedTables)    // Query the live table set created by the migrations.
@@ -197,7 +199,7 @@ func verifyDAOPaths(ctx context.Context, dsn string) (map[string]int, bool, bool
 	artifactID := uuid.NewString() // Generate an isolated artifact identifier for the artifact metadata verification row.
 	auditID := uuid.NewString()    // Generate an isolated audit-log identifier for the audit verification row.
 
-	if err := dao.CreateSession(ctx, &postgres.Session{ID: sessionID, ProjectID: "migration-replay-project", Status: "created", Capabilities: []byte(`{"platformName":"Android","automationName":"UiAutomator2"}`), CreatedAt: now, UpdatedAt: now}); err != nil { // Insert one session row through the repository DAO path.
+	if err := dao.CreateSession(ctx, &postgres.Session{ID: sessionID, ProjectID: "migration-replay-project", TenantID: "tenant-replay", SubjectID: "subject-replay", Status: "created", Capabilities: []byte(`{"platformName":"Android","automationName":"UiAutomator2"}`), CreatedAt: now, UpdatedAt: now}); err != nil { // Insert one session row through the repository DAO path together with persisted ownership metadata.
 		panic(fmt.Sprintf("failed to create verification session: %v", err)) // Surface the DAO write failure because it indicates schema drift against the live database.
 	}
 
@@ -220,7 +222,7 @@ func verifyDAOPaths(ctx context.Context, dsn string) (map[string]int, bool, bool
 		panic(fmt.Sprintf("failed to verify transactional session helpers: %v", err)) // Surface the transactional helper failure because it indicates schema or DAO drift.
 	}
 
-	if err := dao.CreateTrace(ctx, &postgres.Trace{ID: traceID, SessionID: sessionID, ProjectID: "migration-replay-project", Status: "pending", CreatedAt: now, UpdatedAt: now}); err != nil { // Insert one trace row through the repository DAO path.
+	if err := dao.CreateTrace(ctx, &postgres.Trace{ID: traceID, SessionID: sessionID, ProjectID: "migration-replay-project", TenantID: "tenant-replay", SubjectID: "subject-replay", Status: "pending", CreatedAt: now, UpdatedAt: now}); err != nil { // Insert one trace row through the repository DAO path together with inherited ownership metadata.
 		panic(fmt.Sprintf("failed to create verification trace: %v", err)) // Surface the DAO trace-write failure because it indicates schema drift against the live database.
 	}
 
@@ -283,8 +285,14 @@ func verifyDAOPaths(ctx context.Context, dsn string) (map[string]int, bool, bool
 	if !session.EndedAt.Valid { // Fail when the transactional end-session helper did not persist a terminal timestamp.
 		panic("verification session was not marked ended by transactional helper") // Surface the missing terminal timestamp because it means the row-locked update path did not persist correctly.
 	}
+	if session.TenantID != "tenant-replay" || session.SubjectID != "subject-replay" { // Fail when the verification session does not preserve the ownership metadata written through the DAO path.
+		panic(fmt.Sprintf("verification session stored unexpected ownership metadata: tenant=%q subject=%q", session.TenantID, session.SubjectID)) // Surface the persisted ownership fields because they prove the new session authorization metadata survived replay.
+	}
 	if trace.Status != "completed" { // Fail when the optimistic trace transitions did not leave the verification trace in the expected terminal state.
 		panic(fmt.Sprintf("verification trace ended in unexpected status: %s", trace.Status)) // Surface the actual trace status because it identifies the broken state transition.
+	}
+	if trace.TenantID != "tenant-replay" || trace.SubjectID != "subject-replay" { // Fail when the verification trace does not preserve the ownership metadata written through the DAO path.
+		panic(fmt.Sprintf("verification trace stored unexpected ownership metadata: tenant=%q subject=%q", trace.TenantID, trace.SubjectID)) // Surface the persisted ownership fields because they prove the new trace authorization metadata survived replay.
 	}
 	if trace.CurrentAttempt != reservedAttempt { // Fail when the trace row does not preserve the active distributed attempt number after the guarded transition flow.
 		panic(fmt.Sprintf("verification trace stored unexpected current attempt: %d", trace.CurrentAttempt)) // Surface the persisted attempt number because it identifies mismatches between schema replay and DAO expectations.

@@ -297,16 +297,33 @@ func (d *Dispatcher) dispatchToWorker(ctx context.Context, traceID, projectID, s
 		return nil                                                                                                                                  // Report success so the queue message can be ACKed after another lifecycle transition already won.
 	}
 
+	workerSessionID, err := d.resolveWorkerSessionID(ctx, sessionID) // Resolve the worker-facing Appium session identifier before dispatch so the worker can attach to the real Appium session instead of the platform session id.
+	if err != nil {                                                  // Surface session-resolution failures before any worker RPC is sent because distributed execution cannot proceed safely without the Appium session id.
+		return err // Preserve the wrapped cache lookup failure so upstream retry and terminalization logic can react consistently.
+	}
+	dispatchedAt := time.Now()                                         // Capture one dispatch timestamp before the worker RPC so any immediate callback already has a persisted lease baseline to renew against.
+	d.persistInflightAssignment(ctx, traceID, inflightTraceAssignment{ // Persist the provisional distributed assignment before the worker RPC so fast step callbacks cannot race ahead of lease creation.
+		Address:            w.Address,                                 // Record the worker address so later cancel RPCs can reach the same worker instance.
+		WorkerID:           w.ID,                                      // Record the worker identifier so callback renewals and timeout logs can pinpoint the same assignment.
+		Attempt:            attempt,                                   // Record the reserved execution attempt so callback ownership checks can reject stale results deterministically.
+		DispatchedAtUnix:   dispatchedAt.UnixMilli(),                  // Capture the dispatch timestamp so operators can diagnose how long the trace has been in flight.
+		LastRenewedAtUnix:  dispatchedAt.UnixMilli(),                  // Seed the lease-renewal timestamp immediately so the first worker callback can refresh the same lease instead of racing a missing key.
+		LeaseExpiresAtUnix: d.inflightLeaseDeadlineUnix(dispatchedAt), // Capture the ownership-lease expiry derived from the worker heartbeat cadence and grace window.
+		DeadlineAtUnix:     d.inflightDeadlineUnix(dispatchedAt),      // Capture the absolute timeout deadline derived from the configured plan timeout for later watchdog sweeps.
+	}) // Persist the accepted-attempt lease metadata early so immediate worker callbacks see a valid ownership record.
+
 	resp, err := client.ExecutePlan(ctx, &rpc.ExecutePlanRequest{
 		TraceID:   traceID,
-		SessionID: sessionID,
+		SessionID: workerSessionID,
 		Attempt:   attempt,
 		Plan:      json.RawMessage(planStr),
 	})
 	if err != nil {
+		d.cleanupInflightTrace(ctx, traceID) // Remove the provisional lease immediately because the worker RPC never accepted the attempt successfully.
 		return errors.Wrap(errors.CodeInternal, "worker ExecutePlan RPC failed", err)
 	}
 	if resp.Status != "accepted" {
+		d.cleanupInflightTrace(ctx, traceID) // Remove the provisional lease immediately because the worker rejected the reserved attempt.
 		return errors.New(errors.CodePlanInvalid, "worker rejected plan: "+resp.Message)
 	}
 
@@ -318,7 +335,8 @@ func (d *Dispatcher) dispatchToWorker(ctx context.Context, traceID, projectID, s
 		} else {
 			d.logger.InfoContext(ctx, "cancelled accepted trace after running-state persistence error", "trace_id", traceID, "worker_id", w.ID, "attempt", attempt, "cancel_status", cancelResponse.Status) // Record the best-effort cleanup outcome for operator visibility.
 		}
-		return err // Preserve the wrapped storage error so upstream handling can surface the failed acceptance bookkeeping.
+		d.cleanupInflightTrace(ctx, traceID) // Remove the provisional lease because the accepted worker attempt could not be promoted to the durable running state.
+		return err                           // Preserve the wrapped storage error so upstream handling can surface the failed acceptance bookkeeping.
 	}
 	if !attemptRecorded { // Cancel stale worker acceptance when another lifecycle transition already moved the reserved trace out of pending before running-state promotion committed.
 		cancelResponse, cancelErr := client.CancelPlan(ctx, &rpc.CancelPlanRequest{TraceID: traceID}) // Best-effort cancel the stale worker acceptance so the worker stops a trace the orchestrator no longer owns.
@@ -327,24 +345,35 @@ func (d *Dispatcher) dispatchToWorker(ctx context.Context, traceID, projectID, s
 		} else {
 			d.logger.InfoContext(ctx, "cancelled stale distributed acceptance", "trace_id", traceID, "worker_id", w.ID, "cancel_status", cancelResponse.Status) // Record the best-effort worker-side cancel result for operator visibility.
 		}
-		return nil // Treat the stale acceptance as a successful no-op because the trace has already moved to another lifecycle state elsewhere.
+		d.cleanupInflightTrace(ctx, traceID) // Remove the provisional lease because another lifecycle transition already won before the accepted attempt could become running.
+		return nil                           // Treat the stale acceptance as a successful no-op because the trace has already moved to another lifecycle state elsewhere.
 	}
 
 	d.logger.InfoContext(ctx, "dispatched to worker",
 		"trace_id", traceID,
 		"worker_id", w.ID,
 		"attempt", attempt)
-	dispatchedAt := time.Now()                                         // Capture one dispatch timestamp so lease renewal, deadline, and logging all share the same wall-clock baseline.
-	d.persistInflightAssignment(ctx, traceID, inflightTraceAssignment{ // Best-effort persist the worker assignment and timeout deadline so distributed cancel and timeout sweeps can find the trace after queue ACK.
-		Address:            w.Address,                                 // Record the worker address so later cancel RPCs can reach the same worker instance.
-		WorkerID:           w.ID,                                      // Record the worker identifier so timeout logs can pinpoint the stalled worker assignment.
-		Attempt:            attempt,                                   // Record the current execution attempt so worker callbacks can be matched against the persisted owner.
-		DispatchedAtUnix:   dispatchedAt.UnixMilli(),                  // Capture the dispatch timestamp so operators can diagnose how long the trace has been in flight.
-		LastRenewedAtUnix:  dispatchedAt.UnixMilli(),                  // Seed the last-renewed timestamp at acceptance time so lease watchdogs have an immediate baseline.
-		LeaseExpiresAtUnix: d.inflightLeaseDeadlineUnix(dispatchedAt), // Capture the ownership-lease expiry derived from the worker heartbeat cadence and grace window.
-		DeadlineAtUnix:     d.inflightDeadlineUnix(dispatchedAt),      // Capture the absolute timeout deadline derived from the configured plan timeout for later watchdog sweeps.
-	}) // Persist the accepted distributed assignment metadata without risking duplicate dispatch if Redis bookkeeping fails after acceptance.
 	return nil
+}
+
+// resolveWorkerSessionID maps one platform session identifier to the underlying Appium session identifier required by distributed workers.
+func (d *Dispatcher) resolveWorkerSessionID(ctx context.Context, sessionID string) (string, error) {
+	if strings.TrimSpace(sessionID) == "" { // Reject empty session identifiers because no Appium session mapping can be resolved without a concrete platform session id.
+		return "", errors.New(errors.CodeSessionNotFound, "session not found") // Surface missing sessions as the same stable session-not-found error used elsewhere in the orchestrator.
+	}
+
+	appiumSessionID, err := d.cache.Get(ctx, appiumSessionKeyPrefix+sessionID) // Load the Appium session mapping created during StartSession so the worker can attach to the existing automation session.
+	if err != nil {                                                            // Distinguish missing Redis keys from other cache failures before returning to the dispatcher.
+		if err.Error() == "redis: nil" { // Convert missing mappings into one stable session-not-found result instead of leaking Redis-specific details.
+			return "", errors.New(errors.CodeSessionNotFound, "session not found") // Surface the missing Appium mapping through the repository's standard session-not-found contract.
+		}
+		return "", errors.Wrap(errors.CodeStoreRead, "failed to load appium session mapping", err) // Surface Redis lookup failures as storage read errors because distributed execution cannot continue without the mapping.
+	}
+	if strings.TrimSpace(appiumSessionID) == "" { // Reject empty mapping values because they cannot identify a real Appium session for the worker.
+		return "", errors.New(errors.CodeSessionNotFound, "session not found") // Surface empty mappings through the same stable session-not-found contract.
+	}
+
+	return appiumSessionID, nil // Return the real Appium session identifier so the worker can attach to the live automation session.
 }
 
 // monitorInflight periodically sweeps distributed in-flight traces so accepted plans that never report completion are eventually closed.

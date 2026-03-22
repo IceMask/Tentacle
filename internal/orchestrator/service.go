@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"mcp_for_appium/internal/auth"
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/devicefarm"
 	"mcp_for_appium/internal/errors"
@@ -163,10 +164,13 @@ func (s *Service) StartSession(ctx context.Context, projectID string, caps map[s
 	// 1. Create Session in DB
 	sessID := uuid.New().String()
 	capsJSON, _ := json.Marshal(caps)
+	subject, _ := auth.SubjectFrom(ctx) // Read the authenticated subject once so the persisted session can inherit any tenant and subject ownership metadata attached by the gateway middleware.
 
 	sess := &postgres.Session{
 		ID:           sessID,
 		ProjectID:    projectID,
+		TenantID:     normalizedSubjectTenantID(subject),
+		SubjectID:    normalizedSubjectID(subject),
 		Status:       "created",
 		Capabilities: capsJSON,
 		CreatedAt:    time.Now(),
@@ -207,7 +211,7 @@ func (s *Service) ExecutePlanWithTrace(ctx context.Context, sessionID string, tr
 	s.logger.InfoContext(ctx, "orchestrator ExecutePlan begin", "session_id", sessionID, "trace_id", traceID, "plan_bytes", len(plan)) // Log entry to execution scheduling path.
 
 	// 1. Validate Session
-	sess, err := s.dao.GetSession(ctx, sessionID)
+	sess, err := s.authorizeSessionAccess(ctx, sessionID)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "orchestrator ExecutePlan failed", "session_id", sessionID, "trace_id", traceID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log session lookup failure.
 		return "", err
@@ -225,6 +229,8 @@ func (s *Service) ExecutePlanWithTrace(ctx context.Context, sessionID string, tr
 		ID:        traceID,
 		SessionID: sessionID,
 		ProjectID: sess.ProjectID,
+		TenantID:  sess.TenantID,
+		SubjectID: sess.SubjectID,
 		Status:    "pending",
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
@@ -246,17 +252,25 @@ func (s *Service) ExecutePlanWithTrace(ctx context.Context, sessionID string, tr
 
 // GetEvents executes this operation.
 func (s *Service) GetEvents(ctx context.Context, traceID string, sinceSeq int64) ([]*postgres.PlanEvent, error) {
+	if _, err := s.authorizeTraceAccess(ctx, traceID); err != nil { // Validate trace ownership before exposing replayable event history to authenticated callers.
+		return nil, err // Preserve the trace-not-found or permission-denied error so transports keep stable status mapping.
+	}
+
 	return s.dao.ListEvents(ctx, traceID, sinceSeq, 100)
 }
 
 // GetArtifacts executes this operation.
 func (s *Service) GetArtifacts(ctx context.Context, traceID string) ([]*postgres.Artifact, error) {
+	if _, err := s.authorizeTraceAccess(ctx, traceID); err != nil { // Validate trace ownership before exposing artifact metadata to authenticated callers.
+		return nil, err // Preserve the trace-not-found or permission-denied error so transports keep stable status mapping.
+	}
+
 	return s.dao.ListArtifacts(ctx, traceID)
 }
 
 // GetSession executes this operation.
 func (s *Service) GetSession(ctx context.Context, sessionID string) (*postgres.Session, error) {
-	return s.dao.GetSession(ctx, sessionID)
+	return s.authorizeSessionAccess(ctx, sessionID) // Reuse the shared session-authorization helper so every authenticated session read enforces persisted ownership.
 }
 
 // EndSession marks the persisted session as ended exactly once, then releases the cached Appium session and Redis mapping.
@@ -265,6 +279,10 @@ func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 	defer span.End()
 	startedAt := time.Now()                                                             // Capture method start for duration logging.
 	s.logger.InfoContext(ctx, "orchestrator EndSession begin", "session_id", sessionID) // Log session shutdown method entry.
+	if _, err := s.authorizeSessionAccess(ctx, sessionID); err != nil {                 // Validate persisted session ownership before any authenticated caller can terminate the session.
+		s.logger.ErrorContext(ctx, "orchestrator EndSession failed", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log authorization failures before returning.
+		return err                                                                                                                                               // Preserve the authorization failure so transports keep the correct status mapping.
+	}
 
 	ended, err := s.markSessionEnded(ctx, sessionID, time.Now()) // Persist the terminal session state first so concurrent callers observe idempotent completion from the database record.
 	if err != nil {                                              // Stop before touching the in-memory Appium session map when the persisted session transition fails.
@@ -296,6 +314,10 @@ func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 
 // CancelPlan cancels local execution, propagates cancellation to distributed workers when needed, and marks active traces as cancelled without clobbering terminal states.
 func (s *Service) CancelPlan(ctx context.Context, traceID string) error {
+	if _, err := s.authorizeTraceAccess(ctx, traceID); err != nil { // Validate persisted trace ownership before any authenticated caller can cancel the trace.
+		return err // Preserve the trace-not-found or permission-denied error so transports keep stable status mapping.
+	}
+
 	s.planMu.Lock()
 	cancel := s.planCancel[traceID]
 	delete(s.planCancel, traceID)
@@ -330,7 +352,7 @@ func (s *Service) CancelPlan(ctx context.Context, traceID string) error {
 
 // GetTrace executes this operation.
 func (s *Service) GetTrace(ctx context.Context, traceID string) (*postgres.Trace, []*postgres.PlanEvent, error) {
-	trace, err := s.dao.GetTrace(ctx, traceID)
+	trace, err := s.authorizeTraceAccess(ctx, traceID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -394,6 +416,9 @@ func (s *Service) TakeScreenshot(ctx context.Context, sessionID string, traceID 
 	if traceID == "" {
 		return nil, errors.New(errors.CodePlanInvalid, "traceId is required for takeScreenshot")
 	}
+	if _, err := s.authorizeTraceAccess(ctx, traceID); err != nil { // Validate persisted trace ownership before storing new screenshot artifacts under the supplied trace identifier.
+		return nil, err // Preserve the trace-not-found or permission-denied error so transports keep stable status mapping.
+	}
 
 	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
@@ -426,6 +451,10 @@ func (s *Service) TakeScreenshot(ctx context.Context, sessionID string, traceID 
 
 // getAppiumClient executes this operation.
 func (s *Service) getAppiumClient(ctx context.Context, sessionID string) (*appium.Client, error) {
+	if _, err := s.authorizeSessionAccess(ctx, sessionID); err != nil { // Validate persisted session ownership before exposing the cached or restored Appium session to authenticated callers.
+		return nil, err // Preserve the session-not-found or permission-denied error so transports keep stable status mapping.
+	}
+
 	s.appiumMu.Lock()
 	app := s.appiumMap[sessionID]
 	s.appiumMu.Unlock()
