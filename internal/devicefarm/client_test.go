@@ -1,13 +1,76 @@
-// client_test.go verifies the local validation behavior of Device Farm client methods before any AWS API call is attempted.
+// client_test.go verifies Device Farm client validation, request shaping, and response mapping behavior without calling real AWS services.
 package devicefarm
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"time"
 
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/errors"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsdevicefarm "github.com/aws/aws-sdk-go-v2/service/devicefarm"
+	"github.com/aws/aws-sdk-go-v2/service/devicefarm/types"
 )
+
+// fakeDeviceFarmAPI implements the narrow Device Farm SDK surface used by the repository client so tests can inject deterministic responses.
+type fakeDeviceFarmAPI struct {
+	scheduleRunInput      *awsdevicefarm.ScheduleRunInput
+	scheduleRunOutput     *awsdevicefarm.ScheduleRunOutput
+	scheduleRunErr        error
+	getRunOutput          *awsdevicefarm.GetRunOutput
+	getRunErr             error
+	createUploadInput     *awsdevicefarm.CreateUploadInput
+	createUploadOutput    *awsdevicefarm.CreateUploadOutput
+	createUploadErr       error
+	getUploadOutput       *awsdevicefarm.GetUploadOutput
+	getUploadErr          error
+	listDevicePoolsInput  *awsdevicefarm.ListDevicePoolsInput
+	listDevicePoolsOutput *awsdevicefarm.ListDevicePoolsOutput
+	listDevicePoolsErr    error
+}
+
+// ScheduleRun records the incoming request and returns the preconfigured fake output for deterministic client tests.
+func (f *fakeDeviceFarmAPI) ScheduleRun(ctx context.Context, params *awsdevicefarm.ScheduleRunInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.ScheduleRunOutput, error) {
+	_ = ctx                                      // Ignore the context because this fake SDK returns one preconfigured in-memory result immediately.
+	_ = optFns                                   // Ignore AWS option functions because this fake SDK records only the normalized repository request shape.
+	f.scheduleRunInput = params                  // Preserve the request payload so the test can assert repository-side normalization and fallbacks.
+	return f.scheduleRunOutput, f.scheduleRunErr // Return the preconfigured fake output so repository response mapping can be asserted directly.
+}
+
+// GetRun returns the preconfigured fake run lookup result for deterministic client tests.
+func (f *fakeDeviceFarmAPI) GetRun(ctx context.Context, params *awsdevicefarm.GetRunInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.GetRunOutput, error) {
+	_ = ctx                            // Ignore the context because this fake SDK returns one preconfigured in-memory result immediately.
+	_ = params                         // Ignore the request payload because this fake test focuses on repository response mapping.
+	_ = optFns                         // Ignore AWS option functions because this fake SDK returns one preconfigured result immediately.
+	return f.getRunOutput, f.getRunErr // Return the preconfigured fake output so repository response mapping can be asserted directly.
+}
+
+// CreateUpload records the incoming request and returns the preconfigured fake output for deterministic client tests.
+func (f *fakeDeviceFarmAPI) CreateUpload(ctx context.Context, params *awsdevicefarm.CreateUploadInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.CreateUploadOutput, error) {
+	_ = ctx                                        // Ignore the context because this fake SDK returns one preconfigured in-memory result immediately.
+	_ = optFns                                     // Ignore AWS option functions because this fake SDK records only the normalized repository request shape.
+	f.createUploadInput = params                   // Preserve the request payload so the test can assert repository-side normalization and fallbacks.
+	return f.createUploadOutput, f.createUploadErr // Return the preconfigured fake output so repository response mapping can be asserted directly.
+}
+
+// GetUpload returns the preconfigured fake upload lookup result for deterministic client tests.
+func (f *fakeDeviceFarmAPI) GetUpload(ctx context.Context, params *awsdevicefarm.GetUploadInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.GetUploadOutput, error) {
+	_ = ctx                                  // Ignore the context because this fake SDK returns one preconfigured in-memory result immediately.
+	_ = params                               // Ignore the request payload because this fake test focuses on repository response mapping.
+	_ = optFns                               // Ignore AWS option functions because this fake SDK returns one preconfigured result immediately.
+	return f.getUploadOutput, f.getUploadErr // Return the preconfigured fake output so repository response mapping can be asserted directly.
+}
+
+// ListDevicePools records the incoming request and returns the preconfigured fake output for deterministic client tests.
+func (f *fakeDeviceFarmAPI) ListDevicePools(ctx context.Context, params *awsdevicefarm.ListDevicePoolsInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.ListDevicePoolsOutput, error) {
+	_ = ctx                                              // Ignore the context because this fake SDK returns one preconfigured in-memory result immediately.
+	_ = optFns                                           // Ignore AWS option functions because this fake SDK records only the normalized repository request shape.
+	f.listDevicePoolsInput = params                      // Preserve the request payload so the test can assert repository-side fallback behavior.
+	return f.listDevicePoolsOutput, f.listDevicePoolsErr // Return the preconfigured fake output so repository fallback handling can be asserted directly.
+}
 
 // TestScheduleRunValidatesRequiredFields verifies that ScheduleRun fails fast on missing local configuration before any SDK call is needed.
 func TestScheduleRunValidatesRequiredFields(t *testing.T) {
@@ -36,5 +99,85 @@ func TestGetRunValidatesARN(t *testing.T) {
 		t.Fatal("expected empty run ARN to fail") // Surface the missing validation failure because callers depend on fast local feedback for malformed requests.
 	} else if !errors.IsCode(err, errors.CodePlanInvalid) { // Fail the test when the returned error does not preserve the stable invalid-plan code.
 		t.Fatalf("expected plan invalid error, got %v", err) // Surface the unexpected error so validation regressions are obvious.
+	}
+}
+
+// TestScheduleRunFallsBackToFirstPoolAndMapsResult verifies that the client selects the first available pool when none is supplied and normalizes the returned run payload.
+func TestScheduleRunFallsBackToFirstPoolAndMapsResult(t *testing.T) {
+	fakeSDK := &fakeDeviceFarmAPI{ // Preconfigure one fake SDK that returns a single pool and a successful run payload so repository request shaping and response mapping can both be asserted.
+		listDevicePoolsOutput: &awsdevicefarm.ListDevicePoolsOutput{DevicePools: []types.DevicePool{{Arn: aws.String("arn:pool:first")}}},
+		scheduleRunOutput:     &awsdevicefarm.ScheduleRunOutput{Run: &types.Run{Arn: aws.String("arn:run:1"), Name: aws.String("run-name"), Status: types.ExecutionStatusCompleted, Result: types.ExecutionResultPassed}},
+	}
+	client := &Client{sdk: fakeSDK, cfg: config.DeviceFarmConfig{ProjectARN: "arn:project:fallback"}} // Construct one repository client around the fake SDK so fallback behavior can be asserted deterministically.
+
+	result, err := client.ScheduleRun(context.Background(), ScheduleRunRequest{AppARN: "arn:app:1", TestPackageARN: "arn:testpkg:1"}) // Schedule one run without explicit project, pool, or run name so fallback resolution paths are exercised directly.
+	if err != nil {                                                                                                                   // Fail the test when the repository client cannot schedule the fake run successfully.
+		t.Fatalf("expected schedule run to succeed, got error: %v", err) // Surface the unexpected error so request-shaping regressions are obvious.
+	}
+	if aws.ToString(fakeSDK.listDevicePoolsInput.Arn) != "arn:project:fallback" { // Fail the test when first-pool resolution does not use the configured project fallback.
+		t.Fatalf("expected pool lookup to use fallback project ARN, got %q", aws.ToString(fakeSDK.listDevicePoolsInput.Arn)) // Surface the unexpected project ARN so fallback regressions are obvious.
+	}
+	if aws.ToString(fakeSDK.scheduleRunInput.DevicePoolArn) != "arn:pool:first" { // Fail the test when the repository client does not forward the discovered first pool into ScheduleRun.
+		t.Fatalf("expected first pool ARN to be used, got %q", aws.ToString(fakeSDK.scheduleRunInput.DevicePoolArn)) // Surface the unexpected pool ARN so fallback regressions are obvious.
+	}
+	if fakeSDK.scheduleRunInput.Test == nil || fakeSDK.scheduleRunInput.Test.Type != types.TestTypeAppiumNode { // Fail the test when the repository client does not default the test type to APPIUM_NODE.
+		t.Fatalf("expected default test type APPIUM_NODE, got %#v", fakeSDK.scheduleRunInput.Test) // Surface the unexpected test payload so request-shaping regressions are obvious.
+	}
+	if result["runArn"] != "arn:run:1" || result["projectArn"] != "arn:project:fallback" || result["devicePoolArn"] != "arn:pool:first" { // Fail the test when the repository client does not normalize key run fields into the documented response shape.
+		t.Fatalf("expected normalized run payload, got %#v", result) // Surface the unexpected payload so response-mapping regressions are obvious.
+	}
+	if !strings.HasPrefix(aws.ToString(fakeSDK.scheduleRunInput.Name), "mcp-run-") { // Fail the test when the repository client does not generate the documented timestamped fallback run name.
+		t.Fatalf("expected generated fallback run name, got %q", aws.ToString(fakeSDK.scheduleRunInput.Name)) // Surface the unexpected run name so fallback regressions are obvious.
+	}
+	if _, err := time.Parse("20060102-150405", strings.TrimPrefix(aws.ToString(fakeSDK.scheduleRunInput.Name), "mcp-run-")); err != nil { // Fail the test when the generated fallback run name does not carry the documented UTC timestamp format.
+		t.Fatalf("expected parseable fallback run timestamp, got %q", aws.ToString(fakeSDK.scheduleRunInput.Name)) // Surface the unexpected run name so fallback regressions are obvious.
+	}
+}
+
+// TestGetRunFillsMissingCountersWithZero verifies that the repository client normalizes nil Device Farm counters into explicit zero values.
+func TestGetRunFillsMissingCountersWithZero(t *testing.T) {
+	fakeSDK := &fakeDeviceFarmAPI{getRunOutput: &awsdevicefarm.GetRunOutput{Run: &types.Run{Arn: aws.String("arn:run:2"), Name: aws.String("run-two"), Status: types.ExecutionStatusRunning, Result: types.ExecutionResultPending}}} // Preconfigure one fake SDK run response with nil counters so the repository normalization path can be asserted directly.
+	client := &Client{sdk: fakeSDK}                                                                                                                                                                                                  // Construct one repository client around the fake SDK so response mapping can be asserted deterministically.
+
+	result, err := client.GetRun(context.Background(), "arn:run:2") // Fetch one fake run so the repository response-mapping path can normalize the nil counter payload.
+	if err != nil {                                                 // Fail the test when the repository client cannot map the fake run successfully.
+		t.Fatalf("expected get run to succeed, got error: %v", err) // Surface the unexpected error so response-mapping regressions are obvious.
+	}
+	counters, ok := result["counters"].(map[string]int32) // Decode the normalized counters payload so the zero-fill behavior can be asserted directly.
+	if !ok {                                              // Fail the test when the repository client does not return the documented counters shape.
+		t.Fatalf("expected counters map, got %#v", result["counters"]) // Surface the unexpected counters payload so response-mapping regressions are obvious.
+	}
+	if counters["passed"] != 0 || counters["total"] != 0 { // Fail the test when nil AWS counters do not normalize to zero values.
+		t.Fatalf("expected zeroed counters, got %#v", counters) // Surface the unexpected counters so normalization regressions are obvious.
+	}
+}
+
+// TestCreateUploadUsesFallbackProjectAndUppercasesType verifies that the repository client applies project fallback and uppercases upload types before calling AWS.
+func TestCreateUploadUsesFallbackProjectAndUppercasesType(t *testing.T) {
+	fakeSDK := &fakeDeviceFarmAPI{createUploadOutput: &awsdevicefarm.CreateUploadOutput{Upload: &types.Upload{Arn: aws.String("arn:upload:1"), Name: aws.String("apk"), Type: types.UploadTypeAndroidApp, Status: types.UploadStatusInitialized, Url: aws.String("https://uploads.example/1"), ContentType: aws.String("application/octet-stream")}}} // Preconfigure one fake SDK upload response so request shaping and response mapping can both be asserted.
+	client := &Client{sdk: fakeSDK, cfg: config.DeviceFarmConfig{ProjectARN: "arn:project:upload"}}                                                                                                                                                                                                                                                   // Construct one repository client around the fake SDK so fallback behavior can be asserted deterministically.
+
+	result, err := client.CreateUpload(context.Background(), CreateUploadRequest{Name: "apk", Type: "android_app", ContentType: "application/octet-stream"}) // Create one upload without an explicit project ARN so fallback resolution and type normalization are exercised directly.
+	if err != nil {                                                                                                                                          // Fail the test when the repository client cannot create the fake upload successfully.
+		t.Fatalf("expected create upload to succeed, got error: %v", err) // Surface the unexpected error so request-shaping regressions are obvious.
+	}
+	if aws.ToString(fakeSDK.createUploadInput.ProjectArn) != "arn:project:upload" { // Fail the test when the repository client does not use the configured project fallback.
+		t.Fatalf("expected fallback project ARN, got %q", aws.ToString(fakeSDK.createUploadInput.ProjectArn)) // Surface the unexpected project ARN so fallback regressions are obvious.
+	}
+	if fakeSDK.createUploadInput.Type != types.UploadTypeAndroidApp { // Fail the test when the repository client does not uppercase and normalize the upload type before calling AWS.
+		t.Fatalf("expected upload type ANDROID_APP, got %q", fakeSDK.createUploadInput.Type) // Surface the unexpected type so request-shaping regressions are obvious.
+	}
+	if result["uploadArn"] != "arn:upload:1" || result["projectArn"] != "arn:project:upload" { // Fail the test when the repository client does not normalize the upload response payload as documented.
+		t.Fatalf("expected normalized upload payload, got %#v", result) // Surface the unexpected payload so response-mapping regressions are obvious.
+	}
+}
+
+// TestFirstDevicePoolARNRejectsEmptyResults verifies that the repository client surfaces the documented no-pool error when AWS returns no usable pools.
+func TestFirstDevicePoolARNRejectsEmptyResults(t *testing.T) {
+	client := &Client{sdk: &fakeDeviceFarmAPI{listDevicePoolsOutput: &awsdevicefarm.ListDevicePoolsOutput{DevicePools: []types.DevicePool{{Arn: aws.String("")}}}}} // Construct one repository client whose fake SDK returns no usable pool ARN values.
+	if _, err := client.firstDevicePoolARN(context.Background(), "arn:project:no-pools"); err == nil {                                                              // Attempt to resolve the first pool so the no-usable-pool path is exercised directly.
+		t.Fatal("expected missing pool lookup to fail") // Surface the missing failure because callers depend on a stable error when no pools are available.
+	} else if !errors.IsCode(err, errors.CodeSchedNoWorker) { // Fail the test when the returned error does not preserve the stable no-worker code.
+		t.Fatalf("expected no-worker error, got %v", err) // Surface the unexpected error so pool-resolution regressions are obvious.
 	}
 }

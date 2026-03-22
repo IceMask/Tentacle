@@ -4,6 +4,9 @@ package jsonrpc
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"mcp_for_appium/internal/config"
@@ -63,5 +66,37 @@ func TestProcessRequestReturnsMethodNotFoundMCPError(t *testing.T) {
 		t.Fatal("expected unknown method to fail") // Surface the missing failure because clients depend on stable method-not-found behavior.
 	} else if mcpErr, ok := err.(*mcperrors.MCPError); !ok || mcpErr.Code != -32601 { // Fail the test when the fallback path no longer returns the MCP-compatible method-not-found shape.
 		t.Fatalf("expected MCP method-not-found error, got %#v", err) // Surface the unexpected error so dispatch regressions are obvious.
+	}
+}
+
+// TestServeHTTPRejectsParseError verifies that the HTTP transport returns the standard JSON-RPC parse-error envelope for malformed request bodies.
+func TestServeHTTPRejectsParseError(t *testing.T) {
+	handler := NewHandler(nil, nil)                                                     // Construct one handler with no orchestrator dependency because malformed JSON is rejected before dispatch.
+	request := httptest.NewRequest(http.MethodPost, "/jsonrpc", strings.NewReader("{")) // Build one malformed JSON-RPC HTTP request body so the parse-error path is exercised directly.
+	recorder := httptest.NewRecorder()                                                  // Capture the HTTP response so the emitted JSON-RPC error envelope can be asserted directly.
+
+	handler.ServeHTTP(recorder, request) // Execute the malformed HTTP request through the production JSON-RPC HTTP transport.
+
+	if recorder.Code != http.StatusOK { // Fail the test when the transport does not return the normal JSON-RPC HTTP status for parse errors.
+		t.Fatalf("expected HTTP 200 for parse error envelope, got %d", recorder.Code) // Surface the unexpected transport status so HTTP mapping regressions are obvious.
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":-32700`) { // Fail the test when the transport does not emit the standard JSON-RPC parse-error code.
+		t.Fatalf("expected parse error body, got %s", recorder.Body.String()) // Surface the unexpected body so HTTP mapping regressions are obvious.
+	}
+}
+
+// TestServeHTTPRejectsInvalidRequestVersion verifies that the HTTP transport returns the standard JSON-RPC invalid-request envelope for non-2.0 requests.
+func TestServeHTTPRejectsInvalidRequestVersion(t *testing.T) {
+	handler := NewHandler(nil, nil)                                                                                                            // Construct one handler with no orchestrator dependency because protocol-version validation runs before business dispatch.
+	request := httptest.NewRequest(http.MethodPost, "/jsonrpc", strings.NewReader(`{"jsonrpc":"1.0","method":"describeCapabilities","id":1}`)) // Build one syntactically valid but protocol-invalid JSON-RPC request body.
+	recorder := httptest.NewRecorder()                                                                                                         // Capture the HTTP response so the emitted JSON-RPC error envelope can be asserted directly.
+
+	handler.ServeHTTP(recorder, request) // Execute the invalid-version HTTP request through the production JSON-RPC HTTP transport.
+
+	if recorder.Code != http.StatusOK { // Fail the test when the transport does not return the normal JSON-RPC HTTP status for invalid requests.
+		t.Fatalf("expected HTTP 200 for invalid-request envelope, got %d", recorder.Code) // Surface the unexpected transport status so HTTP mapping regressions are obvious.
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":-32600`) { // Fail the test when the transport does not emit the standard JSON-RPC invalid-request code.
+		t.Fatalf("expected invalid request body, got %s", recorder.Body.String()) // Surface the unexpected body so HTTP mapping regressions are obvious.
 	}
 }

@@ -14,9 +14,18 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/devicefarm/types"
 )
 
+// deviceFarmAPI defines the AWS Device Farm operations used by the repository client so tests can inject deterministic responses.
+type deviceFarmAPI interface {
+	ScheduleRun(ctx context.Context, params *awsdevicefarm.ScheduleRunInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.ScheduleRunOutput, error)
+	GetRun(ctx context.Context, params *awsdevicefarm.GetRunInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.GetRunOutput, error)
+	CreateUpload(ctx context.Context, params *awsdevicefarm.CreateUploadInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.CreateUploadOutput, error)
+	GetUpload(ctx context.Context, params *awsdevicefarm.GetUploadInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.GetUploadOutput, error)
+	ListDevicePools(ctx context.Context, params *awsdevicefarm.ListDevicePoolsInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.ListDevicePoolsOutput, error)
+}
+
 // Client wraps AWS Device Farm APIs used by run_api mode.
 type Client struct {
-	sdk *awsdevicefarm.Client
+	sdk deviceFarmAPI
 	cfg config.DeviceFarmConfig
 }
 
