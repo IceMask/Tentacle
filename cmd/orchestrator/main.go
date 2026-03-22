@@ -24,10 +24,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
-	if cfg.Orchestrator.ExecutionMode != orchestrator.ExecutionModeDistributed { // Preserve the current standalone-binary behavior by normalizing to distributed mode before validation runs.
+	effectiveMode, forced := normalizeStandaloneExecutionMode(cfg.Orchestrator.ExecutionMode) // Normalize the standalone orchestrator execution mode so startup always runs with the supported distributed setting.
+	if forced {                                                                               // Emit the compatibility log only when startup overrides a non-distributed configured mode.
 		log.Printf("forcing execution mode to %q for standalone orchestrator", orchestrator.ExecutionModeDistributed) // Surface the effective runtime mode so operators can see the normalization.
-		cfg.Orchestrator.ExecutionMode = orchestrator.ExecutionModeDistributed                                        // Apply the effective mode before startup preflight checks inspect the config.
 	}
+	cfg.Orchestrator.ExecutionMode = effectiveMode                   // Apply the effective mode before startup preflight checks inspect the config.
 	if err := startup.ValidateOrchestratorStartup(cfg); err != nil { // Reject malformed startup config before telemetry or dependency initialization begins.
 		log.Fatalf("orchestrator startup preflight failed: %v", err) // Stop immediately so no background loops or listeners start with invalid config.
 	}
@@ -100,4 +101,13 @@ func main() {
 	svc.Stop()
 	defer pgDAO.Close()
 	defer redisCache.Close()
+}
+
+// normalizeStandaloneExecutionMode returns the effective standalone orchestrator execution mode together with whether startup had to override the configured value.
+func normalizeStandaloneExecutionMode(configuredMode string) (string, bool) {
+	if configuredMode == orchestrator.ExecutionModeDistributed { // Preserve the configured value when it already matches the only supported standalone orchestrator mode.
+		return configuredMode, false // Report that no override was needed because startup can proceed with the caller-supplied distributed mode.
+	}
+
+	return orchestrator.ExecutionModeDistributed, true // Force the standalone binary into distributed mode because that is the only supported runtime posture for this process today.
 }
