@@ -150,13 +150,18 @@ func applyMigrations(ctx context.Context, conn *pgx.Conn, migrationFiles []strin
 
 // verifySchema checks that the expected tables and indexes exist after the migration replay.
 func verifySchema(ctx context.Context, conn *pgx.Conn) ([]string, []string) {
-	expectedTables := []string{"artifacts", "audit_logs", "plan_events", "sessions", "traces"} // expectedTables defines the current public tables promised by the design and migration files.
-	expectedIndexes := []string{                                                               // expectedIndexes enumerates the current supporting indexes that the DAO paths depend on.
+	expectedTables := []string{"artifacts", "audit_logs", "hmac_keys", "pat_tokens", "plan_events", "sessions", "traces"} // expectedTables defines the current public tables promised by the design and migration files.
+	expectedIndexes := []string{                                                                                          // expectedIndexes enumerates the current supporting indexes that the DAO paths depend on.
 		"idx_artifacts_key_unique",
 		"idx_artifacts_trace_created_at",
 		"idx_audit_logs_project_created_at",
 		"idx_audit_logs_resource_created_at",
 		"idx_audit_logs_trace_created_at",
+		"idx_hmac_keys_tenant_status_created_at",
+		"idx_hmac_keys_tenant_validity",
+		"idx_pat_tokens_rotated_from",
+		"idx_pat_tokens_subject_status_created_at",
+		"idx_pat_tokens_tenant_status_created_at",
 		"idx_plan_events_trace_created_at",
 		"idx_sessions_project_created_at",
 		"idx_sessions_status_updated_at",

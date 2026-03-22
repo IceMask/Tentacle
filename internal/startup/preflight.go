@@ -33,6 +33,9 @@ func ValidateGatewayStartup(cfg *config.Config, stdioMode bool) error {
 	if err := validateWorkerAppiumConfig(cfg.Worker.AppiumURL); err != nil { // Validate the embedded Appium base URL because monolith gateway execution relies on it for session creation.
 		return err // Stop immediately when the embedded Appium endpoint is malformed.
 	}
+	if err := validateGatewaySecurityConfig(cfg); err != nil { // Validate auth-related config and WebSocket origin policy before the HTTP server wiring starts.
+		return err // Preserve the specific security configuration failure for the caller.
+	}
 	if err := validateDeviceFarmConfig(cfg); err != nil { // Validate optional Device Farm settings so later tool handlers do not fail on obvious missing fields.
 		return err // Preserve the specific Device Farm validation error for the caller.
 	}
@@ -78,6 +81,9 @@ func ValidateOrchestratorStartup(cfg *config.Config) error {
 	if err := validateSharedStorageConfig(cfg); err != nil { // Validate the shared storage config used by the orchestrator binary before clients are initialized.
 		return err // Preserve the first precise storage validation error.
 	}
+	if err := validateRPCSecurityConfig(cfg.RPC.Security); err != nil { // Validate internal RPC security before the orchestrator starts its worker-facing gRPC listener.
+		return err // Preserve the RPC security validation failure for the caller.
+	}
 	if err := validateDeviceFarmConfig(cfg); err != nil { // Validate optional Device Farm configuration before the service decides whether to initialize that client.
 		return err // Preserve the specific Device Farm validation error for the caller.
 	}
@@ -104,6 +110,9 @@ func ValidateWorkerStartup(cfg *config.Config) error {
 	}
 	if err := validateHostPort(cfg.Worker.OrchestratorAddr, "worker.orchestrator_addr"); err != nil { // Validate the orchestrator target address before gRPC registration is attempted.
 		return err // Preserve the host:port validation failure for the caller.
+	}
+	if err := validateRPCSecurityConfig(cfg.RPC.Security); err != nil { // Validate internal RPC security before the worker starts its gRPC listener and dials the orchestrator.
+		return err // Preserve the RPC security validation failure for the caller.
 	}
 
 	return nil // Return success once every worker startup prerequisite has been validated.
@@ -238,6 +247,53 @@ func validateTLSFiles(enabled bool, certFile string, keyFile string) error {
 	}
 
 	return nil // Return success once the configured TLS key pair has been verified successfully.
+}
+
+// validateRPCSecurityConfig checks the shared internal RPC security mode and any TLS or token material required by that mode.
+func validateRPCSecurityConfig(cfg config.RPCSecurityConfig) error {
+	mode := strings.ToLower(strings.TrimSpace(cfg.Mode)) // Normalize the internal RPC security mode once so validation behavior stays case-insensitive and deterministic.
+	switch mode {                                        // Validate the shared internal RPC transport mode before any worker or orchestrator server starts.
+	case "", "insecure": // Accept the empty compatibility default and the explicit insecure mode without requiring TLS material.
+		return nil // Return success because insecure mode does not require TLS files or a shared RPC auth token.
+	case "tls": // Validate the first-stage secure transport mode that requires server TLS plus a shared client token.
+		if err := validateTLSFiles(true, cfg.ServerCertFile, cfg.ServerKeyFile); err != nil { // Reuse the existing TLS key-pair validation helper for the internal RPC server certificate.
+			return errors.Wrap(errors.CodeConfigInvalid, "rpc.security server TLS config is invalid", err) // Surface internal RPC server TLS validation failures with RPC-specific context.
+		}
+		if strings.TrimSpace(cfg.AuthToken) == "" { // Reject missing shared RPC auth tokens because the first-stage secure transport model requires client-token authorization too.
+			return errors.New(errors.CodeConfigMissing, "rpc.security.auth_token is required when rpc.security.mode=tls") // Surface the missing shared RPC auth token before startup continues.
+		}
+		if strings.TrimSpace(cfg.CAFile) != "" { // Validate the optional CA bundle only when the operator configures one explicitly.
+			if _, err := os.Stat(cfg.CAFile); err != nil { // Check that the CA bundle exists and is readable before any TLS client or mTLS server tries to load it.
+				return errors.Wrap(errors.CodeConfigInvalid, "rpc.security.ca_file is not readable", err) // Surface unreadable CA bundles as config errors before startup continues.
+			}
+		}
+		return nil // Return success once the first-stage secure internal RPC configuration has passed validation.
+	case "mtls": // Validate the stronger mutual-TLS transport mode that requires server certs, client certs, a CA bundle, and a shared RPC auth token.
+		if err := validateTLSFiles(true, cfg.ServerCertFile, cfg.ServerKeyFile); err != nil { // Reuse the existing TLS key-pair validation helper for the internal RPC server certificate.
+			return errors.Wrap(errors.CodeConfigInvalid, "rpc.security server TLS config is invalid", err) // Surface internal RPC server TLS validation failures with RPC-specific context.
+		}
+		if strings.TrimSpace(cfg.ClientCertFile) == "" || strings.TrimSpace(cfg.ClientKeyFile) == "" { // Reject missing client certificate material because mutual TLS requires client-side key pairs too.
+			return errors.New(errors.CodeConfigMissing, "rpc.security.client_cert_file and rpc.security.client_key_file are required when rpc.security.mode=mtls") // Surface the missing client mTLS material before startup continues.
+		}
+		if _, err := os.Stat(cfg.ClientCertFile); err != nil { // Check that the client certificate file exists and is readable before any worker or orchestrator dials with mTLS.
+			return errors.Wrap(errors.CodeConfigInvalid, "rpc.security.client_cert_file is not readable", err) // Surface unreadable client certificates as config errors before startup continues.
+		}
+		if _, err := os.Stat(cfg.ClientKeyFile); err != nil { // Check that the client private-key file exists and is readable before any worker or orchestrator dials with mTLS.
+			return errors.Wrap(errors.CodeConfigInvalid, "rpc.security.client_key_file is not readable", err) // Surface unreadable client keys as config errors before startup continues.
+		}
+		if strings.TrimSpace(cfg.CAFile) == "" { // Reject missing CA bundles because mutual TLS needs one shared trust anchor to validate peers.
+			return errors.New(errors.CodeConfigMissing, "rpc.security.ca_file is required when rpc.security.mode=mtls") // Surface the missing CA bundle before startup continues.
+		}
+		if _, err := os.Stat(cfg.CAFile); err != nil { // Check that the CA bundle exists and is readable before any peer-verification occurs.
+			return errors.Wrap(errors.CodeConfigInvalid, "rpc.security.ca_file is not readable", err) // Surface unreadable CA bundles as config errors before startup continues.
+		}
+		if strings.TrimSpace(cfg.AuthToken) == "" { // Keep the shared RPC auth token requirement even in mTLS mode so first-stage authorization semantics remain intact during the migration path.
+			return errors.New(errors.CodeConfigMissing, "rpc.security.auth_token is required when rpc.security.mode=mtls") // Surface the missing shared RPC auth token before startup continues.
+		}
+		return nil // Return success once the mutual-TLS internal RPC configuration has passed validation.
+	default:
+		return errors.New(errors.CodeConfigInvalid, fmt.Sprintf("rpc.security.mode %q is not supported", cfg.Mode)) // Surface unsupported modes defensively even though config.Load already normalizes the accepted set.
+	}
 }
 
 // validatePort checks that a TCP or UDP port number is within the valid user-space range.

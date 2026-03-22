@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/errors"
 	"mcp_for_appium/internal/rpc"
 	"mcp_for_appium/internal/storage/redis"
@@ -48,6 +49,7 @@ type Dispatcher struct {
 	workerClients  map[string]*rpc.WorkerClient
 	workerClientMu sync.Mutex
 	planTimeout    time.Duration
+	rpcSecurity    config.RPCSecurityConfig
 }
 
 // TraceFinalizer records dispatcher-owned terminal outcomes for queued traces before the queue message is ACKed.
@@ -69,7 +71,7 @@ type inflightTraceAssignment struct {
 }
 
 // NewDispatcher executes this operation.
-func NewDispatcher(cache *redis.Cache, registry *WorkerRegistry, executor PlanExecutor, planTimeout time.Duration) *Dispatcher {
+func NewDispatcher(cache *redis.Cache, registry *WorkerRegistry, executor PlanExecutor, planTimeout time.Duration, rpcSecurity config.RPCSecurityConfig) *Dispatcher {
 	return &Dispatcher{
 		cache:         cache,
 		registry:      registry,
@@ -78,6 +80,7 @@ func NewDispatcher(cache *redis.Cache, registry *WorkerRegistry, executor PlanEx
 		stopCh:        make(chan struct{}),
 		workerClients: make(map[string]*rpc.WorkerClient),
 		planTimeout:   planTimeout,
+		rpcSecurity:   rpcSecurity,
 	}
 }
 
@@ -676,7 +679,7 @@ func (d *Dispatcher) getWorkerClient(address string) (*rpc.WorkerClient, error) 
 	if c, ok := d.workerClients[address]; ok {
 		return c, nil
 	}
-	c, err := rpc.NewWorkerClient(address)
+	c, err := rpc.NewWorkerClient(address, d.rpcSecurity)
 	if err != nil {
 		return nil, err
 	}

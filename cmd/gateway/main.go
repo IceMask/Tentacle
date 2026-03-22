@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -13,7 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"mcp_for_appium/internal/auth"
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/gateway/capabilities"
 	"mcp_for_appium/internal/gateway/jsonrpc"
@@ -97,7 +94,7 @@ func runStdioMode(cfg *config.Config) {
 		log.Fatalf("stdio startup preflight failed for appium: %v", err) // Stop immediately so session creation does not fail only after the first user request.
 	}
 
-	orchSvc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)
+	orchSvc := orchestrator.NewService(cfg.Orchestrator, cfg.RPC.Security, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)
 	if err := orchSvc.Start(ctx); err != nil {
 		log.Fatalf("failed to start orchestrator: %v", err)
 	}
@@ -157,7 +154,7 @@ func runHTTPMode(cfg *config.Config) {
 		log.Fatalf("http startup preflight failed for appium: %v", err) // Stop immediately so session creation does not fail only after requests arrive.
 	}
 
-	orchSvc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)
+	orchSvc := orchestrator.NewService(cfg.Orchestrator, cfg.RPC.Security, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)
 
 	// 启动 orchestrator 内部逻辑（单体模式）
 	ctx := context.Background()
@@ -171,45 +168,38 @@ func runHTTPMode(cfg *config.Config) {
 	// 构造 HTTP/WS 相关 handler
 	jsonrpcHandler := jsonrpc.NewHandler(orchSvc, capSvc)
 	restRouter := rest.NewRouter(orchSvc, redisCache, capSvc)
-	if secret := os.Getenv("HMAC_SECRET"); secret != "" {
-		keyID := os.Getenv("HMAC_KEY_ID")
-		validator := auth.NewHMACValidator(func(id string) (string, error) {
-			if keyID == "" || id == keyID {
-				return secret, nil
-			}
-			return "", errors.New("unknown hmac key id")
-		}, redisCache)
-		restRouter.SetHMACValidator(validator)
+	subscriptionTokenStore := websocket.NewSubscriptionTokenStore(redisCache, cfg.WebSocket.SubscriptionTokenTTL) // Construct the shared Redis-backed subscription-token store so REST issuance and WebSocket handshake validation use the same authority.
+	restRouter.SetSubscriptionTokenStore(subscriptionTokenStore)                                                  // Inject the shared token store into the REST router so the v4.4 subscribe endpoint can issue short-lived tokens.
+	authMiddleware, err := buildGatewayAuthMiddleware(ctx, cfg, pgDAO, redisCache)                                // Construct the optional gateway auth middleware once so JSON-RPC and REST can share the same auth pipeline.
+	if err != nil {                                                                                               // Stop startup when a configured auth source cannot be initialized safely.
+		log.Fatalf("failed to init gateway auth: %v", err) // Surface the auth construction failure before the HTTP listener starts.
 	}
 	wsHub := websocket.NewHub(redisCache)
 	go wsHub.Run(ctx)
 
-	// Middleware
-	// patValidator := auth.NewPATValidator(...)
-	// authMiddleware := middleware.NewAuthMiddleware(patValidator)
+	protectedMux := http.NewServeMux()              // Isolate auth-protected routes so health, metrics, and WebSocket can keep their dedicated exposure rules.
+	protectedMux.Handle("/jsonrpc", jsonrpcHandler) // Register the JSON-RPC endpoint inside the protected route subtree.
+	restRouter.RegisterRoutes(protectedMux)         // Register the REST API endpoints inside the same protected subtree.
+	protectedHandler := http.Handler(protectedMux)  // Seed the protected subtree handler with the raw mux before optional auth wrapping.
+	if authMiddleware != nil {                      // Wrap the protected subtree only when at least one auth validator is active.
+		protectedHandler = authMiddleware.Handle(protectedHandler) // Enforce HMAC/OIDC/PAT auth for JSON-RPC and REST requests.
+	}
 
-	// Mux
-	// 注册 JSON-RPC、REST 路由
-	mux := http.NewServeMux()
-	mux.Handle("/jsonrpc", jsonrpcHandler) // Add middleware
-	restRouter.RegisterRoutes(mux)
-	mux.Handle("/ws/plan-events", websocket.NewHandler(wsHub))
+	mux := http.NewServeMux()                                                                                                                     // Build the public root mux that combines protected APIs with public operational endpoints.
+	mux.Handle("/", protectedHandler)                                                                                                             // Mount the protected subtree under "/" so JSON-RPC and REST remain reachable through their existing paths.
+	mux.Handle("/ws/plan-events", websocket.NewHandler(wsHub, subscriptionTokenStore, websocket.ParseAllowedOrigins(cfg.Gateway.AllowedOrigins))) // Enforce subscription-token and origin checks during the WebSocket handshake instead of accepting traceId-only requests.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		payload := orchSvc.HealthCheck(r.Context())      // Evaluate the live orchestrator health snapshot before deciding the HTTP status code returned by /healthz.
 		writeJSON(w, healthHTTPStatus(payload), payload) // Return HTTP 503 only when the orchestrator reports a down state so callers can distinguish degraded from unavailable service.
 	})
 	mux.Handle("/metrics", promhttp.Handler())
 
-	// 配置并启动 HTTP 服务器
-	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Gateway.Port),
-		Handler: telemetry.TraceMiddleware("gateway", mux),
-	}
+	srv := newGatewayHTTPServer(cfg, telemetry.TraceMiddleware("gateway", mux)) // Construct the HTTP server once so TLS policy and port binding follow the shared helper logic.
 
 	go func() {
-		log.Printf("Gateway started on port %d", cfg.Gateway.Port)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("listen: %s\n", err)
+		log.Printf("Gateway started on port %d", cfg.Gateway.Port)                        // Emit the listener port so operators can confirm the active HTTP endpoint quickly from logs.
+		if err := serveGatewayHTTP(srv, cfg); err != nil && err != http.ErrServerClosed { // Start HTTP or HTTPS according to the gateway TLS configuration.
+			log.Fatalf("listen: %s\n", err) // Stop the process when the listener fails outside the normal graceful-shutdown path.
 		}
 	}()
 

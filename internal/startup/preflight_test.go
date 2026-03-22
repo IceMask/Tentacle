@@ -56,6 +56,9 @@ func newValidConfig() *config.Config {
 		DeviceFarm: config.DeviceFarmConfig{ // Keep Device Farm disabled in the baseline config unless a test opts into another mode.
 			Mode: "disabled", // Disable Device Farm by default so tests can opt into run_api or test_grid explicitly.
 		},
+		WebSocket: config.WebSocketConfig{ // Seed the WebSocket section with a valid short-lived subscription-token TTL for baseline startup validation.
+			SubscriptionTokenTTL: 60 * time.Second, // Use a positive browser subscription-token TTL for the baseline startup config.
+		},
 	} // Return the fully populated baseline config for mutation by individual tests.
 }
 
@@ -104,6 +107,19 @@ func TestValidateWorkerStartupRejectsInvalidAppiumURL(t *testing.T) {
 	err := ValidateWorkerStartup(cfg)  // Run worker startup validation against the mutated config.
 	if err == nil {                    // Fail the test when validation unexpectedly accepts a malformed Appium URL.
 		t.Fatal("expected worker startup validation to reject a malformed appium url") // Surface the missing expected validation error clearly.
+	}
+}
+
+// TestValidateWorkerStartupRejectsTLSRPCWithoutFiles verifies that worker startup fails fast when internal RPC TLS mode is enabled without readable server certificate material.
+func TestValidateWorkerStartupRejectsTLSRPCWithoutFiles(t *testing.T) {
+	cfg := newValidConfig()                                  // Start from a fully valid baseline config so this test mutates only the internal RPC security fields.
+	cfg.RPC.Security.Mode = "tls"                            // Enable internal RPC TLS mode so startup validation must require server certificate material and a shared auth token.
+	cfg.RPC.Security.AuthToken = "shared-rpc-token"          // Provide the shared RPC auth token so the test isolates the missing-TLS-file failure path.
+	cfg.RPC.Security.ServerCertFile = "/tmp/missing-rpc.crt" // Point the server certificate path at a definitely missing file.
+	cfg.RPC.Security.ServerKeyFile = "/tmp/missing-rpc.key"  // Point the server key path at a definitely missing file.
+	err := ValidateWorkerStartup(cfg)                        // Run worker startup validation against the mutated internal RPC TLS config.
+	if err == nil {                                          // Fail the test when validation unexpectedly accepts missing internal RPC TLS files.
+		t.Fatal("expected worker startup validation to reject missing internal rpc tls files") // Surface the missing expected validation error clearly.
 	}
 }
 

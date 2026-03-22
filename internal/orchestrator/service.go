@@ -42,6 +42,7 @@ type deviceFarmUploadMeta struct {
 
 type Service struct {
 	cfg          config.OrchestratorConfig
+	rpcSecurity  config.RPCSecurityConfig
 	dao          *postgres.DAO
 	cache        *redis.Cache
 	s3           *s3.Client
@@ -63,7 +64,7 @@ type Service struct {
 }
 
 // NewService executes this operation.
-func NewService(cfg config.OrchestratorConfig, workerCfg config.WorkerConfig, awsCfg config.AWSConfig, dfCfg config.DeviceFarmConfig, dao *postgres.DAO, cache *redis.Cache, s3 *s3.Client) *Service {
+func NewService(cfg config.OrchestratorConfig, rpcCfg config.RPCSecurityConfig, workerCfg config.WorkerConfig, awsCfg config.AWSConfig, dfCfg config.DeviceFarmConfig, dao *postgres.DAO, cache *redis.Cache, s3 *s3.Client) *Service {
 	mode := normalizeExecutionMode(cfg.ExecutionMode)
 	cfg.ExecutionMode = mode
 	registry := NewWorkerRegistry(cache)
@@ -71,6 +72,7 @@ func NewService(cfg config.OrchestratorConfig, workerCfg config.WorkerConfig, aw
 
 	svc := &Service{
 		cfg:          cfg,
+		rpcSecurity:  rpcCfg,
 		dao:          dao,
 		cache:        cache,
 		s3:           s3,
@@ -100,8 +102,8 @@ func NewService(cfg config.OrchestratorConfig, workerCfg config.WorkerConfig, aw
 	if mode == ExecutionModeMonolith {
 		executor = svc
 	}
-	dispatcher := NewDispatcher(cache, registry, executor, cfg.PlanTimeout) // Pass the configured plan timeout into dispatcher so distributed in-flight traces can be closed when workers never report a result.
-	dispatcher.finalizer = svc                                              // Wire the service's durable terminalization helper into dispatcher-owned terminal paths before the service starts processing queue messages.
+	dispatcher := NewDispatcher(cache, registry, executor, cfg.PlanTimeout, rpcCfg) // Pass the configured plan timeout and RPC security into dispatcher so distributed worker calls follow the selected transport mode.
+	dispatcher.finalizer = svc                                                      // Wire the service's durable terminalization helper into dispatcher-owned terminal paths before the service starts processing queue messages.
 	svc.dispatcher = dispatcher
 
 	return svc

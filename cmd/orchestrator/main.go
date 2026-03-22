@@ -62,7 +62,7 @@ func main() {
 
 	// 4. Init Service
 	// 构造 orchestrator 服务，内部包含 dispatcher/registry
-	svc := orchestrator.NewService(cfg.Orchestrator, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)
+	svc := orchestrator.NewService(cfg.Orchestrator, cfg.RPC.Security, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)
 	preflightCtx, preflightCancel := context.WithTimeout(context.Background(), 5*time.Second) // Bound dependency probes so standalone startup fails fast when a required dependency is unavailable.
 	defer preflightCancel()                                                                   // Release the dependency-check timeout resources after startup validation finishes.
 	if err := startup.CheckS3BucketAccess(preflightCtx, s3Client); err != nil {               // Verify the artifact bucket exists and is reachable before the orchestrator starts background loops.
@@ -76,7 +76,10 @@ func main() {
 	}
 
 	// 6. Start gRPC Server for worker registration / heartbeat
-	grpcSrv := orchestrator.NewGRPCServer(svc.Registry())
+	grpcSrv, err := orchestrator.NewGRPCServer(svc.Registry(), cfg.RPC.Security) // Build the worker-facing gRPC server with the configured internal RPC transport mode and shared-token enforcement.
+	if err != nil {                                                              // Stop immediately when the configured internal RPC security settings cannot be turned into a gRPC server safely.
+		log.Fatalf("failed to initialize orchestrator gRPC security: %v", err) // Surface the gRPC security wiring failure before the listener starts.
+	}
 	go func() {
 		if err := grpcSrv.Start(cfg.Orchestrator.GRPCPort); err != nil {
 			log.Fatalf("gRPC server error: %v", err)

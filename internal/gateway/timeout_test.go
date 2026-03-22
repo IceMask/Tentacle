@@ -101,7 +101,7 @@ func newGatewayTimeoutHarness(t *testing.T) *gatewayTimeoutHarness {
 		AutoWaitMax:   500 * time.Millisecond,             // Use a small positive auto-wait value because the orchestrator config requires one even though these tests focus on session start.
 		SnapshotTTL:   time.Minute,                        // Use a positive snapshot TTL because the orchestrator config expects one even though these tests do not touch snapshots.
 		ExecutionMode: orchestrator.ExecutionModeMonolith, // Exercise the monolith service path that the gateway embeds directly today.
-	}, config.WorkerConfig{
+	}, config.RPCSecurityConfig{}, config.WorkerConfig{
 		AppiumURL: appiumURL, // Point the service at the intentionally unresponsive Appium stub so request timeout propagation can be asserted.
 	}, config.AWSConfig{}, config.DeviceFarmConfig{Mode: "disabled"}, dao, cache, nil) // Disable Device Farm and S3 because these gateway timeout tests do not touch those integrations.
 

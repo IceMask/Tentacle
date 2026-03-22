@@ -1,392 +1,228 @@
+// mcp_test.go verifies the non-integration MCP protocol behavior that should remain testable without a live orchestrator or device stack.
 package mcp
 
 import (
 	"context"
 	"encoding/json"
 	"testing"
-
-	"mcp_for_appium/internal/orchestrator"
 )
 
-// TestMCPIntegration tests the complete MCP protocol flow
-func TestMCPIntegration(t *testing.T) {
-	// Skip if no real orchestrator (needs dependencies)
-	// This is a structure test showing how MCP should work
+// expectedToolCatalogSize stores the current embedded MCP tool count so catalog drift is detected immediately in unit tests.
+const expectedToolCatalogSize = 26
 
-	t.Run("Initialize", func(t *testing.T) {
-		// This is a structure test documenting the MCP initialize flow
-		// Expected response structure should contain: protocolVersion, capabilities, serverInfo
-		t.Log("MCP initialize should return protocol version, capabilities, and server info")
-	})
+// mustMCPError asserts that one returned error is an MCPError with the expected code and returns the typed error for further assertions.
+func mustMCPError(t *testing.T, err error, expectedCode int) *MCPError {
+	t.Helper()      // Mark this helper so failures point at the calling test rather than the shared assertion helper.
+	if err == nil { // Reject missing errors because the caller is explicitly testing one failure path.
+		t.Fatal("expected MCP error, got nil") // Stop immediately because no MCP error fields can be asserted on a nil error.
+	}
+	mcpErr, ok := err.(*MCPError) // Type-assert the returned error so the test can inspect MCP protocol fields directly.
+	if !ok {                      // Reject non-MCP errors because the protocol layer should always expose structured MCP failures.
+		t.Fatalf("expected MCPError, got %T: %v", err, err) // Surface the actual error type so protocol-wrapping regressions are easy to diagnose.
+	}
+	if mcpErr.Code != expectedCode { // Assert the exact MCP error code so clients can depend on stable protocol semantics.
+		t.Fatalf("expected MCP error code %d, got %d", expectedCode, mcpErr.Code) // Surface the actual code so routing regressions are easy to diagnose.
+	}
 
-	t.Run("ToolsList", func(t *testing.T) {
-		req := map[string]interface{}{
-			"jsonrpc": "2.0",
-			"method":  "tools/list",
-			"params":  map[string]interface{}{},
-			"id":      2,
-		}
-
-		reqJSON, _ := json.Marshal(req)
-		t.Logf("tools/list request: %s", reqJSON)
-
-		// Expected: list of tools with name, description, inputSchema
-		expectedTools := []string{
-			"startSession",
-			"executePlan",
-			"endSession",
-			"getSemanticSnapshot",
-			"takeScreenshot",
-			"cancelPlan",
-			"getTrace",
-			"healthCheck",
-		}
-		t.Logf("Expected tools: %v", expectedTools)
-	})
-
-	t.Run("ToolsCall_StartSession", func(t *testing.T) {
-		req := map[string]interface{}{
-			"jsonrpc": "2.0",
-			"method":  "tools/call",
-			"params": map[string]interface{}{
-				"name": "startSession",
-				"arguments": map[string]interface{}{
-					"projectId": "test-project",
-					"w3cCapsJson": map[string]interface{}{
-						"platformName": "iOS",
-						"deviceName":   "iPhone 13",
-					},
-				},
-			},
-			"id": 3,
-		}
-
-		reqJSON, _ := json.Marshal(req)
-		t.Logf("tools/call (startSession) request: %s", reqJSON)
-
-		// Expected response format
-		expectedResponse := map[string]interface{}{
-			"content": []map[string]interface{}{
-				{
-					"type": "text",
-					"text": "{...sessionId...}",
-				},
-			},
-			"isError": false,
-		}
-		respJSON, _ := json.Marshal(expectedResponse)
-		t.Logf("Expected response format: %s", respJSON)
-	})
-
-	t.Run("ToolsCall_ExecutePlan", func(t *testing.T) {
-		req := map[string]interface{}{
-			"jsonrpc": "2.0",
-			"method":  "tools/call",
-			"params": map[string]interface{}{
-				"name": "executePlan",
-				"arguments": map[string]interface{}{
-					"sessionId": "sess_123",
-					"plan": map[string]interface{}{
-						"steps": []map[string]interface{}{
-							{
-								"type":     "click",
-								"selector": "//button[@id='submit']",
-							},
-							{
-								"type": "wait",
-							},
-						},
-					},
-				},
-			},
-			"id": 4,
-		}
-
-		reqJSON, _ := json.Marshal(req)
-		t.Logf("tools/call (executePlan) request: %s", reqJSON)
-	})
-
-	t.Run("ResourcesList", func(t *testing.T) {
-		req := map[string]interface{}{
-			"jsonrpc": "2.0",
-			"method":  "resources/list",
-			"params":  map[string]interface{}{},
-			"id":      5,
-		}
-
-		reqJSON, _ := json.Marshal(req)
-		t.Logf("resources/list request: %s", reqJSON)
-
-		expectedResources := []string{
-			"mcp://appium/artifacts/{traceId}",
-			"mcp://appium/traces/{traceId}",
-			"mcp://appium/sessions/{sessionId}",
-		}
-		t.Logf("Expected resource URIs: %v", expectedResources)
-	})
-
-	t.Run("ResourcesRead", func(t *testing.T) {
-		req := map[string]interface{}{
-			"jsonrpc": "2.0",
-			"method":  "resources/read",
-			"params": map[string]interface{}{
-				"uri": "mcp://appium/artifacts/trace_123",
-			},
-			"id": 6,
-		}
-
-		reqJSON, _ := json.Marshal(req)
-		t.Logf("resources/read request: %s", reqJSON)
-	})
+	return mcpErr // Return the typed MCP error so callers can assert message and data fields without repeating the type assertion.
 }
 
-// TestToolRegistry tests the tool registry functionality
-func TestToolRegistry(t *testing.T) {
-	registry := NewToolRegistry()
+// TestMCPHandlerInitializeReturnsServerCapabilities verifies that initialize returns the expected protocol version, capabilities, and server metadata.
+func TestMCPHandlerInitializeReturnsServerCapabilities(t *testing.T) {
+	handler := NewMCPHandler(nil)                                                                                                         // Construct one handler without an orchestrator because initialize is pure protocol metadata.
+	params := json.RawMessage(`{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0.0"}}`) // Build one representative initialize payload that matches the MCP handshake shape.
 
-	t.Run("ListTools", func(t *testing.T) {
-		tools := registry.List()
-		if len(tools) == 0 {
-			t.Fatal("Expected at least one tool to be registered")
-		}
-
-		t.Logf("Registered %d tools", len(tools))
-		for _, tool := range tools {
-			t.Logf("  - %s: %s", tool.Name, tool.Description)
-		}
-	})
-
-	t.Run("GetTool", func(t *testing.T) {
-		tool, exists := registry.Get("startSession")
-		if !exists {
-			t.Fatal("Expected startSession tool to exist")
-		}
-
-		if tool.Name != "startSession" {
-			t.Errorf("Expected tool name 'startSession', got '%s'", tool.Name)
-		}
-
-		if tool.InputSchema == nil {
-			t.Error("Expected tool to have inputSchema")
-		}
-
-		schemaJSON, _ := json.MarshalIndent(tool.InputSchema, "", "  ")
-		t.Logf("startSession schema:\n%s", schemaJSON)
-	})
-
-	t.Run("ValidateArguments", func(t *testing.T) {
-		// Valid arguments
-		validArgs := json.RawMessage(`{
-			"projectId": "test",
-			"w3cCapsJson": {
-				"platformName": "iOS"
-			}
-		}`)
-
-		err := registry.Validate("startSession", validArgs)
-		if err != nil {
-			t.Errorf("Expected valid arguments to pass, got error: %v", err)
-		}
-
-		// Missing required field
-		invalidArgs := json.RawMessage(`{
-			"w3cCapsJson": {
-				"platformName": "iOS"
-			}
-		}`)
-
-		err = registry.Validate("startSession", invalidArgs)
-		if err == nil {
-			t.Error("Expected validation to fail for missing required field")
-		} else {
-			t.Logf("Validation correctly failed: %v", err)
-		}
-	})
-
-	t.Run("GetNonExistentTool", func(t *testing.T) {
-		_, exists := registry.Get("nonExistentTool")
-		if exists {
-			t.Error("Expected nonExistentTool to not exist")
-		}
-	})
+	result, err := handler.Initialize(context.Background(), params) // Execute the real initialize handler so protocol metadata is tested end to end.
+	if err != nil {                                                 // Fail immediately when initialize unexpectedly rejects a valid handshake request.
+		t.Fatalf("expected initialize to succeed, got error: %v", err) // Surface the unexpected error so handshake regressions are easy to diagnose.
+	}
+	resultMap, ok := result.(map[string]interface{}) // Type-assert the generic response into the expected object shape.
+	if !ok {                                         // Reject non-map results because initialize must return a structured MCP response object.
+		t.Fatalf("expected initialize response map, got %T", result) // Surface the actual response type so protocol regressions are easy to diagnose.
+	}
+	if resultMap["protocolVersion"] != "2024-11-05" { // Assert the wire protocol version so clients can rely on a stable MCP handshake target.
+		t.Fatalf("expected protocolVersion 2024-11-05, got %#v", resultMap["protocolVersion"]) // Surface the actual version so handshake regressions are easy to diagnose.
+	}
+	capabilities, ok := resultMap["capabilities"].(map[string]interface{}) // Extract the capabilities map so tool and resource support can be asserted precisely.
+	if !ok {                                                               // Reject malformed capabilities because MCP clients rely on this shape during negotiation.
+		t.Fatalf("expected capabilities map, got %#v", resultMap["capabilities"]) // Surface the actual value so protocol regressions are easy to diagnose.
+	}
+	toolCapabilities, ok := capabilities["tools"].(map[string]interface{}) // Extract the tools capability section so listChanged can be asserted directly.
+	if !ok || toolCapabilities["listChanged"] != false {                   // Assert the static-tool-catalog contract exposed by this server.
+		t.Fatalf("expected static tools capability, got %#v", capabilities["tools"]) // Surface the actual capability payload so negotiation regressions are easy to diagnose.
+	}
+	resourceCapabilities, ok := capabilities["resources"].(map[string]interface{})                        // Extract the resources capability section so subscription support can be asserted directly.
+	if !ok || resourceCapabilities["subscribe"] != true || resourceCapabilities["listChanged"] != false { // Assert the resource-subscription contract exposed by this server.
+		t.Fatalf("expected subscribed resources capability, got %#v", capabilities["resources"]) // Surface the actual capability payload so negotiation regressions are easy to diagnose.
+	}
+	serverInfo, ok := resultMap["serverInfo"].(map[string]interface{})                        // Extract the server metadata so name and version can be asserted directly.
+	if !ok || serverInfo["name"] != "MCP Mobile Worker" || serverInfo["version"] != "1.0.0" { // Assert the exposed server identity so client diagnostics remain stable.
+		t.Fatalf("expected MCP Mobile Worker server info, got %#v", resultMap["serverInfo"]) // Surface the actual metadata so protocol regressions are easy to diagnose.
+	}
 }
 
-// TestMCPHandler tests the MCP handler methods
-func TestMCPHandler(t *testing.T) {
-	// Create a mock orchestrator (nil for now, as we're testing structure)
-	var mockOrch *orchestrator.Service
+// TestToolRegistryCatalogAndValidation verifies that the embedded tool registry exposes the full catalog and enforces JSON schema validation.
+func TestToolRegistryCatalogAndValidation(t *testing.T) {
+	registry := NewToolRegistry()              // Construct the real tool registry so the embedded tool definitions are validated through production code paths.
+	tools := registry.List()                   // List every registered tool so the catalog size and key tool names can be asserted.
+	if len(tools) != expectedToolCatalogSize { // Assert the current embedded tool count so catalog drift is detected immediately.
+		t.Fatalf("expected %d tools, got %d", expectedToolCatalogSize, len(tools)) // Surface the actual count so catalog regressions are easy to diagnose.
+	}
 
-	handler := NewMCPHandler(mockOrch)
-
-	t.Run("Initialize", func(t *testing.T) {
-		params := json.RawMessage(`{
-			"protocolVersion": "2024-11-05",
-			"capabilities": {},
-			"clientInfo": {
-				"name": "test-client",
-				"version": "1.0.0"
-			}
-		}`)
-
-		result, err := handler.Initialize(context.Background(), params)
-		if err != nil {
-			t.Fatalf("Initialize failed: %v", err)
+	requiredToolNames := map[string]bool{ // Define representative tools across the major capability areas so the registry assertion is broader than a raw count.
+		"startSession":          false,
+		"executePlan":           false,
+		"getSemanticSnapshot":   false,
+		"findElement":           false,
+		"tap":                   false,
+		"scheduleDeviceFarmRun": false,
+		"adbShell":              false,
+	}
+	for _, tool := range tools { // Walk the full catalog once so representative tool presence can be asserted without depending on list ordering.
+		if _, exists := requiredToolNames[tool.Name]; exists { // Mark each required tool when it appears in the embedded catalog.
+			requiredToolNames[tool.Name] = true // Record the presence of the required tool so missing capabilities fail explicitly below.
 		}
-
-		resultMap, ok := result.(map[string]interface{})
-		if !ok {
-			t.Fatal("Expected result to be a map")
+	}
+	for toolName, seen := range requiredToolNames { // Assert that every representative tool was actually present in the embedded catalog.
+		if !seen { // Fail when any required tool is missing because that indicates either embed drift or accidental removal.
+			t.Fatalf("expected tool %q to be registered", toolName) // Surface the missing tool so catalog regressions are easy to diagnose.
 		}
+	}
 
-		if resultMap["protocolVersion"] == nil {
-			t.Error("Expected protocolVersion in response")
-		}
+	tool, exists := registry.Get("startSession") // Retrieve one concrete tool so schema presence can be asserted directly.
+	if !exists {                                 // Reject missing startSession because session creation is a core catalog capability.
+		t.Fatal("expected startSession tool to exist") // Stop immediately because schema assertions depend on a retrieved tool value.
+	}
+	if tool.InputSchema == nil { // Reject nil schemas because MCP clients depend on per-tool input-schema metadata.
+		t.Fatal("expected startSession input schema") // Stop immediately because schema validation assertions depend on an actual schema.
+	}
 
-		if resultMap["capabilities"] == nil {
-			t.Error("Expected capabilities in response")
-		}
+	validArgs := json.RawMessage(`{"projectId":"test-project","w3cCapsJson":{"platformName":"iOS"}}`) // Build one minimal valid payload for the startSession schema.
+	if err := registry.Validate("startSession", validArgs); err != nil {                              // Validate the minimal payload through the production schema path.
+		t.Fatalf("expected valid startSession args, got error: %v", err) // Surface the unexpected validation error so schema regressions are easy to diagnose.
+	}
 
-		if resultMap["serverInfo"] == nil {
-			t.Error("Expected serverInfo in response")
-		}
-
-		resultJSON, _ := json.MarshalIndent(result, "", "  ")
-		t.Logf("Initialize response:\n%s", resultJSON)
-	})
-
-	t.Run("ToolsList", func(t *testing.T) {
-		params := json.RawMessage(`{}`)
-
-		result, err := handler.ToolsList(context.Background(), params)
-		if err != nil {
-			t.Fatalf("ToolsList failed: %v", err)
-		}
-
-		resultMap, ok := result.(map[string]interface{})
-		if !ok {
-			t.Fatal("Expected result to be a map")
-		}
-
-		tools, ok := resultMap["tools"]
-		if !ok {
-			t.Fatal("Expected 'tools' field in response")
-		}
-
-		toolsSlice, ok := tools.([]Tool)
-		if !ok {
-			t.Fatal("Expected tools to be a slice of Tool")
-		}
-
-		if len(toolsSlice) == 0 {
-			t.Error("Expected at least one tool")
-		}
-
-		t.Logf("Found %d tools:", len(toolsSlice))
-		for _, tool := range toolsSlice {
-			t.Logf("  - %s", tool.Name)
-		}
-	})
-
-	t.Run("ResourcesList", func(t *testing.T) {
-		params := json.RawMessage(`{}`)
-
-		result, err := handler.ResourcesList(context.Background(), params)
-		if err != nil {
-			t.Fatalf("ResourcesList failed: %v", err)
-		}
-
-		resultMap, ok := result.(map[string]interface{})
-		if !ok {
-			t.Fatal("Expected result to be a map")
-		}
-
-		resources, ok := resultMap["resources"]
-		if !ok {
-			t.Fatal("Expected 'resources' field in response")
-		}
-
-		resourcesSlice, ok := resources.([]map[string]interface{})
-		if !ok {
-			t.Fatal("Expected resources to be a slice")
-		}
-
-		if len(resourcesSlice) == 0 {
-			t.Error("Expected at least one resource")
-		}
-
-		t.Logf("Found %d resources:", len(resourcesSlice))
-		for _, res := range resourcesSlice {
-			t.Logf("  - %s", res["uri"])
-		}
-	})
+	invalidArgs := json.RawMessage(`{"w3cCapsJson":{"platformName":"iOS"}}`)          // Build one invalid payload that omits the required projectId field.
+	mcpErr := mustMCPError(t, registry.Validate("startSession", invalidArgs), -32602) // Validate the invalid payload and assert the schema-failure MCP code.
+	if mcpErr.Message != "Schema validation failed" {                                 // Assert the stable validation message so clients can classify input failures consistently.
+		t.Fatalf("expected schema validation failure message, got %q", mcpErr.Message) // Surface the actual message so validation regressions are easy to diagnose.
+	}
 }
 
-// TestParseResourceURI tests URI parsing for resources/read
+// TestMCPHandlerToolsCallRejectsUnknownTool verifies that tools/call returns a structured not-found error for unregistered tools.
+func TestMCPHandlerToolsCallRejectsUnknownTool(t *testing.T) {
+	handler := NewMCPHandler(nil)                                          // Construct one handler without an orchestrator because the failure path stops before business logic is reached.
+	params := json.RawMessage(`{"name":"nonExistentTool","arguments":{}}`) // Build one tools/call payload for a definitely unregistered tool name.
+
+	mcpErr := mustMCPError(t, func() error { // Execute the real tools/call path and capture the returned error for structured assertions.
+		_, err := handler.ToolsCall(context.Background(), params) // Invoke the production tools/call entry point with the unknown tool payload.
+		return err                                                // Return the error so the shared MCP assertion helper can inspect it.
+	}(), -32601)
+	if mcpErr.Message != "Tool not found: nonExistentTool" { // Assert the stable not-found message so clients can surface human-readable feedback consistently.
+		t.Fatalf("expected unknown-tool message, got %q", mcpErr.Message) // Surface the actual message so routing regressions are easy to diagnose.
+	}
+}
+
+// TestMCPHandlerToolsCallRejectsInvalidArguments verifies that schema-invalid tool arguments fail before handler execution begins.
+func TestMCPHandlerToolsCallRejectsInvalidArguments(t *testing.T) {
+	handler := NewMCPHandler(nil)                                                             // Construct one handler without an orchestrator because validation failures stop before business logic is reached.
+	params := json.RawMessage(`{"name":"findElement","arguments":{"sessionId":"session-1"}}`) // Build one invalid findElement payload that omits required strategy and selector fields.
+
+	mcpErr := mustMCPError(t, func() error { // Execute the real tools/call path and capture the validation failure for structured assertions.
+		_, err := handler.ToolsCall(context.Background(), params) // Invoke the production tools/call entry point with the invalid payload.
+		return err                                                // Return the error so the shared MCP assertion helper can inspect it.
+	}(), -32602)
+	if mcpErr.Message != "Schema validation failed" { // Assert the stable schema-validation message so clients can classify input failures consistently.
+		t.Fatalf("expected schema validation failure message, got %q", mcpErr.Message) // Surface the actual message so validation regressions are easy to diagnose.
+	}
+}
+
+// TestMCPHandlerResourcesListReturnsExpectedCatalog verifies that the static MCP resource catalog exposes the three documented resource types.
+func TestMCPHandlerResourcesListReturnsExpectedCatalog(t *testing.T) {
+	handler := NewMCPHandler(nil) // Construct one handler without an orchestrator because resources/list is a static metadata response.
+
+	result, err := handler.ResourcesList(context.Background(), json.RawMessage(`{}`)) // Execute the real resources/list handler so the catalog is asserted end to end.
+	if err != nil {                                                                   // Fail immediately when resources/list unexpectedly rejects an empty request.
+		t.Fatalf("expected resources/list to succeed, got error: %v", err) // Surface the unexpected error so resource-catalog regressions are easy to diagnose.
+	}
+	resultMap, ok := result.(map[string]interface{}) // Type-assert the generic response into the expected object shape.
+	if !ok {                                         // Reject non-map results because resources/list must return a structured MCP response object.
+		t.Fatalf("expected resources/list response map, got %T", result) // Surface the actual response type so protocol regressions are easy to diagnose.
+	}
+	resources, ok := resultMap["resources"].([]map[string]interface{}) // Extract the resource list so the static resource URIs can be asserted directly.
+	if !ok {                                                           // Reject malformed resources because MCP clients depend on this catalog shape.
+		t.Fatalf("expected resources slice, got %#v", resultMap["resources"]) // Surface the actual value so protocol regressions are easy to diagnose.
+	}
+	if len(resources) != 3 { // Assert the documented resource count so catalog drift is detected immediately.
+		t.Fatalf("expected 3 resources, got %d", len(resources)) // Surface the actual count so catalog regressions are easy to diagnose.
+	}
+
+	expectedURIs := map[string]bool{ // Define the documented MCP resource templates so the catalog assertion is order-independent.
+		"mcp://appium/artifacts/{traceId}":  false,
+		"mcp://appium/traces/{traceId}":     false,
+		"mcp://appium/sessions/{sessionId}": false,
+	}
+	for _, resource := range resources { // Walk the returned resource list once so each expected URI can be marked when found.
+		uri, ok := resource["uri"].(string) // Read the resource URI so the catalog entry can be checked against the expected set.
+		if ok {                             // Only mark recognized string URIs because malformed entries should still fail below.
+			if _, exists := expectedURIs[uri]; exists { // Recognize one expected URI regardless of list ordering.
+				expectedURIs[uri] = true // Record the presence of the expected resource URI.
+			}
+		}
+	}
+	for uri, seen := range expectedURIs { // Assert that every documented resource URI was returned by the handler.
+		if !seen { // Fail when any expected URI is missing because that indicates catalog drift.
+			t.Fatalf("expected resource URI %q to be listed", uri) // Surface the missing URI so resource-catalog regressions are easy to diagnose.
+		}
+	}
+}
+
+// TestMCPHandlerResourcesReadRejectsInvalidURI verifies that resources/read rejects malformed resource URIs before any orchestrator access happens.
+func TestMCPHandlerResourcesReadRejectsInvalidURI(t *testing.T) {
+	handler := NewMCPHandler(nil)                                     // Construct one handler without an orchestrator because malformed URIs fail before resource loading is attempted.
+	params := json.RawMessage(`{"uri":"http://example.com/not-mcp"}`) // Build one malformed URI payload that must fail protocol validation immediately.
+
+	mcpErr := mustMCPError(t, func() error { // Execute the real resources/read path and capture the protocol validation failure for structured assertions.
+		_, err := handler.ResourcesRead(context.Background(), params) // Invoke the production resources/read entry point with the invalid URI.
+		return err                                                    // Return the error so the shared MCP assertion helper can inspect it.
+	}(), -32602)
+	if mcpErr.Message != "Invalid resource URI" { // Assert the stable invalid-resource message so clients can classify URI errors consistently.
+		t.Fatalf("expected invalid resource URI message, got %q", mcpErr.Message) // Surface the actual message so protocol regressions are easy to diagnose.
+	}
+}
+
+// TestParseResourceURI verifies the resource URI parser for valid and invalid MCP resource identifiers.
 func TestParseResourceURI(t *testing.T) {
-	tests := []struct {
+	testCases := []struct {
 		name        string
 		uri         string
 		wantType    string
 		wantID      string
 		expectError bool
 	}{
-		{
-			name:     "artifacts URI",
-			uri:      "mcp://appium/artifacts/trace_abc123",
-			wantType: "artifacts",
-			wantID:   "trace_abc123",
-		},
-		{
-			name:     "traces URI",
-			uri:      "mcp://appium/traces/trace_xyz789",
-			wantType: "traces",
-			wantID:   "trace_xyz789",
-		},
-		{
-			name:     "sessions URI",
-			uri:      "mcp://appium/sessions/sess_def456",
-			wantType: "sessions",
-			wantID:   "sess_def456",
-		},
-		{
-			name:        "missing prefix",
-			uri:         "http://appium/artifacts/trace_123",
-			expectError: true,
-		},
-		{
-			name:        "missing id",
-			uri:         "mcp://appium/artifacts/",
-			expectError: true,
-		},
-		{
-			name:        "missing resource type",
-			uri:         "mcp://appium/",
-			expectError: true,
-		},
-		{
-			name:        "empty URI",
-			uri:         "",
-			expectError: true,
-		},
+		{name: "artifacts URI", uri: "mcp://appium/artifacts/trace_abc123", wantType: "artifacts", wantID: "trace_abc123"},
+		{name: "traces URI", uri: "mcp://appium/traces/trace_xyz789", wantType: "traces", wantID: "trace_xyz789"},
+		{name: "sessions URI", uri: "mcp://appium/sessions/sess_def456", wantType: "sessions", wantID: "sess_def456"},
+		{name: "missing prefix", uri: "http://appium/artifacts/trace_123", expectError: true},
+		{name: "missing id", uri: "mcp://appium/artifacts/", expectError: true},
+		{name: "missing resource type", uri: "mcp://appium/", expectError: true},
+		{name: "empty URI", uri: "", expectError: true},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			resType, id, err := parseResourceURI(tt.uri)
-			if tt.expectError {
-				if err == nil {
-					t.Error("Expected error, got nil")
+	for _, testCase := range testCases { // Execute each URI parser scenario as one table-driven subtest so valid and invalid cases share the same assertions cleanly.
+		t.Run(testCase.name, func(t *testing.T) {
+			resourceType, resourceID, err := parseResourceURI(testCase.uri) // Invoke the production URI parser with the current test case input.
+			if testCase.expectError {                                       // Assert the invalid-URI branch when the current case expects one parser failure.
+				if err == nil { // Fail when the parser unexpectedly accepts one malformed URI.
+					t.Fatal("expected resource URI parse error") // Surface the missing parse error because invalid-URI handling is the behavior under test.
 				}
-				return
+				return // Stop the current subtest once the expected invalid-URI failure has been observed.
 			}
-			if err != nil {
-				t.Fatalf("Unexpected error: %v", err)
+			if err != nil { // Fail when the parser unexpectedly rejects one valid URI.
+				t.Fatalf("unexpected parse error: %v", err) // Surface the actual parser error so URI regressions are easy to diagnose.
 			}
-			if resType != tt.wantType {
-				t.Errorf("resource type: got %q, want %q", resType, tt.wantType)
-			}
-			if id != tt.wantID {
-				t.Errorf("id: got %q, want %q", id, tt.wantID)
+			if resourceType != testCase.wantType || resourceID != testCase.wantID { // Assert both parsed components because clients depend on exact URI decomposition.
+				t.Fatalf("expected %q/%q, got %q/%q", testCase.wantType, testCase.wantID, resourceType, resourceID) // Surface the actual parse result so URI regressions are easy to diagnose.
 			}
 		})
 	}

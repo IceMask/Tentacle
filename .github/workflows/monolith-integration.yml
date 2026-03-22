@@ -1,0 +1,47 @@
+name: Monolith Integration
+
+on:
+  push:
+    paths:
+      - "cmd/gateway/**"
+      - "cmd/orchestrator/**"
+      - "cmd/worker/**"
+      - "internal/integration/**"
+      - "internal/orchestrator/**"
+      - "internal/storage/postgres/**"
+      - "internal/storage/redis/**"
+      - "internal/worker/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/monolith-integration.yml"
+  pull_request:
+    paths:
+      - "cmd/gateway/**"
+      - "cmd/orchestrator/**"
+      - "cmd/worker/**"
+      - "internal/integration/**"
+      - "internal/orchestrator/**"
+      - "internal/storage/postgres/**"
+      - "internal/storage/redis/**"
+      - "internal/worker/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/monolith-integration.yml"
+  workflow_dispatch:
+
+jobs:
+  monolith-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run Monolith Integration Flow
+        run: go test ./internal/integration -count=1 -v

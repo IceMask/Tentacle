@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 
+	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/rpc"
 	"mcp_for_appium/internal/telemetry"
 
@@ -20,16 +21,20 @@ type GRPCServer struct {
 	logger   *slog.Logger
 }
 
-// NewGRPCServer creates and registers the orchestrator gRPC service.
-func NewGRPCServer(registry *WorkerRegistry) *GRPCServer {
-	s := grpc.NewServer()
+// NewGRPCServer creates and registers the orchestrator gRPC service with the configured internal RPC security mode.
+func NewGRPCServer(registry *WorkerRegistry, security config.RPCSecurityConfig) (*GRPCServer, error) {
+	serverOptions, err := rpc.NewServerOptions(security) // Build the transport-credential and shared-token server options required by the configured internal RPC mode.
+	if err != nil {                                      // Stop immediately when the security config cannot be turned into valid gRPC server options.
+		return nil, err // Preserve the server-option construction failure for the caller.
+	}
+	s := grpc.NewServer(serverOptions...) // Construct the gRPC server with the configured security options so worker registration traffic follows the selected transport mode.
 	gs := &GRPCServer{
 		server:   s,
 		registry: registry,
 		logger:   telemetry.Logger(),
 	}
 	rpc.RegisterOrchestratorServiceServer(s, gs)
-	return gs
+	return gs, nil
 }
 
 // Start listens on the given port and serves gRPC requests (blocks).

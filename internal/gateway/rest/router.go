@@ -13,16 +13,18 @@ import (
 	"mcp_for_appium/internal/auth"
 	"mcp_for_appium/internal/errors"
 	"mcp_for_appium/internal/gateway/capabilities"
+	gatewaywebsocket "mcp_for_appium/internal/gateway/websocket"
 	"mcp_for_appium/internal/orchestrator"
 	"mcp_for_appium/internal/storage/redis"
 )
 
 type Router struct {
-	orch           *orchestrator.Service
-	cache          *redis.Cache
-	capService     *capabilities.Service
-	hmacValidator  *auth.HMACValidator
-	idempotencyTTL time.Duration
+	orch                   *orchestrator.Service
+	cache                  *redis.Cache
+	capService             *capabilities.Service
+	hmacValidator          *auth.HMACValidator
+	subscriptionTokenStore *gatewaywebsocket.SubscriptionTokenStore
+	idempotencyTTL         time.Duration
 }
 
 // NewRouter executes this operation.
@@ -38,6 +40,11 @@ func NewRouter(orch *orchestrator.Service, cache *redis.Cache, capSvc *capabilit
 // SetHMACValidator executes this operation.
 func (rt *Router) SetHMACValidator(validator *auth.HMACValidator) {
 	rt.hmacValidator = validator
+}
+
+// SetSubscriptionTokenStore injects the Redis-backed WebSocket subscription-token store used by the browser subscription issuance endpoint.
+func (rt *Router) SetSubscriptionTokenStore(store *gatewaywebsocket.SubscriptionTokenStore) {
+	rt.subscriptionTokenStore = store // Store the shared token store so the trace subscribe endpoint can issue opaque tokens bound to authenticated callers.
 }
 
 // RegisterRoutes executes this operation.
@@ -169,6 +176,10 @@ func (rt *Router) handleTraces(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "trace id required", nil) // Return structured validation error when trace id is missing.
 		return
 	}
+	if strings.HasSuffix(path, ":subscribe") { // Route the v4.4 browser subscription-token issuance endpoint before the generic trace read handlers.
+		rt.handleTraceSubscribe(w, r, strings.TrimSuffix(path, ":subscribe")) // Delegate the short-lived token issuance flow to the dedicated handler.
+		return                                                                // Stop after the subscription-token endpoint has handled the request.
+	}
 
 	if strings.HasSuffix(path, "/events") {
 		traceID := strings.TrimSuffix(path, "/events")
@@ -196,6 +207,37 @@ func (rt *Router) handleTraces(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"trace":  trace,
 		"events": events,
+	})
+}
+
+// handleTraceSubscribe issues one short-lived opaque WebSocket subscription token bound to the authenticated caller and one trace identifier.
+func (rt *Router) handleTraceSubscribe(w http.ResponseWriter, r *http.Request, traceID string) {
+	if r.Method != http.MethodPost { // Reject unsupported verbs because the subscription-token issuance endpoint is intentionally write-only.
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed", nil) // Return structured method error for unsupported verbs.
+		return                                                                   // Stop after the method error because token issuance must not continue on unsupported verbs.
+	}
+	if rt.subscriptionTokenStore == nil { // Reject requests when the gateway has not wired the token store because token issuance cannot proceed without a shared backing store.
+		writeAPIError(w, http.StatusServiceUnavailable, "subscription tokens unavailable", nil) // Return structured service-unavailable error for missing startup wiring.
+		return                                                                                  // Stop after the service-unavailable error because token issuance cannot proceed safely.
+	}
+
+	subject, ok := auth.SubjectFrom(r.Context()) // Resolve the authenticated caller injected by the gateway auth middleware before issuing a trace-scoped subscription token.
+	if !ok {                                     // Reject missing authenticated subjects because subscription tokens must never be issued anonymously.
+		writeAPIError(w, http.StatusUnauthorized, "authentication required", nil) // Return structured auth failure for requests that reached the endpoint without a subject context.
+		return                                                                    // Stop after the auth failure because token issuance requires a caller identity.
+	}
+
+	issuedToken, err := rt.subscriptionTokenStore.Issue(r.Context(), subject, traceID) // Issue the short-lived opaque token bound to the caller and requested trace ID.
+	if err != nil {                                                                    // Stop immediately when token issuance fails because no WebSocket subscription can be established without it.
+		writeAPIError(w, errors.MapToHTTP(err), "failed to issue subscription token", err) // Surface token-store failures with internal codes and raw cause details.
+		return                                                                             // Stop after the issuance failure because no valid response payload exists.
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]interface{}{ // Return the issued token payload in a compact browser-friendly response shape.
+		"traceId":           issuedToken.TraceID,   // Echo the trace binding so the caller can correlate the returned token with its intended subscription.
+		"subscriptionToken": issuedToken.Token,     // Return the opaque short-lived token that the browser will supply on the WebSocket handshake.
+		"expiresAt":         issuedToken.ExpiresAt, // Return the token expiry so the caller knows when it must refresh the subscription credential.
+		"scope":             issuedToken.Scope,     // Return the granted scope so clients can reason about what the token authorizes.
 	})
 }
 
@@ -251,7 +293,7 @@ func (rt *Router) verifyHMAC(r *http.Request, body []byte) error {
 	if sig == "" || ts == "" || nonce == "" || keyID == "" {
 		return errors.New(errors.CodeUnauthenticated, "missing HMAC headers")
 	}
-	_, err := rt.hmacValidator.Verify(r.Context(), sig, r.Method, r.URL.Path, string(body), ts, nonce, keyID)
+	_, err := rt.hmacValidator.Verify(r.Context(), sig, r.Method, r.URL.Path, r.URL.RawQuery, string(body), ts, nonce, keyID)
 	return err
 }
 

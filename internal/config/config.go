@@ -1,3 +1,4 @@
+// config.go declares the repository-wide runtime configuration model shared by the gateway, orchestrator, and worker binaries.
 package config
 
 import (
@@ -11,6 +12,8 @@ type Config struct {
 	Storage      StorageConfig      `yaml:"storage"`
 	AWS          AWSConfig          `yaml:"aws"`
 	DeviceFarm   DeviceFarmConfig   `yaml:"devicefarm"`
+	WebSocket    WebSocketConfig    `yaml:"websocket"`
+	RPC          RPCConfig          `yaml:"rpc"`
 	Auth         AuthConfig         `yaml:"auth"`
 	Telemetry    TelemetryConfig    `yaml:"telemetry"`
 }
@@ -32,6 +35,7 @@ type GatewayConfig struct {
 	EnableTLS       bool          `yaml:"enable_tls" env:"GATEWAY__ENABLE_TLS" default:"false"`
 	TLSCertFile     string        `yaml:"tls_cert_file" env:"GATEWAY__TLS_CERT_FILE"`
 	TLSKeyFile      string        `yaml:"tls_key_file" env:"GATEWAY__TLS_KEY_FILE"`
+	AllowedOrigins  string        `yaml:"allowed_origins" env:"GATEWAY__ALLOWED_ORIGINS"`
 	ShutdownTimeout time.Duration `yaml:"shutdown_timeout" env:"GATEWAY__SHUTDOWN_TIMEOUT" default:"30s"`
 }
 
@@ -81,16 +85,59 @@ type S3Config struct {
 	ForcePathStyle  bool   `yaml:"force_path_style" env:"STORAGE__S3__FORCE_PATH_STYLE" default:"false"`
 }
 
+type WebSocketConfig struct {
+	SubscriptionTokenTTL time.Duration `yaml:"subscription_token_ttl" env:"WEBSOCKET__SUBSCRIPTION_TOKEN_TTL" default:"60s"`
+}
+
+type RPCConfig struct {
+	Security RPCSecurityConfig `yaml:"security"`
+}
+
+type RPCSecurityConfig struct {
+	Mode           string `yaml:"mode" env:"RPC__SECURITY__MODE" default:"insecure"`
+	ServerCertFile string `yaml:"server_cert_file" env:"RPC__SECURITY__SERVER_CERT_FILE"`
+	ServerKeyFile  string `yaml:"server_key_file" env:"RPC__SECURITY__SERVER_KEY_FILE"`
+	ClientCertFile string `yaml:"client_cert_file" env:"RPC__SECURITY__CLIENT_CERT_FILE"`
+	ClientKeyFile  string `yaml:"client_key_file" env:"RPC__SECURITY__CLIENT_KEY_FILE"`
+	CAFile         string `yaml:"ca_file" env:"RPC__SECURITY__CA_FILE"`
+	ServerName     string `yaml:"server_name" env:"RPC__SECURITY__SERVER_NAME"`
+	AuthToken      string `yaml:"auth_token" env:"RPC__SECURITY__AUTH_TOKEN"`
+}
+
 type AuthConfig struct {
-	EnablePAT  bool   `yaml:"enable_pat" env:"AUTH__ENABLE_PAT" default:"true"`
-	EnableOIDC bool   `yaml:"enable_oidc" env:"AUTH__ENABLE_OIDC" default:"false"`
-	JWKSURL    string `yaml:"jwks_url" env:"AUTH__JWKS_URL"`
-	Audience   string `yaml:"audience" env:"AUTH__AUDIENCE"`
+	PAT             PATAuthConfig     `yaml:"pat"`
+	OIDC            OIDCAuthConfig    `yaml:"oidc"`
+	HMAC            HMACAuthConfig    `yaml:"hmac"`
+	EnablePAT       bool              `yaml:"enable_pat" env:"AUTH__ENABLE_PAT" default:"true"`
+	EnableOIDC      bool              `yaml:"enable_oidc" env:"AUTH__ENABLE_OIDC" default:"false"`
+	JWKSURL         string            `yaml:"jwks_url" env:"AUTH__JWKS_URL"`
+	IssuerURL       string            `yaml:"issuer_url" env:"AUTH__ISSUER_URL"`
+	Audience        string            `yaml:"audience" env:"AUTH__AUDIENCE"`
+	PATStaticTokens map[string]string `yaml:"pat_static_tokens" env:"AUTH__PAT_STATIC_TOKENS"`
+}
+
+type PATAuthConfig struct {
+	Mode         string            `yaml:"mode" env:"AUTH__PAT__MODE"`
+	StaticTokens map[string]string `yaml:"static_tokens" env:"AUTH__PAT__STATIC_TOKENS"`
+}
+
+type OIDCAuthConfig struct {
+	IssuerURL       string `yaml:"issuer_url" env:"AUTH__OIDC__ISSUER_URL"`
+	Audience        string `yaml:"audience" env:"AUTH__OIDC__AUDIENCE"`
+	JWKSURLOverride string `yaml:"jwks_url_override" env:"AUTH__OIDC__JWKS_URL_OVERRIDE"`
+}
+
+type HMACAuthConfig struct {
+	KeySource    string        `yaml:"key_source" env:"AUTH__HMAC__KEY_SOURCE"`
+	StaticKeyID  string        `yaml:"static_key_id" env:"AUTH__HMAC__STATIC_KEY_ID"`
+	StaticSecret string        `yaml:"static_secret" env:"AUTH__HMAC__STATIC_SECRET"`
+	Window       time.Duration `yaml:"window" env:"AUTH__HMAC__WINDOW" default:"5m"`
+	NonceTTL     time.Duration `yaml:"nonce_ttl" env:"AUTH__HMAC__NONCE_TTL" default:"15m"`
 }
 
 type TelemetryConfig struct {
-	LogLevel     string `yaml:"log_level" env:"TELEMETRY__LOG_LEVEL" default:"info"` // Control minimum log verbosity emitted by the process.
-	LogFile      string `yaml:"log_file" env:"TELEMETRY__LOG_FILE"`                   // Optional absolute or relative file path for persistent JSON logs.
-	OTLPEndpoint string `yaml:"otlp_endpoint" env:"TELEMETRY__OTLP_ENDPOINT"`         // Optional OTLP collector endpoint for distributed tracing export.
+	LogLevel     string `yaml:"log_level" env:"TELEMETRY__LOG_LEVEL" default:"info"`       // Control minimum log verbosity emitted by the process.
+	LogFile      string `yaml:"log_file" env:"TELEMETRY__LOG_FILE"`                        // Optional absolute or relative file path for persistent JSON logs.
+	OTLPEndpoint string `yaml:"otlp_endpoint" env:"TELEMETRY__OTLP_ENDPOINT"`              // Optional OTLP collector endpoint for distributed tracing export.
 	MetricsPort  int    `yaml:"metrics_port" env:"TELEMETRY__METRICS_PORT" default:"9091"` // Prometheus metrics HTTP port.
 }

@@ -91,7 +91,7 @@ func newTraceTerminalHarness(t *testing.T) *traceTerminalHarness {
 		AutoWaitMax:   500 * time.Millisecond, // Use a small positive auto-wait value because the worker executor requires one even when tests never hit Appium.
 		SnapshotTTL:   time.Minute,            // Use a positive snapshot TTL because the orchestrator config expects one.
 		ExecutionMode: ExecutionModeMonolith,  // Exercise the monolith execution path so dispatcher-owned and local terminalization share one service instance.
-	}, config.WorkerConfig{
+	}, config.RPCSecurityConfig{}, config.WorkerConfig{
 		AppiumURL: "http://127.0.0.1:4723", // Provide a syntactically valid Appium URL even though these tests avoid real Appium calls.
 	}, config.AWSConfig{}, config.DeviceFarmConfig{Mode: "disabled"}, dao, cache, nil) // Disable Device Farm and S3 because the terminalization tests do not touch those integrations.
 

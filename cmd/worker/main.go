@@ -43,7 +43,11 @@ func main() {
 
 	// --- gRPC server (receives ExecutePlan / CancelPlan from orchestrator) ---
 	workerSvc := worker.NewGRPCServer(cfg.Worker.AppiumURL, cfg.Orchestrator.StepTimeout, cfg.Orchestrator.AutoWaitMax)
-	grpcSrv := grpc.NewServer()
+	grpcServerOptions, err := rpc.NewServerOptions(cfg.RPC.Security) // Build the worker gRPC server options that match the configured internal RPC transport mode and shared-token enforcement.
+	if err != nil {                                                  // Stop immediately when the configured internal RPC security settings cannot be turned into a gRPC server safely.
+		log.Fatalf("failed to initialize worker gRPC security: %v", err) // Surface the gRPC security wiring failure before the listener starts.
+	}
+	grpcSrv := grpc.NewServer(grpcServerOptions...) // Construct the worker gRPC server with the configured transport credentials and shared-token interceptor.
 	rpc.RegisterWorkerServiceServer(grpcSrv, workerSvc)
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Worker.GRPCPort))
@@ -58,7 +62,7 @@ func main() {
 	logger.Info("worker gRPC server started", "port", cfg.Worker.GRPCPort)
 
 	// --- connect to orchestrator, register, and start heartbeat loop ---
-	orchClient, err := rpc.NewOrchestratorClient(cfg.Worker.OrchestratorAddr)
+	orchClient, err := rpc.NewOrchestratorClient(cfg.Worker.OrchestratorAddr, cfg.RPC.Security) // Dial the orchestrator using the configured internal RPC transport mode and shared-token auth.
 	if err != nil {
 		log.Fatalf("failed to dial orchestrator at %s: %v", cfg.Worker.OrchestratorAddr, err)
 	}

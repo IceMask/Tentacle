@@ -47,11 +47,38 @@ storage:
     endpoint: ""
     force_path_style: false
 
+websocket:
+  subscription_token_ttl: 60s
+
+rpc:
+  security:
+    # insecure | tls | mtls
+    mode: insecure
+    server_cert_file: ""
+    server_key_file: ""
+    client_cert_file: ""
+    client_key_file: ""
+    ca_file: ""
+    server_name: ""
+    auth_token: ""
+
 auth:
-  enable_pat: true
-  enable_oidc: false
-  jwks_url: ""
-  audience: ""
+  pat:
+    # disabled | static | postgres
+    mode: disabled
+    # Format: token_id: "sha256_hex|tenant_id|status"
+    static_tokens: {}
+  oidc:
+    issuer_url: ""
+    audience: ""
+    jwks_url_override: ""
+  hmac:
+    # disabled | static | postgres
+    key_source: disabled
+    static_key_id: ""
+    static_secret: ""
+    window: 5m
+    nonce_ttl: 15m
 
 aws:
   region: us-west-2
