@@ -49,7 +49,7 @@ func (s *Service) transitionTraceStatus(ctx context.Context, traceID string, cur
 }
 
 // finalizeTrace atomically applies one terminal trace transition and appends the matching final event so clients always have a durable terminal marker to replay.
-func (s *Service) finalizeTrace(ctx context.Context, traceID string, currentStatuses []string, nextStatus string, message string, cause error, retryCount int64) (bool, error) {
+func (s *Service) finalizeTrace(ctx context.Context, traceID string, currentStatuses []string, nextStatus string, terminalReason string, message string, cause error, retryCount int64) (bool, error) {
 	if message == "" { // Fill in a deterministic fallback message so every terminal event remains readable even when the caller omits custom text.
 		message = "trace " + nextStatus // Use the terminal lifecycle state itself as the concise default event message.
 	}
@@ -58,6 +58,9 @@ func (s *Service) finalizeTrace(ctx context.Context, traceID string, currentStat
 		"message":        message,    // Preserve the human-readable terminal summary for polling and websocket consumers.
 		"phase":          "trace",    // Mark the event as a trace-level terminal event rather than a step-level execution update.
 		"terminalStatus": nextStatus, // Duplicate the terminal lifecycle state inside the payload for clients that rely on payload inspection alone.
+	}
+	if terminalReason != "" { // Persist the structured terminal reason whenever the caller supplies one so trace readers can distinguish timeout, orphaned, cancelled, and normal completion outcomes.
+		payloadMap["terminalReason"] = terminalReason // Duplicate the terminal reason inside the event payload for replay consumers that inspect only event data.
 	}
 	if cause != nil { // Attach the underlying error details only when the terminal transition was triggered by a failure path.
 		payloadMap["error"] = cause.Error()       // Preserve the original error string so operators can diagnose terminal failures from event replay alone.
@@ -74,7 +77,13 @@ func (s *Service) finalizeTrace(ctx context.Context, traceID string, currentStat
 		return false, errors.Wrap(errors.CodeInternal, "failed to marshal terminal trace event", err) // Surface payload serialization failures as internal orchestrator errors.
 	}
 
-	changed, err := s.dao.TransitionTraceStatusWithEvent(ctx, traceID, currentStatuses, nextStatus, &postgres.PlanEvent{ // Commit the terminal status change and its matching final event in one transaction.
+	var terminalReasonPointer *string // Hold the optional terminal-reason pointer only when the caller supplied a concrete reason value.
+	if terminalReason != "" {         // Materialize the terminal reason pointer only when the caller supplied one explicitly.
+		terminalReasonCopy := terminalReason        // Copy the terminal reason into one addressable local variable for PostgreSQL parameter binding.
+		terminalReasonPointer = &terminalReasonCopy // Pass the concrete terminal reason pointer into the DAO helper so the traces row stores the structured reason.
+	}
+
+	changed, err := s.dao.TransitionTraceStatusWithEventAndReason(ctx, traceID, currentStatuses, nextStatus, terminalReasonPointer, &postgres.PlanEvent{ // Commit the terminal status change, optional reason, and matching final event in one transaction.
 		TraceID:   traceID,    // Target the same trace row that is transitioning into its terminal state.
 		StepIndex: -1,         // Use a sentinel step index so clients can distinguish trace-level terminal events from step-level execution events.
 		Status:    nextStatus, // Mirror the terminal trace state in the event status for simple client-side filtering.
@@ -89,21 +98,34 @@ func (s *Service) finalizeTrace(ctx context.Context, traceID string, currentStat
 }
 
 // FinalizeQueuedTrace records a dispatcher-owned terminal outcome for a queued trace without overwriting a terminal state that has already been committed elsewhere.
-func (s *Service) FinalizeQueuedTrace(ctx context.Context, traceID string, nextStatus string, message string, cause error, retryCount int64) error {
-	_, err := s.finalizeTrace(ctx, traceID, []string{"pending", "running"}, nextStatus, message, cause, retryCount) // Allow dispatcher-originated terminalization to win only while the trace is still active.
-	if err != nil {                                                                                                 // Return transactional failures to the dispatcher so it can avoid ACKing prematurely.
+func (s *Service) FinalizeQueuedTrace(ctx context.Context, traceID string, nextStatus string, terminalReason string, message string, cause error, retryCount int64) error {
+	_, err := s.finalizeTrace(ctx, traceID, []string{"pending", "running"}, nextStatus, terminalReason, message, cause, retryCount) // Allow dispatcher-originated terminalization to win only while the trace is still active.
+	if err != nil {                                                                                                                 // Return transactional failures to the dispatcher so it can avoid ACKing prematurely.
 		return err // Preserve the original repository or serialization error for the caller.
 	}
 
 	return nil // Report success once the dispatcher-owned terminal outcome has been durably recorded or found to be already terminal.
 }
 
-// MarkDispatchedTraceRunning records that a distributed trace has left the queue and is now executing on a worker without overwriting any concurrent terminal state.
-func (s *Service) MarkDispatchedTraceRunning(ctx context.Context, traceID string) error {
-	_, err := s.transitionTraceStatus(ctx, traceID, []string{"pending"}, "running") // Promote the queued trace to running only when no concurrent cancel or terminal transition has already won.
-	if err != nil {                                                                 // Return compare-and-swap failures so the dispatcher can log bookkeeping problems after worker acceptance.
-		return err // Preserve the DAO-produced error chain for consistent higher-layer logging and diagnosis.
+// ReserveDispatchedTraceAttempt increments the distributed trace attempt counter while the trace is still pending so the worker can receive a stable attempt token before acceptance.
+func (s *Service) ReserveDispatchedTraceAttempt(ctx context.Context, traceID string) (int64, error) {
+	attempt, changed, err := s.dao.ReserveTraceAttempt(ctx, traceID, []string{"pending"}) // Reserve the next distributed attempt while the trace is still pending so later acceptance can promote the same attempt to running.
+	if err != nil {                                                                       // Return storage-layer failures so the dispatcher can log bookkeeping problems before the worker RPC is sent.
+		return 0, err // Preserve the DAO-produced error chain for consistent higher-layer logging and diagnosis.
+	}
+	if !changed { // Report a benign lost race when another caller already moved the trace out of pending before this reservation was attempted.
+		return 0, nil // Return zero so the dispatcher can suppress stale distributed dispatch entirely.
 	}
 
-	return nil // Treat a lost compare-and-swap race as a no-op because another lifecycle transition has already moved the trace out of pending.
+	return attempt, nil // Return the reserved attempt number that the dispatcher must pass to the worker RPC.
+}
+
+// MarkDispatchedTraceRunning records that one reserved distributed trace attempt has been accepted by a worker and is now executing.
+func (s *Service) MarkDispatchedTraceRunning(ctx context.Context, traceID string, attempt int64) (bool, error) {
+	changed, err := s.dao.MarkTraceAttemptRunning(ctx, traceID, attempt, []string{"pending"}) // Promote the reserved trace attempt to running only when the trace still carries the same reserved attempt and pending status.
+	if err != nil {                                                                           // Return storage-layer failures so the dispatcher can log bookkeeping problems after worker acceptance.
+		return false, err // Preserve the DAO-produced error chain for consistent higher-layer logging and diagnosis.
+	}
+
+	return changed, nil // Report whether the reserved attempt still owned the pending trace and therefore entered the running state.
 }

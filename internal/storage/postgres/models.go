@@ -16,12 +16,14 @@ type Session struct {
 }
 
 type Trace struct {
-	ID        string
-	SessionID string
-	ProjectID string
-	Status    string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID             string
+	SessionID      string
+	ProjectID      string
+	Status         string
+	CurrentAttempt int64
+	TerminalReason *string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 type PlanEvent struct {

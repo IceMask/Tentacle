@@ -165,6 +165,7 @@ func verifySchema(ctx context.Context, conn *pgx.Conn) ([]string, []string) {
 		"idx_plan_events_trace_created_at",
 		"idx_sessions_project_created_at",
 		"idx_sessions_status_updated_at",
+		"idx_traces_project_status_attempt_updated_at",
 		"idx_traces_project_status_updated_at",
 		"idx_traces_session_created_at",
 	}
@@ -223,17 +224,37 @@ func verifyDAOPaths(ctx context.Context, dsn string) (map[string]int, bool, bool
 		panic(fmt.Sprintf("failed to create verification trace: %v", err)) // Surface the DAO trace-write failure because it indicates schema drift against the live database.
 	}
 
-	traceRunningChanged, err := dao.CompareAndSwapTraceStatus(ctx, traceID, []string{"pending"}, "running") // Exercise the optimistic trace transition from pending to running.
-	if err != nil {                                                                                         // Stop when the first optimistic transition fails unexpectedly.
-		panic(fmt.Sprintf("failed to transition verification trace to running: %v", err)) // Surface the optimistic transition failure because it indicates schema or DAO drift.
+	reservedAttempt, reserved, err := dao.ReserveTraceAttempt(ctx, traceID, []string{"pending"}) // Reserve one distributed execution attempt so the replay check exercises the new ownership field and DAO path.
+	if err != nil {                                                                              // Stop when the attempt reservation fails because the new distributed schema would be unusable in production.
+		panic(fmt.Sprintf("failed to reserve verification trace attempt: %v", err)) // Surface the reservation failure because it indicates schema or DAO drift around current_attempt.
 	}
-	traceCompleteChanged, err := dao.CompareAndSwapTraceStatus(ctx, traceID, []string{"running"}, "completed") // Exercise the optimistic trace transition from running to completed.
-	if err != nil {                                                                                            // Stop when the second optimistic transition fails unexpectedly.
-		panic(fmt.Sprintf("failed to transition verification trace to completed: %v", err)) // Surface the optimistic terminal transition failure because it indicates schema or DAO drift.
+	if !reserved || reservedAttempt != 1 { // Fail when the first attempt reservation does not return the expected opening attempt number.
+		panic(fmt.Sprintf("unexpected distributed attempt reservation result: reserved=%t attempt=%d", reserved, reservedAttempt)) // Surface the exact reservation result because it identifies mismatched trace execution-state behavior immediately.
 	}
 
-	if err := dao.InsertPlanEvent(ctx, &postgres.PlanEvent{TraceID: traceID, Seq: 1, StepIndex: 0, Status: "passed", Payload: []byte(`{"message":"migration replay verification"}`), CreatedAt: now}); err != nil { // Insert one plan-event row through the repository DAO path.
-		panic(fmt.Sprintf("failed to insert verification plan event: %v", err)) // Surface the DAO event-write failure because it indicates schema drift against the live database.
+	traceRunningChanged, err := dao.MarkTraceAttemptRunning(ctx, traceID, reservedAttempt, []string{"pending"}) // Promote the reserved attempt into the running state so the replay check exercises the guarded distributed-running path.
+	if err != nil {                                                                                             // Stop when the guarded running transition fails because the new distributed schema would be unusable in production.
+		panic(fmt.Sprintf("failed to transition verification trace attempt to running: %v", err)) // Surface the guarded promotion failure because it indicates schema or DAO drift around current_attempt.
+	}
+	if !traceRunningChanged { // Fail when the reserved attempt no longer owns the trace because the new distributed running path would be unreliable.
+		panic("verification trace attempt did not enter running after reservation") // Surface the lost running transition because the migration replay must prove distributed ownership still works.
+	}
+
+	stepEventAppended, err := dao.AppendPlanEventForAttempt(ctx, traceID, reservedAttempt, &postgres.PlanEvent{StepIndex: 0, Status: "passed", Payload: []byte(`{"message":"migration replay verification"}`), CreatedAt: now}) // Append one step event through the attempt-aware callback path so the replay check covers the new distributed event contract.
+	if err != nil {                                                                                                                                                                                                             // Stop when the distributed event append fails because the callback schema path would be broken in production.
+		panic(fmt.Sprintf("failed to append verification distributed step event: %v", err)) // Surface the event-append failure because it indicates schema drift around attempt-aware event persistence.
+	}
+	if !stepEventAppended { // Fail when the reserved attempt can no longer append its running event because the replay must prove the guarded callback path still works.
+		panic("verification distributed step event was not appended for the active attempt") // Surface the rejected event append because it indicates stale-ownership logic is misaligned with the persisted attempt state.
+	}
+
+	completedReason := "completed"                                                                                                                                                                                                                                                                             // Persist one concrete terminal reason so the replay check proves the new trace column stores final outcome semantics correctly.
+	traceCompleteChanged, err := dao.TransitionTraceAttemptWithEvent(ctx, traceID, reservedAttempt, []string{"running"}, "completed", &completedReason, &postgres.PlanEvent{StepIndex: -1, Status: "completed", Payload: []byte(`{"message":"migration replay completed"}`), CreatedAt: now.Add(time.Second)}) // Finalize the same attempt through the new terminal-reason-aware distributed helper.
+	if err != nil {                                                                                                                                                                                                                                                                                            // Stop when the distributed terminal transition fails because the new schema would be unusable for late-result protection.
+		panic(fmt.Sprintf("failed to transition verification trace attempt to completed: %v", err)) // Surface the guarded terminal transition failure because it indicates schema or DAO drift around terminal_reason.
+	}
+	if !traceCompleteChanged { // Fail when the reserved attempt can no longer finalize the trace because the replay must prove the terminal ownership guard still works.
+		panic("verification trace attempt did not enter completed through distributed finalize path") // Surface the rejected terminal transition because it indicates stale-result protection or lifecycle guards are misconfigured.
 	}
 	if err := dao.InsertArtifact(ctx, &postgres.Artifact{ID: artifactID, TraceID: traceID, Key: traceID + "/artifact-replay-check/screenshot.png", Type: "image/png", Size: 128, CreatedAt: now, Metadata: []byte(`{"kind":"verification"}`)}); err != nil { // Insert one artifact row through the repository DAO path.
 		panic(fmt.Sprintf("failed to insert verification artifact: %v", err)) // Surface the DAO artifact-write failure because it indicates schema drift against the live database.
@@ -265,7 +286,13 @@ func verifyDAOPaths(ctx context.Context, dsn string) (map[string]int, bool, bool
 	if trace.Status != "completed" { // Fail when the optimistic trace transitions did not leave the verification trace in the expected terminal state.
 		panic(fmt.Sprintf("verification trace ended in unexpected status: %s", trace.Status)) // Surface the actual trace status because it identifies the broken state transition.
 	}
-	if len(events) != 1 { // Fail when the verification event row cannot be read back through the repository DAO list path.
+	if trace.CurrentAttempt != reservedAttempt { // Fail when the trace row does not preserve the active distributed attempt number after the guarded transition flow.
+		panic(fmt.Sprintf("verification trace stored unexpected current attempt: %d", trace.CurrentAttempt)) // Surface the persisted attempt number because it identifies mismatches between schema replay and DAO expectations.
+	}
+	if trace.TerminalReason == nil || *trace.TerminalReason != completedReason { // Fail when the trace row does not preserve the terminal reason written by the new distributed finalize helper.
+		panic(fmt.Sprintf("verification trace stored unexpected terminal reason: %v", trace.TerminalReason)) // Surface the persisted terminal reason because it identifies mismatches between schema replay and DAO expectations.
+	}
+	if len(events) != 2 { // Fail when the verification step and terminal event rows cannot be read back through the repository DAO list path.
 		panic(fmt.Sprintf("unexpected verification event count via DAO: %d", len(events))) // Surface the live event count because it pinpoints write or read drift.
 	}
 	if len(artifacts) != 1 { // Fail when the verification artifact row cannot be read back through the repository DAO list path.

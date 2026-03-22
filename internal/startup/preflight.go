@@ -111,6 +111,11 @@ func ValidateWorkerStartup(cfg *config.Config) error {
 	if err := validateHostPort(cfg.Worker.OrchestratorAddr, "worker.orchestrator_addr"); err != nil { // Validate the orchestrator target address before gRPC registration is attempted.
 		return err // Preserve the host:port validation failure for the caller.
 	}
+	if strings.TrimSpace(cfg.Worker.AdvertiseAddr) != "" { // Validate the optional worker advertise address only when the operator overrides the default hostname-derived value.
+		if err := validateHostPort(cfg.Worker.AdvertiseAddr, "worker.advertise_addr"); err != nil { // Reuse the shared host:port validator so distributed worker registration uses one routable address shape.
+			return err // Preserve the advertise-address validation failure for the caller.
+		}
+	}
 	if err := validateRPCSecurityConfig(cfg.RPC.Security); err != nil { // Validate internal RPC security before the worker starts its gRPC listener and dials the orchestrator.
 		return err // Preserve the RPC security validation failure for the caller.
 	}

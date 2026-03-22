@@ -23,6 +23,7 @@ const (
 	degradeAfterMisses = 2
 	removeAfterSeconds = 60
 	monitorInterval    = 5 * time.Second
+	recoveryWindow     = 60 * time.Second
 )
 
 type WorkerRegistry struct {
@@ -33,14 +34,15 @@ type WorkerRegistry struct {
 }
 
 type WorkerNode struct {
-	ID          string            `json:"id"`
-	Address     string            `json:"address"`
-	Tags        map[string]string `json:"tags"`
-	Capacity    int               `json:"capacity"`
-	ActiveLoad  int               `json:"active_load"`
-	Status      string            `json:"status"` // healthy|degraded|offline
-	LastSeen    time.Time         `json:"last_seen"`
-	MissedBeats int               `json:"missed_beats"`
+	ID              string            `json:"id"`
+	Address         string            `json:"address"`
+	Tags            map[string]string `json:"tags"`
+	Capacity        int               `json:"capacity"`
+	ActiveLoad      int               `json:"active_load"`
+	Status          string            `json:"status"` // healthy|degraded|offline
+	LastSeen        time.Time         `json:"last_seen"`
+	MissedBeats     int               `json:"missed_beats"`
+	RecoveryStarted time.Time         `json:"recovery_started,omitempty"`
 }
 
 // NewWorkerRegistry executes this operation.
@@ -103,12 +105,23 @@ func (r *WorkerRegistry) Heartbeat(ctx context.Context, workerID string, activeL
 	}
 
 	worker := val.(*WorkerNode)
-	worker.LastSeen = time.Now()
-	worker.ActiveLoad = activeLoad
-	worker.MissedBeats = 0
-	if worker.Status == "degraded" {
-		worker.Status = "healthy"
-		r.logger.InfoContext(ctx, "worker recovered", "worker_id", workerID)
+	now := time.Now()               // Capture one heartbeat timestamp so state updates, recovery checks, and persistence all share the same wall-clock baseline.
+	worker.LastSeen = now           // Record the latest successful heartbeat time before any recovery-state transitions are evaluated.
+	worker.ActiveLoad = activeLoad  // Persist the latest active-load snapshot reported by the worker heartbeat.
+	worker.MissedBeats = 0          // Reset the missed-heartbeat counter because a fresh heartbeat has arrived successfully.
+	if worker.Status == "offline" { // Re-enter offline workers through degraded first so they pass one stabilization window before receiving new work.
+		worker.Status = "degraded"                                                         // Keep the recovering worker out of the healthy scheduling pool until it proves stability.
+		worker.RecoveryStarted = now                                                       // Start the recovery stabilization window from the current successful heartbeat.
+		r.logger.InfoContext(ctx, "worker entered recovery window", "worker_id", workerID) // Log the recovery-window entry so operators can see that the worker is back but not yet fully healthy.
+	} else if worker.Status == "degraded" && !worker.RecoveryStarted.IsZero() { // Promote recovering workers back to healthy only after the stabilization window has elapsed.
+		if now.Sub(worker.RecoveryStarted) >= recoveryWindow { // Check whether the worker has remained reachable throughout the full recovery stabilization window.
+			worker.Status = "healthy"                                            // Return the worker to the healthy scheduling pool after the stabilization window succeeds.
+			worker.RecoveryStarted = time.Time{}                                 // Clear the recovery window marker because the worker is now fully healthy again.
+			r.logger.InfoContext(ctx, "worker recovered", "worker_id", workerID) // Log the recovery completion so operators can see the worker is assignable again.
+		}
+	} else if worker.Status == "degraded" { // Preserve the existing degraded->healthy fast path for workers that never went fully offline.
+		worker.Status = "healthy"                                            // Return mildly degraded workers to healthy once a fresh heartbeat arrives and no recovery window is active.
+		r.logger.InfoContext(ctx, "worker recovered", "worker_id", workerID) // Log the recovery so operators can correlate the worker's return to the healthy pool.
 	}
 
 	// Update Redis
@@ -258,6 +271,7 @@ func (r *WorkerRegistry) checkHeartbeats(ctx context.Context) {
 
 			if worker.MissedBeats >= heartbeatMissMax {
 				worker.Status = "offline"
+				worker.RecoveryStarted = time.Time{}
 				r.logger.ErrorContext(ctx, "worker offline",
 					"worker_id", workerID,
 					"missed_beats", worker.MissedBeats)

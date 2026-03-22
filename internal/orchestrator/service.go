@@ -102,8 +102,8 @@ func NewService(cfg config.OrchestratorConfig, rpcCfg config.RPCSecurityConfig, 
 	if mode == ExecutionModeMonolith {
 		executor = svc
 	}
-	dispatcher := NewDispatcher(cache, registry, executor, cfg.PlanTimeout, rpcCfg) // Pass the configured plan timeout and RPC security into dispatcher so distributed worker calls follow the selected transport mode.
-	dispatcher.finalizer = svc                                                      // Wire the service's durable terminalization helper into dispatcher-owned terminal paths before the service starts processing queue messages.
+	dispatcher := NewDispatcher(cache, registry, executor, cfg.PlanTimeout, workerCfg.HeartbeatInterval, rpcCfg) // Pass the configured plan timeout, worker heartbeat cadence, and RPC security into dispatcher so distributed leases and worker calls follow the selected runtime model.
+	dispatcher.finalizer = svc                                                                                   // Wire the service's durable terminalization helper into dispatcher-owned terminal paths before the service starts processing queue messages.
 	svc.dispatcher = dispatcher
 
 	return svc
@@ -317,8 +317,8 @@ func (s *Service) CancelPlan(ctx context.Context, traceID string) error {
 	}
 
 	_ = s.dispatcher.CancelPlan(ctx, traceID)
-	cancelled, err := s.finalizeTrace(ctx, traceID, []string{"pending", "running"}, "cancelled", "trace cancelled", nil, 0) // Persist the cancelled terminal state together with one final trace event so replay consumers see a durable terminal marker.
-	if err != nil {                                                                                                         // Stop immediately when the transactional terminalization helper fails.
+	cancelled, err := s.finalizeTrace(ctx, traceID, []string{"pending", "running"}, "cancelled", "cancelled", "trace cancelled", nil, 0) // Persist the cancelled terminal state together with one final trace event so replay consumers see a durable terminal marker.
+	if err != nil {                                                                                                                      // Stop immediately when the transactional terminalization helper fails.
 		return err // Preserve the wrapped storage error produced by the optimistic transition helper.
 	}
 	if !cancelled { // Keep cancel idempotent when another worker or caller has already moved the trace to a terminal state.
@@ -522,13 +522,13 @@ func (s *Service) ExecuteDispatchedPlan(ctx context.Context, traceID string, ses
 
 	steps, err := worker.ParsePlan(plan)
 	if err != nil {
-		_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "trace failed before execution started", err, 0) // Persist the failed terminal state and matching final event before returning the plan-parse error.
+		_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "parse_error", "trace failed before execution started", err, 0) // Persist the failed terminal state and matching final event before returning the plan-parse error.
 		return err
 	}
 
 	app, err := s.getAppiumClient(ctx, sessionID)
 	if err != nil {
-		_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "trace failed before acquiring the session client", err, 0) // Persist the failed terminal state and final event without overwriting a concurrent cancellation result.
+		_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "session_unavailable", "trace failed before acquiring the session client", err, 0) // Persist the failed terminal state and final event without overwriting a concurrent cancellation result.
 		return err
 	}
 
@@ -559,23 +559,23 @@ func (s *Service) ExecuteDispatchedPlan(ctx context.Context, traceID string, ses
 			telemetry.ErrorCodeTotal.WithLabelValues(string(code), "orchestrator").Inc()
 		}
 		if errors.IsCode(err, errors.CodeSessionDead) || errors.IsCode(err, errors.CodeSessionBroken) {
-			_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "trace failed because the session became unusable", err, 0) // Persist the failed terminal state and final event without clobbering a concurrent cancellation or other terminal transition.
+			_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "session_broken", "trace failed because the session became unusable", err, 0) // Persist the failed terminal state and final event without clobbering a concurrent cancellation or other terminal transition.
 			telemetry.ExecuteLatency.WithLabelValues("", "", "failed").Observe(elapsed)
 			return err
 		}
 		if runCtx.Err() == context.Canceled || runCtx.Err() == context.DeadlineExceeded {
-			_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "cancelled", "trace cancelled during execution", err, 0) // Persist cancellation as the winning terminal state together with one final trace event.
+			_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "cancelled", "cancelled", "trace cancelled during execution", err, 0) // Persist cancellation as the winning terminal state together with one final trace event.
 			telemetry.ExecuteLatency.WithLabelValues("", "", "failed").Observe(elapsed)
 			return err
 		}
 		telemetry.ExecuteLatency.WithLabelValues("", "", "failed").Observe(elapsed)
-		_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "trace failed during execution", err, 0) // Persist the failed terminal state and final event without clobbering a concurrent terminal state update.
+		_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "execution_failed", "trace failed during execution", err, 0) // Persist the failed terminal state and final event without clobbering a concurrent terminal state update.
 		return err
 	}
 
 	telemetry.ExecuteLatency.WithLabelValues("", "", "passed").Observe(elapsed)
-	_, err = s.finalizeTrace(runCtx, traceID, []string{"running"}, "completed", "trace completed", nil, 0) // Persist the completed terminal state together with one final trace event when this executor still owns the running state.
-	return err                                                                                             // Return any storage-layer failure while treating a lost race to another terminal state as a successful no-op.
+	_, err = s.finalizeTrace(runCtx, traceID, []string{"running"}, "completed", "completed", "trace completed", nil, 0) // Persist the completed terminal state together with one final trace event when this executor still owns the running state.
+	return err                                                                                                          // Return any storage-layer failure while treating a lost race to another terminal state as a successful no-op.
 }
 
 // Interactive element operations

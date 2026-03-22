@@ -8,6 +8,7 @@ import "encoding/json"
 type ExecutePlanRequest struct {
 	TraceID   string          `json:"trace_id"`
 	SessionID string          `json:"session_id"`
+	Attempt   int64           `json:"attempt"`
 	Plan      json.RawMessage `json:"plan"`
 }
 
@@ -54,4 +55,64 @@ type HeartbeatRequest struct {
 type HeartbeatResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message,omitempty"`
+}
+
+// PlanEventMetrics mirrors the worker executor metrics embedded in distributed step-event callbacks.
+type PlanEventMetrics struct {
+	Attempt   int   `json:"attempt"`
+	WDCalls   int   `json:"wd_calls"`
+	ElapsedMs int64 `json:"elapsed_ms"`
+}
+
+// ReportPlanEventRequest is sent by a worker whenever one distributed step event should be persisted by the orchestrator.
+type ReportPlanEventRequest struct {
+	TraceID      string           `json:"trace_id"`
+	WorkerID     string           `json:"worker_id"`
+	Attempt      int64            `json:"attempt"`
+	StepIndex    int              `json:"step_index"`
+	Status       string           `json:"status"`
+	Message      string           `json:"message,omitempty"`
+	Phase        string           `json:"phase,omitempty"`
+	ArtifactRefs []string         `json:"artifact_refs,omitempty"`
+	Metrics      PlanEventMetrics `json:"metrics"`
+}
+
+// ReportPlanEventResponse is returned by the orchestrator after validating and optionally appending one distributed step event.
+type ReportPlanEventResponse struct {
+	Accepted bool   `json:"accepted"`
+	Stale    bool   `json:"stale,omitempty"`
+	Message  string `json:"message,omitempty"`
+}
+
+// RenewLeaseRequest is sent by a worker to refresh one distributed execution lease while it still owns the trace attempt.
+type RenewLeaseRequest struct {
+	TraceID  string `json:"trace_id"`
+	WorkerID string `json:"worker_id"`
+	Attempt  int64  `json:"attempt"`
+}
+
+// RenewLeaseResponse is returned by the orchestrator after validating and optionally refreshing one distributed execution lease.
+type RenewLeaseResponse struct {
+	Accepted bool   `json:"accepted"`
+	Stale    bool   `json:"stale,omitempty"`
+	Message  string `json:"message,omitempty"`
+}
+
+// CompletePlanRequest is sent by a worker after one distributed trace attempt reaches a terminal outcome.
+type CompletePlanRequest struct {
+	TraceID        string `json:"trace_id"`
+	WorkerID       string `json:"worker_id"`
+	Attempt        int64  `json:"attempt"`
+	FinalStatus    string `json:"final_status"`
+	TerminalReason string `json:"terminal_reason,omitempty"`
+	Message        string `json:"message,omitempty"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	ErrorMessage   string `json:"error_message,omitempty"`
+}
+
+// CompletePlanResponse is returned by the orchestrator after validating and optionally finalizing one distributed trace attempt.
+type CompletePlanResponse struct {
+	Accepted bool   `json:"accepted"`
+	Stale    bool   `json:"stale,omitempty"`
+	Message  string `json:"message,omitempty"`
 }

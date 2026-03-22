@@ -17,19 +17,22 @@ import (
 // for registration and heartbeat reporting.
 type GRPCServer struct {
 	server   *grpc.Server
+	service  *Service
 	registry *WorkerRegistry
 	logger   *slog.Logger
 }
 
 // NewGRPCServer creates and registers the orchestrator gRPC service with the configured internal RPC security mode.
-func NewGRPCServer(registry *WorkerRegistry, security config.RPCSecurityConfig) (*GRPCServer, error) {
+func NewGRPCServer(service *Service, security config.RPCSecurityConfig) (*GRPCServer, error) {
 	serverOptions, err := rpc.NewServerOptions(security) // Build the transport-credential and shared-token server options required by the configured internal RPC mode.
 	if err != nil {                                      // Stop immediately when the security config cannot be turned into valid gRPC server options.
 		return nil, err // Preserve the server-option construction failure for the caller.
 	}
 	s := grpc.NewServer(serverOptions...) // Construct the gRPC server with the configured security options so worker registration traffic follows the selected transport mode.
+	registry := service.Registry()        // Reuse the service-owned worker registry so registration, heartbeat, and distributed callbacks share one runtime state source.
 	gs := &GRPCServer{
 		server:   s,
+		service:  service,
 		registry: registry,
 		logger:   telemetry.Logger(),
 	}
@@ -76,4 +79,34 @@ func (gs *GRPCServer) Heartbeat(ctx context.Context, req *rpc.HeartbeatRequest) 
 		return &rpc.HeartbeatResponse{Success: false, Message: err.Error()}, nil
 	}
 	return &rpc.HeartbeatResponse{Success: true}, nil
+}
+
+// ReportPlanEvent implements rpc.OrchestratorServiceServer.
+func (gs *GRPCServer) ReportPlanEvent(ctx context.Context, req *rpc.ReportPlanEventRequest) (*rpc.ReportPlanEventResponse, error) {
+	accepted, err := gs.service.ReportDistributedPlanEvent(ctx, req) // Delegate the worker-emitted step event to the orchestrator service so ownership checks and DAO appends stay centralized.
+	if err != nil {                                                  // Surface service-layer callback failures while still returning a structured callback response payload.
+		return &rpc.ReportPlanEventResponse{Accepted: false, Message: err.Error()}, nil // Return the wrapped failure text because gRPC transport success keeps worker retry logic simpler here.
+	}
+
+	return &rpc.ReportPlanEventResponse{Accepted: accepted, Stale: !accepted}, nil // Report whether the worker-emitted step event was appended or rejected as stale.
+}
+
+// RenewLease implements rpc.OrchestratorServiceServer.
+func (gs *GRPCServer) RenewLease(ctx context.Context, req *rpc.RenewLeaseRequest) (*rpc.RenewLeaseResponse, error) {
+	accepted, err := gs.service.RenewDistributedExecutionLease(ctx, req.TraceID, req.WorkerID, req.Attempt) // Delegate the lease renewal to the orchestrator service so Redis-backed ownership checks stay centralized.
+	if err != nil {                                                                                         // Surface service-layer lease-renewal failures while still returning a structured callback response payload.
+		return &rpc.RenewLeaseResponse{Accepted: false, Message: err.Error()}, nil // Return the wrapped failure text because gRPC transport success keeps worker retry logic simpler here.
+	}
+
+	return &rpc.RenewLeaseResponse{Accepted: accepted, Stale: !accepted}, nil // Report whether the distributed lease was refreshed or rejected as stale.
+}
+
+// CompletePlan implements rpc.OrchestratorServiceServer.
+func (gs *GRPCServer) CompletePlan(ctx context.Context, req *rpc.CompletePlanRequest) (*rpc.CompletePlanResponse, error) {
+	accepted, err := gs.service.CompleteDistributedPlan(ctx, req) // Delegate the worker terminal callback to the orchestrator service so attempt guards and terminalization stay centralized.
+	if err != nil {                                               // Surface service-layer terminalization failures while still returning a structured callback response payload.
+		return &rpc.CompletePlanResponse{Accepted: false, Message: err.Error()}, nil // Return the wrapped failure text because gRPC transport success keeps worker retry logic simpler here.
+	}
+
+	return &rpc.CompletePlanResponse{Accepted: accepted, Stale: !accepted}, nil // Report whether the worker terminal callback finalized the trace or was rejected as stale.
 }

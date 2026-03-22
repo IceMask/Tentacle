@@ -90,23 +90,23 @@ func (d *DAO) EndSession(ctx context.Context, id string, endedAt time.Time) erro
 // CreateTrace executes this operation.
 func (d *DAO) CreateTrace(ctx context.Context, t *Trace) error {
 	_, err := d.pool.Exec(ctx, `
-		INSERT INTO traces (id, session_id, project_id, status, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`, t.ID, t.SessionID, t.ProjectID, t.Status, t.CreatedAt, t.UpdatedAt)
-	return err
+		INSERT INTO traces (id, session_id, project_id, status, current_attempt, terminal_reason, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`, t.ID, t.SessionID, t.ProjectID, t.Status, t.CurrentAttempt, t.TerminalReason, t.CreatedAt, t.UpdatedAt) // Persist the trace together with its distributed-attempt and terminal-reason state so callback guards have a stable source of truth.
+	return err // Return the raw insert result so higher layers preserve the existing repository error contract.
 }
 
 // GetTrace executes this operation.
 func (d *DAO) GetTrace(ctx context.Context, id string) (*Trace, error) {
-	t := &Trace{}
+	t := &Trace{} // Allocate the destination trace model before scanning the persisted lifecycle and attempt state.
 	err := d.pool.QueryRow(ctx, `
-		SELECT id, session_id, project_id, status, created_at, updated_at
+		SELECT id, session_id, project_id, status, current_attempt, terminal_reason, created_at, updated_at
 		FROM traces WHERE id = $1
-	`, id).Scan(&t.ID, &t.SessionID, &t.ProjectID, &t.Status, &t.CreatedAt, &t.UpdatedAt)
-	if err != nil {
-		return nil, errors.Wrap(errors.CodeTraceNotFound, "trace not found", err)
+	`, id).Scan(&t.ID, &t.SessionID, &t.ProjectID, &t.Status, &t.CurrentAttempt, &t.TerminalReason, &t.CreatedAt, &t.UpdatedAt) // Load the persisted trace state, current attempt, and terminal reason in one query for callers.
+	if err != nil { // Preserve the existing trace-not-found contract when PostgreSQL cannot return the requested row.
+		return nil, errors.Wrap(errors.CodeTraceNotFound, "trace not found", err) // Wrap lookup failures with the stable trace-not-found code used by gateway transports.
 	}
-	return t, nil
+	return t, nil // Return the fully populated trace model once the database scan succeeds.
 }
 
 // UpdateTraceStatus executes this operation.

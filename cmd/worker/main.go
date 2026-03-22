@@ -10,7 +10,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"google.golang.org/grpc"
 
 	"mcp_for_appium/internal/config"
@@ -39,12 +38,20 @@ func main() {
 		log.Fatalf("worker startup preflight failed for appium: %v", err) // Stop immediately so the worker does not register as healthy while its primary dependency is down.
 	}
 
-	workerID := uuid.New().String()
+	advertiseAddress := buildWorkerAdvertiseAddress(cfg.Worker.AdvertiseAddr, cfg.Worker.GRPCPort) // Resolve one routable worker address so the orchestrator can call back into this worker without relying on localhost.
+	workerID := advertiseAddress                                                                   // Reuse the stable advertise address as the worker identifier so restart and heartbeat recovery keep the same identity.
+
+	// --- connect to orchestrator before constructing the worker service so distributed callbacks can reuse the live client ---
+	orchClient, err := rpc.NewOrchestratorClient(cfg.Worker.OrchestratorAddr, cfg.RPC.Security) // Dial the orchestrator using the configured internal RPC transport mode and shared-token auth.
+	if err != nil {
+		log.Fatalf("failed to dial orchestrator at %s: %v", cfg.Worker.OrchestratorAddr, err)
+	}
+	defer orchClient.Close()
 
 	// --- gRPC server (receives ExecutePlan / CancelPlan from orchestrator) ---
-	workerSvc := worker.NewGRPCServer(cfg.Worker.AppiumURL, cfg.Orchestrator.StepTimeout, cfg.Orchestrator.AutoWaitMax)
-	grpcServerOptions, err := rpc.NewServerOptions(cfg.RPC.Security) // Build the worker gRPC server options that match the configured internal RPC transport mode and shared-token enforcement.
-	if err != nil {                                                  // Stop immediately when the configured internal RPC security settings cannot be turned into a gRPC server safely.
+	workerSvc := worker.NewGRPCServer(cfg.Worker.AppiumURL, cfg.Orchestrator.StepTimeout, cfg.Orchestrator.AutoWaitMax, workerID, orchClient, leaseRenewEvery(cfg.Worker.HeartbeatInterval)) // Construct the distributed worker handler with orchestrator callbacks, stable identity, and a lease-renewal cadence derived from worker heartbeats.
+	grpcServerOptions, err := rpc.NewServerOptions(cfg.RPC.Security)                                                                                                                         // Build the worker gRPC server options that match the configured internal RPC transport mode and shared-token enforcement.
+	if err != nil {                                                                                                                                                                          // Stop immediately when the configured internal RPC security settings cannot be turned into a gRPC server safely.
 		log.Fatalf("failed to initialize worker gRPC security: %v", err) // Surface the gRPC security wiring failure before the listener starts.
 	}
 	grpcSrv := grpc.NewServer(grpcServerOptions...) // Construct the worker gRPC server with the configured transport credentials and shared-token interceptor.
@@ -61,13 +68,6 @@ func main() {
 	}()
 	logger.Info("worker gRPC server started", "port", cfg.Worker.GRPCPort)
 
-	// --- connect to orchestrator, register, and start heartbeat loop ---
-	orchClient, err := rpc.NewOrchestratorClient(cfg.Worker.OrchestratorAddr, cfg.RPC.Security) // Dial the orchestrator using the configured internal RPC transport mode and shared-token auth.
-	if err != nil {
-		log.Fatalf("failed to dial orchestrator at %s: %v", cfg.Worker.OrchestratorAddr, err)
-	}
-	defer orchClient.Close()
-
 	concurrency := cfg.Worker.Concurrency
 	if concurrency == 0 {
 		concurrency = 4
@@ -78,7 +78,7 @@ func main() {
 
 	resp, err := orchClient.RegisterWorker(regCtx, &rpc.RegisterWorkerRequest{
 		WorkerID: workerID,
-		Address:  fmt.Sprintf("localhost:%d", cfg.Worker.GRPCPort),
+		Address:  advertiseAddress,
 		Capacity: concurrency,
 		Tags:     cfg.Worker.Tags,
 	})
@@ -124,4 +124,30 @@ func heartbeatLoop(ctx context.Context, client *rpc.OrchestratorClient, workerID
 			}
 		}
 	}
+}
+
+// buildWorkerAdvertiseAddress resolves the routable worker address registered with the orchestrator for later distributed ExecutePlan and CancelPlan RPCs.
+func buildWorkerAdvertiseAddress(configuredAddress string, port int) string {
+	if configuredAddress != "" { // Prefer the explicit configured advertise address whenever the operator provides one.
+		return configuredAddress // Return the operator-supplied address verbatim so distributed routing follows explicit deployment intent.
+	}
+
+	hostname, err := os.Hostname()    // Resolve the current host name so the worker can register one stable non-localhost callback address by default.
+	if err != nil || hostname == "" { // Fall back to loopback only when the host name cannot be resolved locally.
+		hostname = "127.0.0.1" // Keep local development working even when host-name resolution is unavailable in the current environment.
+	}
+
+	return fmt.Sprintf("%s:%d", hostname, port) // Build the default worker advertise address from the resolved host name and worker gRPC port.
+}
+
+// leaseRenewEvery derives the worker-side distributed lease-renewal cadence from the configured heartbeat interval.
+func leaseRenewEvery(heartbeatInterval time.Duration) time.Duration {
+	if heartbeatInterval <= 0 { // Fall back to a conservative default renewal cadence when the worker heartbeat interval is missing or invalid.
+		return 5 * time.Second // Keep lease renewals frequent enough that the orchestrator can detect lost ownership promptly.
+	}
+	if heartbeatInterval/2 < time.Second { // Clamp extremely small heartbeat intervals so the worker does not spin on sub-second lease renewal RPCs.
+		return time.Second // Renew once per second in very small-interval test setups to avoid excessive gRPC chatter.
+	}
+
+	return heartbeatInterval / 2 // Renew several times inside each ownership window so transient RPC failures still leave time for later successful renewals.
 }

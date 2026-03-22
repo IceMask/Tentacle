@@ -9,8 +9,11 @@ import (
 )
 
 const (
-	orchRegisterWorkerMethod = "/mcp.OrchestratorService/RegisterWorker"
-	orchHeartbeatMethod      = "/mcp.OrchestratorService/Heartbeat"
+	orchRegisterWorkerMethod  = "/mcp.OrchestratorService/RegisterWorker"
+	orchHeartbeatMethod       = "/mcp.OrchestratorService/Heartbeat"
+	orchReportPlanEventMethod = "/mcp.OrchestratorService/ReportPlanEvent"
+	orchRenewLeaseMethod      = "/mcp.OrchestratorService/RenewLease"
+	orchCompletePlanMethod    = "/mcp.OrchestratorService/CompletePlan"
 )
 
 // OrchestratorClient is used by workers to register and send heartbeats.
@@ -56,4 +59,34 @@ func (c *OrchestratorClient) Heartbeat(ctx context.Context, req *HeartbeatReques
 		return nil, err
 	}
 	return resp, nil
+}
+
+// ReportPlanEvent forwards one worker-emitted distributed step event to the orchestrator.
+func (c *OrchestratorClient) ReportPlanEvent(ctx context.Context, req *ReportPlanEventRequest) (*ReportPlanEventResponse, error) {
+	resp := new(ReportPlanEventResponse)                                             // Allocate the distributed step-event response before invoking the orchestrator callback RPC.
+	if err := c.conn.Invoke(ctx, orchReportPlanEventMethod, req, resp); err != nil { // Invoke the orchestrator distributed step-event callback over the existing gRPC connection.
+		return nil, err // Preserve the transport or server error for the worker caller.
+	}
+
+	return resp, nil // Return the orchestrator's acceptance or stale-result response to the worker caller.
+}
+
+// RenewLease refreshes one distributed execution lease through the orchestrator.
+func (c *OrchestratorClient) RenewLease(ctx context.Context, req *RenewLeaseRequest) (*RenewLeaseResponse, error) {
+	resp := new(RenewLeaseResponse)                                             // Allocate the distributed lease-renewal response before invoking the orchestrator callback RPC.
+	if err := c.conn.Invoke(ctx, orchRenewLeaseMethod, req, resp); err != nil { // Invoke the orchestrator distributed lease-renewal callback over the existing gRPC connection.
+		return nil, err // Preserve the transport or server error for the worker caller.
+	}
+
+	return resp, nil // Return the orchestrator's lease-renewal acceptance or stale-result response to the worker caller.
+}
+
+// CompletePlan forwards one distributed terminal trace result to the orchestrator.
+func (c *OrchestratorClient) CompletePlan(ctx context.Context, req *CompletePlanRequest) (*CompletePlanResponse, error) {
+	resp := new(CompletePlanResponse)                                             // Allocate the distributed terminal-result response before invoking the orchestrator callback RPC.
+	if err := c.conn.Invoke(ctx, orchCompletePlanMethod, req, resp); err != nil { // Invoke the orchestrator distributed terminal callback over the existing gRPC connection.
+		return nil, err // Preserve the transport or server error for the worker caller.
+	}
+
+	return resp, nil // Return the orchestrator's terminal-result acceptance or stale-result response to the worker caller.
 }

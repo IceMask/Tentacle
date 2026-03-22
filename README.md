@@ -70,6 +70,9 @@ curl -X POST http://localhost:8080/jsonrpc \
 export DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/mcp_mobile_worker?sslmode=disable'
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/001_init.sql
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/002_audit_logs.sql
+psql "$DATABASE_URL" -f internal/storage/postgres/migrations/004_pat_tokens.sql
+psql "$DATABASE_URL" -f internal/storage/postgres/migrations/005_hmac_keys.sql
+psql "$DATABASE_URL" -f internal/storage/postgres/migrations/006_trace_execution_state.sql
 ```
 
 迁移目录说明见：
@@ -132,6 +135,10 @@ go test ./internal/integration -count=1 -v
 - [架构设计 v4.3](./module_v4.3_design.md)
 - [详细文档](./appium_mcp_docs_v4_3_detailed/)
 - [PostgreSQL Migrations](./internal/storage/postgres/migrations/README.md)
+- [Changelog](./CHANGELOG.md)
+- [Release Notes v1.0.0 Draft](./RELEASE_NOTES_v1.0.0.md)
+- [v1.0.0 Release Checklist](./v1.0.0_release_checklist.md)
+- [Security Policy](./SECURITY.md)
 - [MIT License](./LICENSE)
 
 ### 许可证

@@ -12,6 +12,7 @@ This directory contains the PostgreSQL schema bootstrap files required by the cu
 - `002_audit_logs.sql` adds the append-only `audit_logs` table promised by the design document.
 - `004_pat_tokens.sql` adds the authoritative `pat_tokens` table used by the v4.4 PAT authentication path.
 - `005_hmac_keys.sql` adds the authoritative `hmac_keys` table used by the v4.4 HMAC authentication path.
+- `006_trace_execution_state.sql` adds `traces.current_attempt` and `traces.terminal_reason` for distributed ownership leases, callback finalization, and stale-result protection.
 - The migrations also create the indexes needed by the current query paths in `internal/storage/postgres/dao.go` and the new audit-log lookup paths.
 
 ## When To Apply
@@ -35,6 +36,7 @@ psql "$DATABASE_URL" -f internal/storage/postgres/migrations/001_init.sql
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/002_audit_logs.sql
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/004_pat_tokens.sql
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/005_hmac_keys.sql
+psql "$DATABASE_URL" -f internal/storage/postgres/migrations/006_trace_execution_state.sql
 ```
 
 ## How To Verify
@@ -61,5 +63,5 @@ go run ./cmd/migration_replay_check
 
 - The current schema intentionally matches the DAO's existing `[]byte` payload handling, so JSON-like blobs are stored in `BYTEA` columns.
 - Session shutdown now uses row-level locking, and trace lifecycle changes now use optimistic compare-and-swap updates, so no additional schema columns were required for the concurrency hardening in this pass.
-- Migration numbering intentionally leaves room for the future `003_traces_execution_state.sql` file planned by the v4.4 batch roadmap, so the auth-table migrations start at `004` and `005`.
+- Migration numbering intentionally leaves room for the skipped `003_*` slot from the earlier planning draft, so the auth-table migrations start at `004` and the trace execution-state migration lands at `006`.
 - Future migrations can introduce richer typed columns once the DAO layer is updated to write and read them explicitly.

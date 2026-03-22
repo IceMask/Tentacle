@@ -52,6 +52,7 @@ type WorkerConfig struct {
 	AppiumURL         string            `yaml:"appium_url" env:"WORKER__APPIUM_URL" default:"http://localhost:4723"`
 	Concurrency       int               `yaml:"concurrency" env:"WORKER__CONCURRENCY" default:"0"` // 0 means auto-detect
 	HeartbeatInterval time.Duration     `yaml:"heartbeat_interval" env:"WORKER__HEARTBEAT_INTERVAL" default:"10s"`
+	AdvertiseAddr     string            `yaml:"advertise_addr" env:"WORKER__ADVERTISE_ADDR"`
 	Tags              map[string]string `yaml:"tags"`
 	OrchestratorAddr  string            `yaml:"orchestrator_addr" env:"WORKER__ORCHESTRATOR_ADDR" default:"localhost:9090"`
 	GRPCPort          int               `yaml:"grpc_port" env:"WORKER__GRPC_PORT" default:"9092"`

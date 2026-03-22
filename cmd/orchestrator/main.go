@@ -76,8 +76,8 @@ func main() {
 	}
 
 	// 6. Start gRPC Server for worker registration / heartbeat
-	grpcSrv, err := orchestrator.NewGRPCServer(svc.Registry(), cfg.RPC.Security) // Build the worker-facing gRPC server with the configured internal RPC transport mode and shared-token enforcement.
-	if err != nil {                                                              // Stop immediately when the configured internal RPC security settings cannot be turned into a gRPC server safely.
+	grpcSrv, err := orchestrator.NewGRPCServer(svc, cfg.RPC.Security) // Build the worker-facing gRPC server with the configured internal RPC transport mode and shared-token enforcement.
+	if err != nil {                                                   // Stop immediately when the configured internal RPC security settings cannot be turned into a gRPC server safely.
 		log.Fatalf("failed to initialize orchestrator gRPC security: %v", err) // Surface the gRPC security wiring failure before the listener starts.
 	}
 	go func() {
