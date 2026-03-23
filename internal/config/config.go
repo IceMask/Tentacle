@@ -31,12 +31,13 @@ type DeviceFarmConfig struct {
 }
 
 type GatewayConfig struct {
-	Port            int           `yaml:"port" env:"GATEWAY__PORT" default:"8080"`
-	EnableTLS       bool          `yaml:"enable_tls" env:"GATEWAY__ENABLE_TLS" default:"false"`
-	TLSCertFile     string        `yaml:"tls_cert_file" env:"GATEWAY__TLS_CERT_FILE"`
-	TLSKeyFile      string        `yaml:"tls_key_file" env:"GATEWAY__TLS_KEY_FILE"`
-	AllowedOrigins  string        `yaml:"allowed_origins" env:"GATEWAY__ALLOWED_ORIGINS"`
-	ShutdownTimeout time.Duration `yaml:"shutdown_timeout" env:"GATEWAY__SHUTDOWN_TIMEOUT" default:"30s"`
+	Port                int           `yaml:"port" env:"GATEWAY__PORT" default:"8080"`
+	EnableTLS           bool          `yaml:"enable_tls" env:"GATEWAY__ENABLE_TLS" default:"false"`
+	TLSCertFile         string        `yaml:"tls_cert_file" env:"GATEWAY__TLS_CERT_FILE"`
+	TLSKeyFile          string        `yaml:"tls_key_file" env:"GATEWAY__TLS_KEY_FILE"`
+	AllowedOrigins      string        `yaml:"allowed_origins" env:"GATEWAY__ALLOWED_ORIGINS"`
+	DisableADBShellTool bool          `yaml:"disable_adb_shell_tool" env:"GATEWAY__DISABLE_ADB_SHELL_TOOL" default:"false"`
+	ShutdownTimeout     time.Duration `yaml:"shutdown_timeout" env:"GATEWAY__SHUTDOWN_TIMEOUT" default:"30s"`
 }
 
 type OrchestratorConfig struct {

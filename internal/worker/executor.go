@@ -25,8 +25,14 @@ type AppiumClient interface {
 	FindElement(ctx context.Context, strategy, selector string) (string, error)
 	Click(ctx context.Context, elementID string) error
 	SendKeys(ctx context.Context, elementID, text string) error
+	Clear(ctx context.Context, elementID string) error
 	Screenshot(ctx context.Context) ([]byte, error)
 	PageSource(ctx context.Context) (string, error)
+	Tap(ctx context.Context, x, y int) error
+	Swipe(ctx context.Context, x1, y1, x2, y2, durationMs int) error
+	LongPress(ctx context.Context, elementID string, durationMs int) error
+	Back(ctx context.Context) error
+	HideKeyboard(ctx context.Context) error
 }
 
 // NewExecutor executes this operation.
@@ -89,6 +95,11 @@ func (e *Executor) Execute(ctx context.Context, plan []PlanStep) error {
 					e.emitFailure(stepCtx, i, err, start)
 					return err
 				}
+			case "clearElement":
+				if err := e.executeClear(stepCtx, i, step, start); err != nil {
+					e.emitFailure(stepCtx, i, err, start)
+					return err
+				}
 			case "wait":
 				waitMs := 1000
 				if len(step.Params) > 0 {
@@ -106,6 +117,33 @@ func (e *Executor) Execute(ctx context.Context, plan []PlanStep) error {
 					e.emitFailure(stepCtx, i, err, start)
 					return err
 				}
+			case "tap":
+				if err := e.executeTap(stepCtx, i, step, start); err != nil {
+					e.emitFailure(stepCtx, i, err, start)
+					return err
+				}
+			case "swipe":
+				if err := e.executeSwipe(stepCtx, i, step, start); err != nil {
+					e.emitFailure(stepCtx, i, err, start)
+					return err
+				}
+			case "longPress":
+				if err := e.executeLongPress(stepCtx, i, step, start); err != nil {
+					e.emitFailure(stepCtx, i, err, start)
+					return err
+				}
+			case "pressBack":
+				if err := e.appium.Back(stepCtx); err != nil {
+					e.emitFailure(stepCtx, i, err, start)
+					return err
+				}
+				e.emitSuccess(i, "pressBack succeeded", start, StepMetrics{Attempt: 1, WDCalls: 1})
+			case "hideKeyboard":
+				if err := e.appium.HideKeyboard(stepCtx); err != nil {
+					e.emitFailure(stepCtx, i, err, start)
+					return err
+				}
+				e.emitSuccess(i, "hideKeyboard succeeded", start, StepMetrics{Attempt: 1, WDCalls: 1})
 			case "screenshot":
 				if _, err := e.appium.Screenshot(stepCtx); err != nil {
 					e.emitFailure(stepCtx, i, err, start)
@@ -159,6 +197,38 @@ func (e *Executor) executeClick(ctx context.Context, stepIndex int, step PlanSte
 	return lastErr
 }
 
+// executeClear executes this operation.
+func (e *Executor) executeClear(ctx context.Context, stepIndex int, step PlanStep, start time.Time) error {
+	var lastErr error
+	for attempt := 1; attempt <= e.retryMax; attempt++ {
+		elementID, attempts, wdCalls, err := e.findWithAutoWait(ctx, step.Selector)
+		if err != nil {
+			lastErr = err
+			if !e.isTransient(err) {
+				return err
+			}
+			e.backoff(attempt)
+			continue
+		}
+
+		if err := e.appium.Clear(ctx, elementID); err != nil {
+			lastErr = err
+			if !e.isTransient(err) {
+				return err
+			}
+			e.backoff(attempt)
+			continue
+		}
+
+		e.emitSuccess(stepIndex, "clearElement succeeded", start, StepMetrics{
+			Attempt: attempt + attempts - 1,
+			WDCalls: wdCalls + 1,
+		})
+		return nil
+	}
+	return lastErr
+}
+
 // executeSendKeys executes this operation.
 func (e *Executor) executeSendKeys(ctx context.Context, stepIndex int, step PlanStep, start time.Time) error {
 	var params struct {
@@ -190,6 +260,88 @@ func (e *Executor) executeSendKeys(ctx context.Context, stepIndex int, step Plan
 		}
 
 		e.emitSuccess(stepIndex, "sendKeys succeeded", start, StepMetrics{
+			Attempt: attempt + attempts - 1,
+			WDCalls: wdCalls + 1,
+		})
+		return nil
+	}
+	return lastErr
+}
+
+// executeTap executes this operation.
+func (e *Executor) executeTap(ctx context.Context, stepIndex int, step PlanStep, start time.Time) error {
+	var params struct {
+		X *int `json:"x"`
+		Y *int `json:"y"`
+	}
+	if err := json.Unmarshal(step.Params, &params); err != nil || params.X == nil || params.Y == nil {
+		return errors.New(errors.CodePlanInvalid, "tap requires params.x and params.y")
+	}
+	if err := e.appium.Tap(ctx, *params.X, *params.Y); err != nil {
+		return err
+	}
+	e.emitSuccess(stepIndex, "tap succeeded", start, StepMetrics{Attempt: 1, WDCalls: 1})
+	return nil
+}
+
+// executeSwipe executes this operation.
+func (e *Executor) executeSwipe(ctx context.Context, stepIndex int, step PlanStep, start time.Time) error {
+	var params struct {
+		StartX     *int `json:"startX"`
+		StartY     *int `json:"startY"`
+		EndX       *int `json:"endX"`
+		EndY       *int `json:"endY"`
+		DurationMs int  `json:"durationMs"`
+	}
+	if err := json.Unmarshal(step.Params, &params); err != nil || params.StartX == nil || params.StartY == nil || params.EndX == nil || params.EndY == nil {
+		return errors.New(errors.CodePlanInvalid, "swipe requires params.startX,startY,endX,endY")
+	}
+	if params.DurationMs <= 0 {
+		params.DurationMs = 200
+	}
+	if err := e.appium.Swipe(ctx, *params.StartX, *params.StartY, *params.EndX, *params.EndY, params.DurationMs); err != nil {
+		return err
+	}
+	e.emitSuccess(stepIndex, "swipe succeeded", start, StepMetrics{Attempt: 1, WDCalls: 1})
+	return nil
+}
+
+// executeLongPress executes this operation.
+func (e *Executor) executeLongPress(ctx context.Context, stepIndex int, step PlanStep, start time.Time) error {
+	var params struct {
+		DurationMs int `json:"durationMs"`
+	}
+	if len(step.Params) > 0 {
+		if err := json.Unmarshal(step.Params, &params); err != nil {
+			return errors.New(errors.CodePlanInvalid, "longPress params must be valid json")
+		}
+	}
+	if params.DurationMs <= 0 {
+		params.DurationMs = 1000
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= e.retryMax; attempt++ {
+		elementID, attempts, wdCalls, err := e.findWithAutoWait(ctx, step.Selector)
+		if err != nil {
+			lastErr = err
+			if !e.isTransient(err) {
+				return err
+			}
+			e.backoff(attempt)
+			continue
+		}
+
+		if err := e.appium.LongPress(ctx, elementID, params.DurationMs); err != nil {
+			lastErr = err
+			if !e.isTransient(err) {
+				return err
+			}
+			e.backoff(attempt)
+			continue
+		}
+
+		e.emitSuccess(stepIndex, "longPress succeeded", start, StepMetrics{
 			Attempt: attempt + attempts - 1,
 			WDCalls: wdCalls + 1,
 		})
@@ -307,7 +459,7 @@ func (e *Executor) emitFailure(ctx context.Context, stepIndex int, err error, st
 
 // isTransient executes this operation.
 func (e *Executor) isTransient(err error) bool {
-	return errors.IsCode(err, errors.CodeAppTimeout) || errors.IsCode(err, errors.CodeStoreConn)
+	return errors.IsCode(err, errors.CodeAppTimeout) || errors.IsCode(err, errors.CodeStoreConn) || errors.IsCode(err, errors.CodeAppElemNotFound)
 }
 
 // backoff executes this operation.

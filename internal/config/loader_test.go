@@ -41,7 +41,8 @@ func TestLoadAppliesDefaultsAndEnvOverrides(t *testing.T) {
 	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {                                                                              // Write the synthetic config file that the production loader will read.
 		t.Fatalf("failed to write config file: %v", err) // Surface the setup failure because the loader cannot be exercised without a real config file.
 	}
-	t.Setenv("WORKER__HEARTBEAT_INTERVAL", "15s") // Override one duration field through the environment so the production env-override path is exercised directly.
+	t.Setenv("WORKER__HEARTBEAT_INTERVAL", "15s")       // Override one duration field through the environment so the production env-override path is exercised directly.
+	t.Setenv("GATEWAY__DISABLE_ADB_SHELL_TOOL", "true") // Override the adbShell kill switch through the environment so the new operator-level feature gate is exercised directly.
 
 	cfg, err := Load(configPath) // Load the synthetic config file through the production loader so defaults, normalization, and env overrides all run together.
 	if err != nil {              // Fail the test when the production loader rejects the valid synthetic config unexpectedly.
@@ -55,5 +56,8 @@ func TestLoadAppliesDefaultsAndEnvOverrides(t *testing.T) {
 	}
 	if cfg.WebSocket.SubscriptionTokenTTL != 60*time.Second { // Fail the test when the tagged default does not populate the websocket token TTL.
 		t.Fatalf("expected websocket token TTL 60s, got %s", cfg.WebSocket.SubscriptionTokenTTL) // Surface the unexpected duration so defaulting regressions are obvious.
+	}
+	if !cfg.Gateway.DisableADBShellTool { // Fail the test when the new environment-backed adbShell kill switch does not override the default false value.
+		t.Fatal("expected gateway disable_adb_shell_tool override to be true") // Surface the unexpected flag value so operator feature-gate regressions are obvious.
 	}
 }

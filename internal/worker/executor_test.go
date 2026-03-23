@@ -23,18 +23,51 @@ type recordedSendKeysCall struct {
 	text      string
 }
 
+// recordedTapCall captures one Tap invocation made by the executor under test.
+type recordedTapCall struct {
+	x int
+	y int
+}
+
+// recordedSwipeCall captures one Swipe invocation made by the executor under test.
+type recordedSwipeCall struct {
+	x1         int
+	y1         int
+	x2         int
+	y2         int
+	durationMs int
+}
+
+// recordedLongPressCall captures one LongPress invocation made by the executor under test.
+type recordedLongPressCall struct {
+	elementID  string
+	durationMs int
+}
+
 // recordingAppiumClient records every Appium call and allows tests to override specific behaviors.
 type recordingAppiumClient struct {
-	findCalls       []recordedFindCall
-	clickCalls      []string
-	sendKeysCalls   []recordedSendKeysCall
-	screenshotCalls int
-	pageSourceCalls int
-	findElementFunc func(ctx context.Context, strategy string, selector string) (string, error)
-	clickFunc       func(ctx context.Context, elementID string) error
-	sendKeysFunc    func(ctx context.Context, elementID string, text string) error
-	screenshotFunc  func(ctx context.Context) ([]byte, error)
-	pageSourceFunc  func(ctx context.Context) (string, error)
+	findCalls         []recordedFindCall
+	clickCalls        []string
+	sendKeysCalls     []recordedSendKeysCall
+	clearCalls        []string
+	tapCalls          []recordedTapCall
+	swipeCalls        []recordedSwipeCall
+	longPressCalls    []recordedLongPressCall
+	backCalls         int
+	hideKeyboardCalls int
+	screenshotCalls   int
+	pageSourceCalls   int
+	findElementFunc   func(ctx context.Context, strategy string, selector string) (string, error)
+	clickFunc         func(ctx context.Context, elementID string) error
+	sendKeysFunc      func(ctx context.Context, elementID string, text string) error
+	clearFunc         func(ctx context.Context, elementID string) error
+	tapFunc           func(ctx context.Context, x int, y int) error
+	swipeFunc         func(ctx context.Context, x1 int, y1 int, x2 int, y2 int, durationMs int) error
+	longPressFunc     func(ctx context.Context, elementID string, durationMs int) error
+	backFunc          func(ctx context.Context) error
+	hideKeyboardFunc  func(ctx context.Context) error
+	screenshotFunc    func(ctx context.Context) ([]byte, error)
+	pageSourceFunc    func(ctx context.Context) (string, error)
 }
 
 // FindElement records the call and then executes the configured test behavior.
@@ -67,6 +100,16 @@ func (m *recordingAppiumClient) SendKeys(ctx context.Context, elementID string, 
 	return nil // Return success by default so success-path tests do not need to stub send-keys behavior explicitly.
 }
 
+// Clear records the call and then executes the configured test behavior.
+func (m *recordingAppiumClient) Clear(ctx context.Context, elementID string) error {
+	m.clearCalls = append(m.clearCalls, elementID) // Record the cleared element identifier so tests can assert clear-element targeting precisely.
+	if m.clearFunc != nil {                        // Delegate to the test override when the current scenario needs custom clear behavior.
+		return m.clearFunc(ctx, elementID) // Return the override result so the executor observes the scenario-specific Appium response.
+	}
+
+	return nil // Return success by default so success-path tests do not need to stub clear behavior explicitly.
+}
+
 // Screenshot records the call and then executes the configured test behavior.
 func (m *recordingAppiumClient) Screenshot(ctx context.Context) ([]byte, error) {
 	m.screenshotCalls++          // Count screenshot attempts so failure-path tests can assert artifact-capture behavior.
@@ -85,6 +128,56 @@ func (m *recordingAppiumClient) PageSource(ctx context.Context) (string, error) 
 	}
 
 	return "<xml/>", nil // Return one stable fake page-source payload so default tests can use the mock without extra setup.
+}
+
+// Tap records the call and then executes the configured test behavior.
+func (m *recordingAppiumClient) Tap(ctx context.Context, x int, y int) error {
+	m.tapCalls = append(m.tapCalls, recordedTapCall{x: x, y: y}) // Record the tap coordinates so tests can assert gesture dispatch precisely.
+	if m.tapFunc != nil {                                        // Delegate to the test override when the current scenario needs custom tap behavior.
+		return m.tapFunc(ctx, x, y) // Return the override result so the executor observes the scenario-specific Appium response.
+	}
+
+	return nil // Return success by default so success-path tests do not need to stub tap behavior explicitly.
+}
+
+// Swipe records the call and then executes the configured test behavior.
+func (m *recordingAppiumClient) Swipe(ctx context.Context, x1 int, y1 int, x2 int, y2 int, durationMs int) error {
+	m.swipeCalls = append(m.swipeCalls, recordedSwipeCall{x1: x1, y1: y1, x2: x2, y2: y2, durationMs: durationMs}) // Record the swipe parameters so tests can assert gesture dispatch precisely.
+	if m.swipeFunc != nil {                                                                                        // Delegate to the test override when the current scenario needs custom swipe behavior.
+		return m.swipeFunc(ctx, x1, y1, x2, y2, durationMs) // Return the override result so the executor observes the scenario-specific Appium response.
+	}
+
+	return nil // Return success by default so success-path tests do not need to stub swipe behavior explicitly.
+}
+
+// LongPress records the call and then executes the configured test behavior.
+func (m *recordingAppiumClient) LongPress(ctx context.Context, elementID string, durationMs int) error {
+	m.longPressCalls = append(m.longPressCalls, recordedLongPressCall{elementID: elementID, durationMs: durationMs}) // Record the long-press target and duration so tests can assert gesture dispatch precisely.
+	if m.longPressFunc != nil {                                                                                      // Delegate to the test override when the current scenario needs custom long-press behavior.
+		return m.longPressFunc(ctx, elementID, durationMs) // Return the override result so the executor observes the scenario-specific Appium response.
+	}
+
+	return nil // Return success by default so success-path tests do not need to stub long-press behavior explicitly.
+}
+
+// Back records the call and then executes the configured test behavior.
+func (m *recordingAppiumClient) Back(ctx context.Context) error {
+	m.backCalls++          // Count back-button invocations so tests can assert navigation dispatch precisely.
+	if m.backFunc != nil { // Delegate to the test override when the current scenario needs custom back behavior.
+		return m.backFunc(ctx) // Return the override result so the executor observes the scenario-specific Appium response.
+	}
+
+	return nil // Return success by default so success-path tests do not need to stub back behavior explicitly.
+}
+
+// HideKeyboard records the call and then executes the configured test behavior.
+func (m *recordingAppiumClient) HideKeyboard(ctx context.Context) error {
+	m.hideKeyboardCalls++          // Count hide-keyboard invocations so tests can assert keyboard-dismiss behavior precisely.
+	if m.hideKeyboardFunc != nil { // Delegate to the test override when the current scenario needs custom hide-keyboard behavior.
+		return m.hideKeyboardFunc(ctx) // Return the override result so the executor observes the scenario-specific Appium response.
+	}
+
+	return nil // Return success by default so success-path tests do not need to stub hide-keyboard behavior explicitly.
 }
 
 // newTestExecutor constructs one executor together with the event sink slice used by assertions.
@@ -168,6 +261,24 @@ func TestExecuteSendKeysStepRecordsCalls(t *testing.T) {
 	}
 }
 
+// TestExecuteClearElementStepRecordsCalls verifies that a successful clearElement step resolves one element and forwards the clear action.
+func TestExecuteClearElementStepRecordsCalls(t *testing.T) {
+	client := &recordingAppiumClient{}                                            // Construct one recording Appium client so the test can assert clear-element side effects precisely.
+	executor, recordedEvents := newTestExecutor(client, time.Second, time.Second) // Construct one executor with bounded timings so the unit test remains fast and deterministic.
+	plan := []PlanStep{{Type: "clearElement", Selector: "id=username"}}           // Build one concrete clearElement plan that exercises selector normalization and clear dispatch.
+
+	err := executor.Execute(context.Background(), plan) // Execute the real worker plan against the recording Appium client.
+	if err != nil {                                     // Fail immediately when the success-path executor unexpectedly returns an error.
+		t.Fatalf("expected clearElement step to succeed, got error: %v", err) // Surface the unexpected executor error so regressions are easy to diagnose.
+	}
+	if len(client.clearCalls) != 1 || client.clearCalls[0] != "element-123" { // Assert that the clear action targets the element returned by FindElement.
+		t.Fatalf("expected one clear call against element-123, got %#v", client.clearCalls) // Surface the actual clear targets so execution regressions are easy to diagnose.
+	}
+	if len(*recordedEvents) != 2 || (*recordedEvents)[1].Status != "passed" || (*recordedEvents)[1].Message != "clearElement succeeded" { // Assert that clearElement emits the expected terminal success event.
+		t.Fatalf("expected clearElement success events, got %#v", *recordedEvents) // Surface the actual event sequence so trace regressions are easy to diagnose.
+	}
+}
+
 // TestExecuteWaitStepUsesConfiguredDuration verifies that a wait step honors the configured millisecond duration and emits a passed event.
 func TestExecuteWaitStepUsesConfiguredDuration(t *testing.T) {
 	executor, recordedEvents := newTestExecutor(&recordingAppiumClient{}, time.Second, time.Second) // Construct one executor with no special Appium behavior because wait steps never call Appium.
@@ -184,6 +295,78 @@ func TestExecuteWaitStepUsesConfiguredDuration(t *testing.T) {
 	}
 	if len(*recordedEvents) != 2 || (*recordedEvents)[1].Status != "passed" || (*recordedEvents)[1].Message != "wait completed" { // Assert the expected wait-step event transition and success message.
 		t.Fatalf("expected wait completion events, got %#v", *recordedEvents) // Surface the actual event sequence so trace regressions are easy to diagnose.
+	}
+}
+
+// TestExecuteTapStepUsesConfiguredCoordinates verifies that a successful tap step forwards the configured coordinates directly to Appium.
+func TestExecuteTapStepUsesConfiguredCoordinates(t *testing.T) {
+	client := &recordingAppiumClient{}                                            // Construct one recording Appium client so the test can assert tap gesture dispatch precisely.
+	executor, recordedEvents := newTestExecutor(client, time.Second, time.Second) // Construct one executor with bounded timings so the unit test remains fast and deterministic.
+	plan := []PlanStep{{Type: "tap", Params: json.RawMessage(`{"x":12,"y":24}`)}} // Build one tap step with explicit coordinates so the gesture payload can be asserted directly.
+
+	err := executor.Execute(context.Background(), plan) // Execute the real worker plan against the recording Appium client.
+	if err != nil {                                     // Fail immediately when the success-path executor unexpectedly returns an error.
+		t.Fatalf("expected tap step to succeed, got error: %v", err) // Surface the unexpected executor error so regressions are easy to diagnose.
+	}
+	if len(client.tapCalls) != 1 || client.tapCalls[0].x != 12 || client.tapCalls[0].y != 24 { // Assert that the tap gesture forwarded the configured coordinates unchanged.
+		t.Fatalf("expected one tap call at 12,24, got %#v", client.tapCalls) // Surface the actual tap payload so gesture regressions are easy to diagnose.
+	}
+	if len(*recordedEvents) != 2 || (*recordedEvents)[1].Message != "tap succeeded" { // Assert that tap emits the expected terminal success event.
+		t.Fatalf("expected tap success events, got %#v", *recordedEvents) // Surface the actual event sequence so trace regressions are easy to diagnose.
+	}
+}
+
+// TestExecuteSwipeStepUsesConfiguredCoordinates verifies that a successful swipe step forwards the configured gesture coordinates and duration.
+func TestExecuteSwipeStepUsesConfiguredCoordinates(t *testing.T) {
+	client := &recordingAppiumClient{}                                                                                           // Construct one recording Appium client so the test can assert swipe gesture dispatch precisely.
+	executor, recordedEvents := newTestExecutor(client, time.Second, time.Second)                                                // Construct one executor with bounded timings so the unit test remains fast and deterministic.
+	plan := []PlanStep{{Type: "swipe", Params: json.RawMessage(`{"startX":1,"startY":2,"endX":11,"endY":22,"durationMs":333}`)}} // Build one swipe step with explicit coordinates and duration so the gesture payload can be asserted directly.
+
+	err := executor.Execute(context.Background(), plan) // Execute the real worker plan against the recording Appium client.
+	if err != nil {                                     // Fail immediately when the success-path executor unexpectedly returns an error.
+		t.Fatalf("expected swipe step to succeed, got error: %v", err) // Surface the unexpected executor error so regressions are easy to diagnose.
+	}
+	if len(client.swipeCalls) != 1 || client.swipeCalls[0].x1 != 1 || client.swipeCalls[0].y1 != 2 || client.swipeCalls[0].x2 != 11 || client.swipeCalls[0].y2 != 22 || client.swipeCalls[0].durationMs != 333 { // Assert that the swipe gesture forwarded the configured coordinates and duration unchanged.
+		t.Fatalf("expected one swipe call with configured payload, got %#v", client.swipeCalls) // Surface the actual swipe payload so gesture regressions are easy to diagnose.
+	}
+	if len(*recordedEvents) != 2 || (*recordedEvents)[1].Message != "swipe succeeded" { // Assert that swipe emits the expected terminal success event.
+		t.Fatalf("expected swipe success events, got %#v", *recordedEvents) // Surface the actual event sequence so trace regressions are easy to diagnose.
+	}
+}
+
+// TestExecuteLongPressResolvesElementAndUsesDefaultDuration verifies that a successful longPress step resolves one element and applies the default hold duration when none is supplied.
+func TestExecuteLongPressResolvesElementAndUsesDefaultDuration(t *testing.T) {
+	client := &recordingAppiumClient{}                                            // Construct one recording Appium client so the test can assert long-press dispatch precisely.
+	executor, recordedEvents := newTestExecutor(client, time.Second, time.Second) // Construct one executor with bounded timings so the unit test remains fast and deterministic.
+	plan := []PlanStep{{Type: "longPress", Selector: "accessibility=Submit"}}     // Build one longPress step without explicit duration so the executor must apply its default duration.
+
+	err := executor.Execute(context.Background(), plan) // Execute the real worker plan against the recording Appium client.
+	if err != nil {                                     // Fail immediately when the success-path executor unexpectedly returns an error.
+		t.Fatalf("expected longPress step to succeed, got error: %v", err) // Surface the unexpected executor error so regressions are easy to diagnose.
+	}
+	if len(client.longPressCalls) != 1 || client.longPressCalls[0].elementID != "element-123" || client.longPressCalls[0].durationMs != 1000 { // Assert that longPress resolved the element and applied the default duration.
+		t.Fatalf("expected one longPress call against element-123 with 1000ms, got %#v", client.longPressCalls) // Surface the actual long-press payload so gesture regressions are easy to diagnose.
+	}
+	if len(*recordedEvents) != 2 || (*recordedEvents)[1].Message != "longPress succeeded" { // Assert that longPress emits the expected terminal success event.
+		t.Fatalf("expected longPress success events, got %#v", *recordedEvents) // Surface the actual event sequence so trace regressions are easy to diagnose.
+	}
+}
+
+// TestExecutePressBackAndHideKeyboard verifies that non-element device actions execute directly and emit terminal success events.
+func TestExecutePressBackAndHideKeyboard(t *testing.T) {
+	client := &recordingAppiumClient{}                                            // Construct one recording Appium client so the test can assert direct device action dispatch precisely.
+	executor, recordedEvents := newTestExecutor(client, time.Second, time.Second) // Construct one executor with bounded timings so the unit test remains fast and deterministic.
+	plan := []PlanStep{{Type: "pressBack"}, {Type: "hideKeyboard"}}               // Build one two-step plan that exercises both direct device-action branches.
+
+	err := executor.Execute(context.Background(), plan) // Execute the real worker plan against the recording Appium client.
+	if err != nil {                                     // Fail immediately when the success-path executor unexpectedly returns an error.
+		t.Fatalf("expected pressBack/hideKeyboard plan to succeed, got error: %v", err) // Surface the unexpected executor error so regressions are easy to diagnose.
+	}
+	if client.backCalls != 1 || client.hideKeyboardCalls != 1 { // Assert that both direct device actions reached the Appium client exactly once.
+		t.Fatalf("expected one back call and one hideKeyboard call, got back=%d hideKeyboard=%d", client.backCalls, client.hideKeyboardCalls) // Surface the actual call counts so device-action regressions are easy to diagnose.
+	}
+	if len(*recordedEvents) != 4 || (*recordedEvents)[1].Message != "pressBack succeeded" || (*recordedEvents)[3].Message != "hideKeyboard succeeded" { // Assert that both direct device actions emitted the expected success events in order.
+		t.Fatalf("expected pressBack/hideKeyboard success events, got %#v", *recordedEvents) // Surface the actual event sequence so trace regressions are easy to diagnose.
 	}
 }
 
@@ -248,6 +431,36 @@ func TestExecuteContextCancellationReturnsContextError(t *testing.T) {
 	}
 	if len(*recordedEvents) != 2 || (*recordedEvents)[1].Status != "failed" { // Assert that cancellation still emits a failed terminal event for downstream traces.
 		t.Fatalf("expected failure events for cancellation, got %#v", *recordedEvents) // Surface the actual event sequence so trace regressions are easy to diagnose.
+	}
+}
+
+// TestClickRetriesAfterElementNotFound verifies that element-not-found failures now participate in the executor's outer retry loop after auto-wait exhaustion.
+func TestClickRetriesAfterElementNotFound(t *testing.T) {
+	client := &recordingAppiumClient{} // Construct one recording Appium client so the test can count lookup retries and final click dispatch precisely.
+	findAttempts := 0                  // Track how many outer lookup attempts the executor performed before succeeding.
+	client.findElementFunc = func(ctx context.Context, strategy string, selector string) (string, error) {
+		findAttempts++        // Count the lookup attempt so the test can prove element-not-found errors now trigger outer retries.
+		if findAttempts < 3 { // Return element-not-found twice so the executor must retry beyond the first auto-wait exhaustion.
+			return "", apperrors.New(apperrors.CodeAppElemNotFound, "element not ready") // Return the structured element-not-found error that should now be treated as transient.
+		}
+		return "element-123", nil // Return one stable element id on the third attempt so the executor can complete the click successfully.
+	}
+	executor, recordedEvents := newTestExecutor(client, time.Second, time.Nanosecond) // Construct one executor with near-zero auto-wait so each outer attempt fails fast when the element is still missing.
+	executor.retryMinJitter = 0                                                       // Remove retry sleep so the unit test stays fast while still exercising the outer retry loop.
+	executor.retryMaxJitter = 0                                                       // Remove retry sleep so the unit test stays fast while still exercising the outer retry loop.
+
+	err := executor.Execute(context.Background(), []PlanStep{{Type: "click", Selector: "xpath=//button"}}) // Execute one click plan so the executor must retry the missing element until it becomes available.
+	if err != nil {                                                                                        // Fail immediately when the executor still treats element-not-found as terminal after the retry-policy change.
+		t.Fatalf("expected click step to succeed after element-not-found retries, got error: %v", err) // Surface the unexpected error so transient-classification regressions are easy to diagnose.
+	}
+	if findAttempts != 3 { // Assert that the outer retry loop performed exactly two retries before the third successful lookup.
+		t.Fatalf("expected 3 find attempts, got %d", findAttempts) // Surface the actual retry count so transient-classification regressions are easy to diagnose.
+	}
+	if len(client.clickCalls) != 1 { // Assert that the click still executed once after the element finally became available.
+		t.Fatalf("expected one click call after retries, got %d", len(client.clickCalls)) // Surface the actual click count so retry regressions are easy to diagnose.
+	}
+	if len(*recordedEvents) != 2 || (*recordedEvents)[1].Status != "passed" { // Assert that the eventual success still emits one terminal passed event.
+		t.Fatalf("expected running/passed events after retries, got %#v", *recordedEvents) // Surface the actual event sequence so retry regressions are easy to diagnose.
 	}
 }
 

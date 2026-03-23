@@ -69,6 +69,18 @@ func TestProcessRequestReturnsMethodNotFoundMCPError(t *testing.T) {
 	}
 }
 
+// TestProcessRequestRejectsADBShellWhenDisabled verifies that the JSON-RPC MCP bridge hides and rejects adbShell when the gateway kill switch is active.
+func TestProcessRequestRejectsADBShellWhenDisabled(t *testing.T) {
+	handler := NewHandler(nil, capabilities.NewService(config.GatewayConfig{DisableADBShellTool: true}))                                                                                                       // Construct one handler with adbShell disabled so the JSON-RPC-to-MCP bridge can be asserted directly.
+	request := &Request{JSONRPC: "2.0", Method: "tools/call", Params: json.RawMessage(`{"name":"adbShell","arguments":{"deviceSerial":"emulator-5554","command":["getprop","ro.build.version.sdk"]}}`), ID: 7} // Build one schema-valid adbShell tools/call request so disablement behavior can be asserted directly.
+
+	if _, err := handler.ProcessRequest(context.Background(), request); err == nil { // Execute the production JSON-RPC dispatch path for adbShell while the gateway kill switch is active.
+		t.Fatal("expected disabled adbShell tool to fail") // Surface the missing rejection because operators rely on the kill switch to fully close the public tool surface.
+	} else if mcpErr, ok := err.(*mcperrors.MCPError); !ok || mcpErr.Code != -32601 || mcpErr.Message != "Tool not found: adbShell" { // Fail when the disabled tool no longer maps to the standard tool-not-found MCP error.
+		t.Fatalf("expected adbShell tool-not-found MCP error, got %#v", err) // Surface the unexpected error so gateway disablement regressions are easy to diagnose.
+	}
+}
+
 // TestServeHTTPRejectsParseError verifies that the HTTP transport returns the standard JSON-RPC parse-error envelope for malformed request bodies.
 func TestServeHTTPRejectsParseError(t *testing.T) {
 	handler := NewHandler(nil, nil)                                                     // Construct one handler with no orchestrator dependency because malformed JSON is rejected before dispatch.

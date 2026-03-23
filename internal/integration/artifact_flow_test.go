@@ -2,8 +2,10 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"image/png"
 	"io"
 	"net"
 	"net/http"
@@ -240,8 +242,21 @@ func TestMonolithTakeScreenshotPersistsArtifacts(t *testing.T) {
 		if !strings.HasPrefix(objectPath, "artifact-bucket/"+traceID+"/") { // Fail when the uploaded object path does not include the expected bucket and trace prefix.
 			t.Fatalf("expected uploaded object path to include artifact-bucket/%s prefix, got %s", traceID, objectPath) // Surface the unexpected path so key-layout regressions are easy to diagnose.
 		}
-		if string(objectBytes) != "fake-screenshot" { // Fail when the uploaded bytes do not match the fake Appium screenshot payload returned by the production Appium client path.
-			t.Fatalf("expected uploaded object bytes fake-screenshot, got %#v", objectBytes) // Surface the unexpected bytes so screenshot-upload regressions are easy to diagnose.
+		cfg, err := png.DecodeConfig(bytes.NewReader(objectBytes)) // Decode the uploaded image dimensions so the test can distinguish the full screenshot from the resized thumbnail artifact.
+		if err != nil {                                            // Fail immediately when the uploaded bytes are not valid PNG artifacts.
+			t.Fatalf("expected uploaded object bytes to be valid png, got error: %v", err) // Surface the decode failure so screenshot-upload regressions are easy to diagnose.
+		}
+		switch {
+		case strings.Contains(objectPath, "screenshot_full.png"):
+			if cfg.Width != 800 || cfg.Height != 400 { // Assert that the full screenshot preserves the fake Appium screenshot dimensions.
+				t.Fatalf("expected full screenshot dimensions 800x400, got %dx%d", cfg.Width, cfg.Height) // Surface the actual dimensions so full-screenshot regressions are easy to diagnose.
+			}
+		case strings.Contains(objectPath, "screenshot_thumb.png"):
+			if cfg.Width != 640 || cfg.Height != 320 { // Assert that the thumbnail path now stores one genuinely resized 640px-long-edge image.
+				t.Fatalf("expected thumbnail dimensions 640x320, got %dx%d", cfg.Width, cfg.Height) // Surface the actual dimensions so thumbnail regressions are easy to diagnose.
+			}
+		default:
+			t.Fatalf("expected uploaded object path to be screenshot_full.png or screenshot_thumb.png, got %s", objectPath) // Surface unexpected artifact object names so artifact-layout regressions are easy to diagnose.
 		}
 	}
 }

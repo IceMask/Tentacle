@@ -88,6 +88,7 @@ curl -X POST http://localhost:8080/jsonrpc \
 export DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/mcp_mobile_worker?sslmode=disable'
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/001_init.sql
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/002_audit_logs.sql
+psql "$DATABASE_URL" -f internal/storage/postgres/migrations/003_reserved_slot.sql
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/004_pat_tokens.sql
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/005_hmac_keys.sql
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/006_trace_execution_state.sql
@@ -140,7 +141,7 @@ go test ./internal/integration -run TestDistributedFlowEndToEnd -count=1 -v
 
 通过 MCP 协议可用的工具：
 
-- 共 **26** 个工具（截至 2026-03-16）
+- 共 **26** 个工具（截至 2026-03-23）
 - 核心会话/执行工具：`startSession` `executePlan` `endSession` `cancelPlan` `getTrace`
 - 交互式元素工具：`findElement` `clickElement` `sendKeysToElement` `clearElement` `getElementText` `getElementAttribute` `isElementDisplayed`
 - 手势工具：`tap` `swipe` `longPress` `pressBack` `hideKeyboard`
@@ -151,6 +152,7 @@ go test ./internal/integration -run TestDistributedFlowEndToEnd -count=1 -v
 补充说明：
 
 - 上述 **26 个** 名称是当前实际可发现的 MCP tools
+- 运维可通过 `gateway.disable_adb_shell_tool=true` 完全移除 `adbShell` 的发现与调用入口
 - JSON-RPC schema 中还保留了 `replay` `subscribe` `unsubscribe` 三个方法名，但它们当前 **未实现**，不计入可用 MCP tools 集
 
 ### Device Farm 参数缓存说明（run_api 模式）

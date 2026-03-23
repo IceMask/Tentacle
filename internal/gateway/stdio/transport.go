@@ -29,11 +29,19 @@ type Transport struct {
 
 // NewTransport creates a new stdio transport
 func NewTransport(orch *orchestrator.Service, capSvc *capabilities.Service) *Transport {
+	return NewTransportWithIO(orch, capSvc, os.Stdin, os.Stdout, telemetry.StdLogWriter()) // Delegate to the injectable constructor so production and tests share one initialization path.
+}
+
+// NewTransportWithIO creates one stdio transport over caller-supplied streams so tests can assert emitted JSON-RPC lines deterministically.
+func NewTransportWithIO(orch *orchestrator.Service, capSvc *capabilities.Service, stdin io.Reader, stdout io.Writer, stderr io.Writer) *Transport {
+	if stderr == nil { // Fall back to the telemetry-backed stderr sink when callers do not supply one explicit diagnostics stream.
+		stderr = telemetry.StdLogWriter() // Reuse the production stderr sink so stdio transport diagnostics still avoid stdout corruption.
+	}
 	return &Transport{
 		handler: jsonrpc.NewHandler(orch, capSvc),
-		stdin:   os.Stdin,
-		stdout:  os.Stdout,
-		stderr:  telemetry.StdLogWriter(), // Route stdio transport diagnostics to configured std log destinations (stderr + optional file).
+		stdin:   stdin,
+		stdout:  stdout,
+		stderr:  stderr, // Route stdio transport diagnostics to the caller-supplied sink so tests can capture stderr cleanly without polluting stdout.
 	}
 }
 
@@ -88,6 +96,11 @@ func (t *Transport) handleRequest(ctx context.Context, reqData []byte) error {
 	// Log the request to stderr
 	log.Printf("Received request: method=%s id=%v", req.Method, req.ID)
 
+	if progressToken, ok := extractProgressToken(&req); ok { // Detect one optional MCP progress token so long-running tools can emit notifications/progress over stdio.
+		ctx = mcp.WithProgressToken(ctx, progressToken)                  // Attach the client-supplied progress token so downstream tool handlers can correlate notifications correctly.
+		ctx = mcp.WithProgressReporter(ctx, t.writeProgressNotification) // Attach the transport-backed progress reporter so downstream tool handlers can emit progress safely.
+	}
+
 	// Call the handler
 	result, err := t.processRequest(ctx, &req)
 
@@ -120,7 +133,7 @@ func (t *Transport) writeResult(id interface{}, result interface{}) error {
 		ID:      id,
 	}
 
-	return t.writeJSON(response)
+	return t.writeJSONLocked(response)
 }
 
 // writeError writes a JSON-RPC error response
@@ -138,7 +151,7 @@ func (t *Transport) writeError(id interface{}, code int, message string, data in
 		ID: id,
 	}
 
-	return t.writeJSON(response)
+	return t.writeJSONLocked(response)
 }
 
 // writeErrorResponse writes an error response from an error object
@@ -166,11 +179,57 @@ func (t *Transport) writeErrorResponse(id interface{}, err error) error {
 		ID:      id,
 	}
 
-	return t.writeJSON(response)
+	return t.writeJSONLocked(response)
 }
 
-// writeJSON writes a JSON object to stdout followed by newline
+// writeProgressNotification writes one JSON-RPC notifications/progress message to stdout in a transport-safe critical section.
+func (t *Transport) writeProgressNotification(ctx context.Context, update mcp.ProgressUpdate) error {
+	_ = ctx             // Accept the request context for interface symmetry even though stdio notifications are written synchronously under the transport mutex.
+	t.mu.Lock()         // Serialize notifications with normal responses so stdout remains one valid newline-delimited JSON-RPC stream.
+	defer t.mu.Unlock() // Release the stdout lock promptly once the progress notification has been written.
+
+	return t.writeJSONLocked(map[string]interface{}{ // Emit the standard MCP progress notification envelope over the same stdout stream as normal responses.
+		"jsonrpc": "2.0",
+		"method":  "notifications/progress",
+		"params": map[string]interface{}{
+			"progressToken": update.Token,
+			"progress":      update.Progress,
+			"total":         update.Total,
+			"message":       update.Message,
+		},
+	})
+}
+
+// extractProgressToken extracts one optional MCP progress token from a tools/call request payload.
+func extractProgressToken(req *jsonrpc.Request) (interface{}, bool) {
+	if req == nil || req.Method != "tools/call" || len(req.Params) == 0 { // Ignore non-tools/call and empty requests because only tools/call may carry one MCP progress token here.
+		return nil, false // Report no token so the downstream context stays unchanged for requests that do not support progress notifications here.
+	}
+
+	var params struct {
+		Meta map[string]interface{} `json:"_meta"` // Decode only the MCP metadata envelope because tool arguments themselves are handled later by the MCP handler.
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil { // Parse the minimal params shape best-effort so malformed requests still fall through to normal request validation.
+		return nil, false // Suppress progress wiring on malformed params because the main handler will return the authoritative protocol error.
+	}
+	token, ok := params.Meta["progressToken"] // Read the optional progress token from the MCP metadata envelope when present.
+	if !ok || token == nil {                  // Ignore missing or explicit null progress tokens because clients are not asking for notifications in that case.
+		return nil, false // Report no token so the downstream context stays unchanged for requests without progress tracking.
+	}
+
+	return token, true // Return the caller-supplied progress token so the transport can wire notifications into the request context.
+}
+
+// writeJSON writes a JSON object to stdout followed by newline under the transport mutex.
 func (t *Transport) writeJSON(v interface{}) error {
+	t.mu.Lock()         // Serialize direct JSON writes with every other response path so stdout remains one valid line-delimited JSON-RPC stream.
+	defer t.mu.Unlock() // Release the stdout lock promptly once the JSON object has been written.
+
+	return t.writeJSONLocked(v) // Delegate to the unlocked writer because the mutex is already held by this helper.
+}
+
+// writeJSONLocked writes a JSON object to stdout followed by newline while assuming the transport mutex is already held by the caller.
+func (t *Transport) writeJSONLocked(v interface{}) error {
 	data, err := json.Marshal(v)
 	if err != nil {
 		log.Printf("Failed to marshal response: %v", err)

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+
+	"mcp_for_appium/internal/config"
 )
 
 // expectedToolCatalogSize stores the current embedded MCP tool count so catalog drift is detected immediately in unit tests.
@@ -51,9 +53,9 @@ func TestMCPHandlerInitializeReturnsServerCapabilities(t *testing.T) {
 	if !ok || toolCapabilities["listChanged"] != false {                   // Assert the static-tool-catalog contract exposed by this server.
 		t.Fatalf("expected static tools capability, got %#v", capabilities["tools"]) // Surface the actual capability payload so negotiation regressions are easy to diagnose.
 	}
-	resourceCapabilities, ok := capabilities["resources"].(map[string]interface{})                        // Extract the resources capability section so subscription support can be asserted directly.
-	if !ok || resourceCapabilities["subscribe"] != true || resourceCapabilities["listChanged"] != false { // Assert the resource-subscription contract exposed by this server.
-		t.Fatalf("expected subscribed resources capability, got %#v", capabilities["resources"]) // Surface the actual capability payload so negotiation regressions are easy to diagnose.
+	resourceCapabilities, ok := capabilities["resources"].(map[string]interface{})                         // Extract the resources capability section so subscription support can be asserted directly.
+	if !ok || resourceCapabilities["subscribe"] != false || resourceCapabilities["listChanged"] != false { // Assert that the server no longer advertises unsupported MCP resource subscriptions.
+		t.Fatalf("expected non-subscribed resources capability, got %#v", capabilities["resources"]) // Surface the actual capability payload so negotiation regressions are easy to diagnose.
 	}
 	serverInfo, ok := resultMap["serverInfo"].(map[string]interface{})                        // Extract the server metadata so name and version can be asserted directly.
 	if !ok || serverInfo["name"] != "MCP Mobile Worker" || serverInfo["version"] != "1.0.0" { // Assert the exposed server identity so client diagnostics remain stable.
@@ -106,6 +108,26 @@ func TestToolRegistryCatalogAndValidation(t *testing.T) {
 	mcpErr := mustMCPError(t, registry.Validate("startSession", invalidArgs), -32602) // Validate the invalid payload and assert the schema-failure MCP code.
 	if mcpErr.Message != "Schema validation failed" {                                 // Assert the stable validation message so clients can classify input failures consistently.
 		t.Fatalf("expected schema validation failure message, got %q", mcpErr.Message) // Surface the actual message so validation regressions are easy to diagnose.
+	}
+}
+
+// TestNewMCPHandlerWithConfigRemovesADBShell verifies that the gateway-level adbShell disable flag removes the tool from MCP discovery and invocation.
+func TestNewMCPHandlerWithConfigRemovesADBShell(t *testing.T) {
+	handler := NewMCPHandlerWithConfig(nil, config.GatewayConfig{DisableADBShellTool: true}) // Construct one MCP handler with adbShell explicitly disabled so discovery and call-path shaping can be asserted directly.
+	tools := handler.registry.List()                                                         // Read the live filtered registry so the externally visible tool catalog can be asserted directly.
+	if len(tools) != expectedToolCatalogSize-1 {                                             // Fail when disabling adbShell does not reduce the live tool count by one.
+		t.Fatalf("expected %d tools with adbShell disabled, got %d", expectedToolCatalogSize-1, len(tools)) // Surface the unexpected count so kill-switch regressions are obvious.
+	}
+	if _, exists := handler.registry.Get("adbShell"); exists { // Fail when the disabled tool still exists in the validation registry.
+		t.Fatal("expected adbShell to be removed from the MCP registry when disabled") // Surface the unexpected registry entry so kill-switch regressions are obvious.
+	}
+	params := json.RawMessage(`{"name":"adbShell","arguments":{"deviceSerial":"emulator-5554","command":["getprop","ro.build.version.sdk"]}}`) // Build one syntactically valid adbShell request so the production tools/call rejection path can be exercised directly.
+	mcpErr := mustMCPError(t, func() error {                                                                                                   // Execute the production tools/call path and capture the disabled-tool rejection for structured assertions.
+		_, err := handler.ToolsCall(context.Background(), params) // Invoke the production tools/call entry point with adbShell while the tool is disabled.
+		return err                                                // Return the produced error so the shared MCP assertion helper can inspect it.
+	}(), -32601)
+	if mcpErr.Message != "Tool not found: adbShell" { // Fail when the disabled tool no longer maps to the standard tool-not-found protocol error.
+		t.Fatalf("expected adbShell tool-not-found message, got %q", mcpErr.Message) // Surface the unexpected message so disablement regressions are easy to diagnose.
 	}
 }
 

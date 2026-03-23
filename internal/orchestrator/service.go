@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -42,26 +41,29 @@ type deviceFarmUploadMeta struct {
 }
 
 type Service struct {
-	cfg          config.OrchestratorConfig
-	rpcSecurity  config.RPCSecurityConfig
-	dao          *postgres.DAO
-	cache        *redis.Cache
-	s3           *s3.Client
-	dispatcher   *Dispatcher
-	registry     *WorkerRegistry
-	publisher    *EventsPublisher
-	appiumURL    string
-	appiumMu     sync.Mutex
-	appiumMap    map[string]*appium.Client
-	planMu       sync.Mutex
-	planCancel   map[string]context.CancelFunc
-	snapshotMu   sync.Mutex
-	snapshots    map[string]*snapshotCache
-	logger       *slog.Logger
-	execMode     string
-	deviceFarm   *devicefarm.Client
-	dfMode       string
-	dfProjectARN string
+	cfg            config.OrchestratorConfig
+	rpcSecurity    config.RPCSecurityConfig
+	dao            *postgres.DAO
+	cache          *redis.Cache
+	s3             *s3.Client
+	dispatcher     *Dispatcher
+	registry       *WorkerRegistry
+	publisher      *EventsPublisher
+	appiumURL      string
+	appiumMu       sync.Mutex
+	appiumMap      map[string]*appium.Client
+	appiumLastUsed map[string]time.Time
+	planMu         sync.Mutex
+	planCancel     map[string]context.CancelFunc
+	snapshotMu     sync.Mutex
+	snapshots      map[string]*snapshotCache
+	cleanupCancel  context.CancelFunc
+	cleanupWG      sync.WaitGroup
+	logger         *slog.Logger
+	execMode       string
+	deviceFarm     *devicefarm.Client
+	dfMode         string
+	dfProjectARN   string
 }
 
 // NewService executes this operation.
@@ -72,21 +74,22 @@ func NewService(cfg config.OrchestratorConfig, rpcCfg config.RPCSecurityConfig, 
 	publisher := NewEventsPublisher(dao, cache)
 
 	svc := &Service{
-		cfg:          cfg,
-		rpcSecurity:  rpcCfg,
-		dao:          dao,
-		cache:        cache,
-		s3:           s3,
-		registry:     registry,
-		publisher:    publisher,
-		appiumURL:    workerCfg.AppiumURL,
-		appiumMap:    make(map[string]*appium.Client),
-		planCancel:   make(map[string]context.CancelFunc),
-		snapshots:    make(map[string]*snapshotCache),
-		logger:       telemetry.Logger(),
-		execMode:     mode,
-		dfMode:       strings.ToLower(strings.TrimSpace(dfCfg.Mode)),
-		dfProjectARN: strings.TrimSpace(dfCfg.ProjectARN),
+		cfg:            cfg,
+		rpcSecurity:    rpcCfg,
+		dao:            dao,
+		cache:          cache,
+		s3:             s3,
+		registry:       registry,
+		publisher:      publisher,
+		appiumURL:      workerCfg.AppiumURL,
+		appiumMap:      make(map[string]*appium.Client),
+		appiumLastUsed: make(map[string]time.Time),
+		planCancel:     make(map[string]context.CancelFunc),
+		snapshots:      make(map[string]*snapshotCache),
+		logger:         telemetry.Logger(),
+		execMode:       mode,
+		dfMode:         strings.ToLower(strings.TrimSpace(dfCfg.Mode)),
+		dfProjectARN:   strings.TrimSpace(dfCfg.ProjectARN),
 	}
 
 	// Initialize Device Farm SDK client when run_api mode is explicitly enabled.
@@ -130,6 +133,9 @@ func (s *Service) Start(ctx context.Context) error {
 	// Start worker registry monitor
 	s.registry.StartMonitor(ctx)
 
+	// Start background in-memory cache cleanup.
+	s.startCleanupLoop(ctx)
+
 	s.logger.Info("orchestrator service started")
 	return nil
 }
@@ -137,9 +143,16 @@ func (s *Service) Start(ctx context.Context) error {
 // Stop stops the orchestrator service
 func (s *Service) Stop() {
 	s.logger.Info("stopping orchestrator service")
-	s.dispatcher.Stop()
-	s.registry.Stop()
-	s.logger.Info("orchestrator service stopped")
+	s.stopCleanupLoop()
+	cancelledPlans := s.cancelTrackedPlans() // Cancel every tracked in-flight plan so shutdown does not leave stale cancel handles or live execution contexts behind.
+	if s.dispatcher != nil {
+		s.dispatcher.Stop()
+	}
+	if s.registry != nil {
+		s.registry.Stop()
+	}
+	removedAppiumClients, removedSnapshots := s.clearInMemoryCaches() // Drop every remaining cached Appium client and snapshot entry so shutdown leaves no in-memory residue behind.
+	s.logger.Info("orchestrator service stopped", "cancelled_plans", cancelledPlans, "removed_appium_clients", removedAppiumClients, "removed_snapshots", removedSnapshots)
 }
 
 // StartSession executes this operation.
@@ -192,6 +205,7 @@ func (s *Service) StartSession(ctx context.Context, projectID string, caps map[s
 
 	s.appiumMu.Lock()
 	s.appiumMap[sessID] = app
+	s.appiumLastUsed[sessID] = time.Now()
 	s.appiumMu.Unlock()
 
 	s.logger.InfoContext(ctx, "orchestrator StartSession done", "project_id", projectID, "session_id", sessID, "appium_session_id", appiumSessionID, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful method completion and key identifiers.
@@ -297,6 +311,7 @@ func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 	s.appiumMu.Lock()
 	app := s.appiumMap[sessionID]
 	delete(s.appiumMap, sessionID)
+	delete(s.appiumLastUsed, sessionID)
 	s.appiumMu.Unlock()
 
 	if app != nil {
@@ -439,7 +454,11 @@ func (s *Service) TakeScreenshot(ctx context.Context, sessionID string, traceID 
 		"full": fullRef,
 	}
 	if includeThumb {
-		thumbRef, err := s.storeArtifact(ctx, traceID, "screenshot_thumb.png", "image/png", data)
+		thumbData, err := buildScreenshotThumbnail(data, 640)
+		if err != nil {
+			return nil, err
+		}
+		thumbRef, err := s.storeArtifact(ctx, traceID, "screenshot_thumb.png", "image/png", thumbData)
 		if err != nil {
 			return nil, err
 		}
@@ -457,6 +476,9 @@ func (s *Service) getAppiumClient(ctx context.Context, sessionID string) (*appiu
 
 	s.appiumMu.Lock()
 	app := s.appiumMap[sessionID]
+	if app != nil {
+		s.appiumLastUsed[sessionID] = time.Now()
+	}
 	s.appiumMu.Unlock()
 	if app == nil {
 		appiumSessionID, err := s.cache.Get(ctx, appiumSessionKeyPrefix+sessionID)
@@ -476,8 +498,10 @@ func (s *Service) getAppiumClient(ctx context.Context, sessionID string) (*appiu
 		s.appiumMu.Lock()
 		if existing := s.appiumMap[sessionID]; existing != nil {
 			app = existing
+			s.appiumLastUsed[sessionID] = time.Now()
 		} else {
 			s.appiumMap[sessionID] = restored
+			s.appiumLastUsed[sessionID] = time.Now()
 			app = restored
 		}
 		s.appiumMu.Unlock()
@@ -873,30 +897,10 @@ func (s *Service) AdbShell(ctx context.Context, deviceSerial string, command []s
 	startedAt := time.Now()                                                                                                        // Capture method start for per-command latency logging.
 	s.logger.InfoContext(ctx, "orchestrator AdbShell begin", "device_serial", strings.TrimSpace(deviceSerial), "command", command) // Log adb command invocation.
 
-	// Ensure a non-empty command body before attempting adb invocation.
-	if len(command) == 0 {
-		s.logger.ErrorContext(ctx, "orchestrator AdbShell failed", "device_serial", strings.TrimSpace(deviceSerial), "duration_ms", time.Since(startedAt).Milliseconds(), "error", "adb command must not be empty") // Log empty command validation failure.
-		return nil, errors.New(errors.CodePlanInvalid, "adb command must not be empty")
-	}
-
-	// Restrict shell entry points to a conservative command whitelist.
-	allowed := map[string]bool{
-		"getprop":  true,
-		"dumpsys":  true,
-		"pm":       true,
-		"settings": true,
-		"am":       true,
-		"input":    true,
-		"logcat":   true,
-		"wm":       true,
-		"svc":      true,
-		"ime":      true,
-		"monkey":   true,
-	}
-	// Reject non-whitelisted commands to reduce risk from arbitrary shell execution.
-	if !allowed[command[0]] {
-		s.logger.ErrorContext(ctx, "orchestrator AdbShell failed", "device_serial", strings.TrimSpace(deviceSerial), "duration_ms", time.Since(startedAt).Milliseconds(), "error", "adb command is not in allowed whitelist", "command_head", command[0]) // Log whitelist rejections with command head.
-		return nil, errors.New(errors.CodePermissionDenied, "adb command is not in allowed whitelist")
+	validatedCommand, err := validateADBCommand(command) // Normalize the request tokens and enforce the reviewed adb subcommand and parameter policy before any subprocess starts.
+	if err != nil {                                      // Stop immediately when the command family, subcommand, or parameters fall outside the reviewed safe surface.
+		s.logger.ErrorContext(ctx, "orchestrator AdbShell failed", "device_serial", strings.TrimSpace(deviceSerial), "duration_ms", time.Since(startedAt).Milliseconds(), "error", err, "command_head", firstCommandToken(command)) // Log policy rejections with the first token for security diagnostics.
+		return nil, err                                                                                                                                                                                                             // Preserve the stable validation or permission error returned by the adb command policy helper.
 	}
 
 	// Build adb argv with optional target serial selection.
@@ -906,10 +910,10 @@ func (s *Service) AdbShell(ctx context.Context, deviceSerial string, command []s
 	}
 	// Route all requests through adb shell with the provided command tokens.
 	args = append(args, "shell")
-	args = append(args, command...)
+	args = append(args, validatedCommand...)
 
 	// Execute the command and collect merged stdout/stderr for diagnostics.
-	out, err := exec.CommandContext(ctx, "adb", args...).CombinedOutput()
+	out, err := adbCommandContext(ctx, "adb", args...).CombinedOutput()
 	if err != nil {
 		s.logger.ErrorContext(ctx, "orchestrator AdbShell failed", "device_serial", strings.TrimSpace(deviceSerial), "duration_ms", time.Since(startedAt).Milliseconds(), "error", err, "output_bytes", len(out)) // Log execution failure and output size.
 		return nil, errors.Wrap(errors.CodeInternal, "adb shell command failed: "+strings.TrimSpace(string(out)), err)
@@ -922,6 +926,14 @@ func (s *Service) AdbShell(ctx context.Context, deviceSerial string, command []s
 	}
 	s.logger.InfoContext(ctx, "orchestrator AdbShell done", "device_serial", strings.TrimSpace(deviceSerial), "duration_ms", time.Since(startedAt).Milliseconds(), "output_bytes", len(out)) // Log successful command completion and output size.
 	return result, nil
+}
+
+// firstCommandToken returns the first token from one requested adb command for logging purposes.
+func firstCommandToken(command []string) string {
+	if len(command) == 0 { // Guard against empty slices so log calls never panic while formatting rejected requests.
+		return "" // Return the empty string because no first token exists on an empty command slice.
+	}
+	return strings.TrimSpace(command[0]) // Return the trimmed first token so policy-rejection logs expose the actual requested command family.
 }
 
 func deviceFarmProjectCacheSuffix(projectARN string) string {

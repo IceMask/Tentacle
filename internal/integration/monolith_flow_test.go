@@ -2,9 +2,13 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"net"
 	"net/http"
 	"os"
@@ -48,6 +52,24 @@ type fakeAppiumServer struct {
 	sendKeysTexts   []string
 	deletedSessions []string
 	findElementID   string
+}
+
+// fakeScreenshotPNGBytes stores one deterministic valid PNG screenshot payload used by the fake Appium server across integration tests.
+var fakeScreenshotPNGBytes = buildFakeScreenshotPNG() // Build one reusable valid screenshot payload so integration tests can exercise real thumbnail decoding and resizing paths.
+
+// buildFakeScreenshotPNG creates one deterministic 800x400 PNG payload used by the fake Appium server screenshot endpoint.
+func buildFakeScreenshotPNG() []byte {
+	img := image.NewNRGBA(image.Rect(0, 0, 800, 400)) // Allocate one realistic screenshot-sized image so thumbnail integration tests can exercise real resize behavior.
+	fill := color.NRGBA{R: 24, G: 48, B: 96, A: 255}  // Define one stable fill color so the generated PNG bytes remain deterministic enough for integration tests.
+	for y := 0; y < 400; y++ {                        // Fill every source row so the generated PNG represents one complete fake screenshot image.
+		for x := 0; x < 800; x++ { // Fill every source column so the generated PNG represents one complete fake screenshot image.
+			img.Set(x, y, fill) // Write the stable fill color into the current fake screenshot pixel.
+		}
+	}
+
+	var output bytes.Buffer      // Allocate the PNG output buffer so the fake screenshot image can be reused across test requests.
+	_ = png.Encode(&output, img) // Encode the deterministic fake screenshot image into PNG bytes for later base64 transport through the fake Appium server.
+	return output.Bytes()        // Return the encoded PNG bytes so the fake Appium server can expose one valid screenshot payload.
 }
 
 // newFakeAppiumServer starts one IPv4 loopback HTTP server that implements the minimal Appium endpoints required by the monolith integration flow.
@@ -155,11 +177,11 @@ func (f *fakeAppiumServer) handleSessionScoped(w http.ResponseWriter, r *http.Re
 		return                                                                                         // Stop handling once the send-keys response has been written.
 	}
 	if len(parts) == 2 && parts[1] == "screenshot" && r.Method == http.MethodGet { // Handle GET /session/{id}/screenshot used only if failure paths attempt artifact capture.
-		f.mu.Lock()                                                                                                                        // Protect the fake Appium server state because screenshots can race with later assertions in artifact-focused tests.
-		f.usedSessionIDs = append(f.usedSessionIDs, sessionID)                                                                             // Record the scoped Appium session id so integration tests can verify which underlying session every command targeted.
-		f.mu.Unlock()                                                                                                                      // Release the fake Appium server state lock before writing the HTTP response.
-		writeJSONResponse(w, http.StatusOK, map[string]interface{}{"value": base64.StdEncoding.EncodeToString([]byte("fake-screenshot"))}) // Return one valid base64 screenshot payload so unexpected failure-path captures still decode correctly.
-		return                                                                                                                             // Stop handling once the screenshot response has been written.
+		f.mu.Lock()                                                                                                                     // Protect the fake Appium server state because screenshots can race with later assertions in artifact-focused tests.
+		f.usedSessionIDs = append(f.usedSessionIDs, sessionID)                                                                          // Record the scoped Appium session id so integration tests can verify which underlying session every command targeted.
+		f.mu.Unlock()                                                                                                                   // Release the fake Appium server state lock before writing the HTTP response.
+		writeJSONResponse(w, http.StatusOK, map[string]interface{}{"value": base64.StdEncoding.EncodeToString(fakeScreenshotPNGBytes)}) // Return one valid base64 PNG screenshot payload so thumbnail and artifact flows can exercise real image decoding and resizing.
+		return                                                                                                                          // Stop handling once the screenshot response has been written.
 	}
 	if len(parts) == 2 && parts[1] == "source" && r.Method == http.MethodGet { // Handle GET /session/{id}/source so snapshot and debug paths can succeed if touched unexpectedly.
 		f.mu.Lock()                                                                          // Protect the fake Appium server state because source reads can race with later assertions in snapshot-focused tests.

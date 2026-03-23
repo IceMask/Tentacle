@@ -36,6 +36,11 @@ func (f *fakeSessionAwareAppiumClient) SendKeys(ctx context.Context, elementID, 
 	return nil // Return success so any unexpected sendKeys still keeps the worker test focused on callback wiring.
 }
 
+// Clear returns success immediately because the wait-only test plan never needs real clear-element behavior.
+func (f *fakeSessionAwareAppiumClient) Clear(ctx context.Context, elementID string) error {
+	return nil // Return success so any unexpected clear still keeps the worker test focused on callback wiring.
+}
+
 // Screenshot returns one deterministic fake image payload because the wait-only test plan never needs real screenshot behavior.
 func (f *fakeSessionAwareAppiumClient) Screenshot(ctx context.Context) ([]byte, error) {
 	return []byte("fake-screenshot"), nil // Return one fake screenshot payload so any unexpected failure-path capture still succeeds during the test.
@@ -44,6 +49,31 @@ func (f *fakeSessionAwareAppiumClient) Screenshot(ctx context.Context) ([]byte, 
 // PageSource returns one deterministic fake page source because the wait-only test plan never needs real page-source behavior.
 func (f *fakeSessionAwareAppiumClient) PageSource(ctx context.Context) (string, error) {
 	return "<hierarchy/>", nil // Return one fake page source payload so any unexpected snapshot read still succeeds during the test.
+}
+
+// Tap returns success immediately because the wait-only test plan never needs real tap behavior.
+func (f *fakeSessionAwareAppiumClient) Tap(ctx context.Context, x int, y int) error {
+	return nil // Return success so any unexpected tap still keeps the worker test focused on callback wiring.
+}
+
+// Swipe returns success immediately because the wait-only test plan never needs real swipe behavior.
+func (f *fakeSessionAwareAppiumClient) Swipe(ctx context.Context, x1 int, y1 int, x2 int, y2 int, durationMs int) error {
+	return nil // Return success so any unexpected swipe still keeps the worker test focused on callback wiring.
+}
+
+// LongPress returns success immediately because the wait-only test plan never needs real long-press behavior.
+func (f *fakeSessionAwareAppiumClient) LongPress(ctx context.Context, elementID string, durationMs int) error {
+	return nil // Return success so any unexpected long press still keeps the worker test focused on callback wiring.
+}
+
+// Back returns success immediately because the wait-only test plan never needs real back-button behavior.
+func (f *fakeSessionAwareAppiumClient) Back(ctx context.Context) error {
+	return nil // Return success so any unexpected back navigation still keeps the worker test focused on callback wiring.
+}
+
+// HideKeyboard returns success immediately because the wait-only test plan never needs real keyboard-dismiss behavior.
+func (f *fakeSessionAwareAppiumClient) HideKeyboard(ctx context.Context) error {
+	return nil // Return success so any unexpected hide-keyboard action still keeps the worker test focused on callback wiring.
 }
 
 // fakeDistributedReporter records distributed worker callbacks emitted by the worker gRPC server under test.

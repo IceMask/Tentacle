@@ -4,6 +4,8 @@
 gateway:
   port: 8443
   enable_tls: true
+  # Production deployments should disable adbShell unless the environment explicitly requires device-shell diagnostics.
+  disable_adb_shell_tool: true
   tls_cert_file: /etc/mcp_for_appium/tls/server.crt
   tls_key_file: /etc/mcp_for_appium/tls/server.key
   shutdown_timeout: 30s

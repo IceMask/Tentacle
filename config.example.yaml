@@ -6,6 +6,8 @@ gateway:
   # Local development keeps TLS disabled explicitly.
   # For production-facing defaults, start from config.production.example.yaml instead.
   enable_tls: false
+  # Set true to remove the adbShell tool from discovery and invocation entirely.
+  disable_adb_shell_tool: false
   tls_cert_file: ""
   tls_key_file: ""
   shutdown_timeout: 30s

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/errors"
 	"mcp_for_appium/internal/gateway/capabilities"
 	"mcp_for_appium/internal/gateway/mcp"
@@ -23,9 +24,13 @@ type Handler struct {
 
 // NewHandler executes this operation.
 func NewHandler(orch *orchestrator.Service, capSvc *capabilities.Service) *Handler {
+	adbShellEnabled := true // Default to the historical tool surface when no capability service is supplied.
+	if capSvc != nil {      // Read operator-shaped capability flags when discovery service wiring is available.
+		adbShellEnabled = capSvc.ADBShellToolEnabled() // Reuse the capability service as the single gateway-level source of truth for adbShell exposure.
+	}
 	return &Handler{
 		orch:       orch,
-		mcpHandler: mcp.NewMCPHandler(orch),
+		mcpHandler: mcp.NewMCPHandlerWithConfig(orch, config.GatewayConfig{DisableADBShellTool: !adbShellEnabled}),
 		capService: capSvc,
 		validator:  NewValidator(),
 	}
@@ -48,8 +53,8 @@ type Response struct {
 // ProcessRequest processes a JSON-RPC request and returns the result or error
 // This method is used by both HTTP and stdio transports
 func (h *Handler) ProcessRequest(ctx context.Context, req *Request) (interface{}, error) {
-	logger := telemetry.WithContext(ctx) // Build context-enriched logger so per-request logs carry trace ids when available.
-	startedAt := time.Now()              // Capture dispatch start timestamp for duration reporting.
+	logger := telemetry.WithContext(ctx)                                     // Build context-enriched logger so per-request logs carry trace ids when available.
+	startedAt := time.Now()                                                  // Capture dispatch start timestamp for duration reporting.
 	logger.Info("jsonrpc process begin", "method", req.Method, "id", req.ID) // Log every JSON-RPC method entry for step-by-step tracing.
 
 	var result interface{}

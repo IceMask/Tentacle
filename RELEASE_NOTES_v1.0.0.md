@@ -10,7 +10,7 @@ This document is a draft release-notes package for the first stable release cut.
 
 ## Highlights
 
-- Standard MCP, JSON-RPC, REST, gRPC, WebSocket, and stdio gateway entry points remain available.
+- Standard MCP, JSON-RPC, gRPC, WebSocket, stdio, and HTTP auxiliary gateway entry points remain available.
 - Distributed execution now includes worker-to-orchestrator callbacks, execution-attempt tracking, Redis-backed ownership leases, worker recovery handling, and stale-result protection.
 - Authentication and transport controls now include PAT mode selection, HMAC canonical request signing, persisted session/trace ownership checks for WebSocket subscription issuance, and configurable internal RPC security modes.
 - Repository release hygiene now includes a top-level changelog, a general CI workflow, migration replay verification, and an explicit release checklist.
@@ -44,6 +44,7 @@ Apply these migrations in order:
 
 - `internal/storage/postgres/migrations/001_init.sql`
 - `internal/storage/postgres/migrations/002_audit_logs.sql`
+- `internal/storage/postgres/migrations/003_reserved_slot.sql`
 - `internal/storage/postgres/migrations/004_pat_tokens.sql`
 - `internal/storage/postgres/migrations/005_hmac_keys.sql`
 - `internal/storage/postgres/migrations/006_trace_execution_state.sql`
@@ -75,7 +76,7 @@ The latest migrations add:
 
 - `distributed` is intentionally shipped as `experimental` in the first stable release, even though the core correctness and end-to-end validation work is now in place.
 - Repository-level branch protection still must be configured in GitHub so the general CI workflow becomes an enforced merge gate instead of a documented expectation.
-- Some packages still have no direct tests and are covered only indirectly or not yet at all.
+- The repository now has broad direct package-test coverage, but some support paths are still lighter smoke tests than the core execution, gateway, and migration flows.
 - The repository still needs final version-story cleanup between the `v4.3` and `v4.4` document sets before a clean `v1.0.0` tag.
 
 ## Rollback Guidance

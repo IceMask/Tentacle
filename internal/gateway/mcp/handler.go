@@ -8,22 +8,41 @@ import (
 	"strings"
 	"time"
 
+	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/devicefarm"
 	"mcp_for_appium/internal/orchestrator"
+	"mcp_for_appium/internal/storage/postgres"
 	"mcp_for_appium/internal/telemetry"
+	"mcp_for_appium/internal/worker"
 )
 
 // MCPHandler handles MCP protocol methods
 type MCPHandler struct {
-	registry *ToolRegistry
-	orch     *orchestrator.Service
+	registry         *ToolRegistry
+	orch             *orchestrator.Service
+	adbShellDisabled bool
 }
+
+const (
+	defaultExecutePlanWaitTimeout = 60 * time.Second       // defaultExecutePlanWaitTimeout bounds MCP synchronous executePlan waits when the caller does not supply one explicit timeout.
+	executePlanPollInterval       = 100 * time.Millisecond // executePlanPollInterval defines how often the MCP wait loop re-reads the trace while waiting for terminal completion.
+)
 
 // NewMCPHandler creates a new MCP handler
 func NewMCPHandler(orch *orchestrator.Service) *MCPHandler {
+	return NewMCPHandlerWithConfig(orch, config.GatewayConfig{}) // Construct the default handler with the repository's normal tool surface when no gateway config is supplied.
+}
+
+// NewMCPHandlerWithConfig creates one MCP handler whose tool registry reflects the operator-level gateway tool disablement flags.
+func NewMCPHandlerWithConfig(orch *orchestrator.Service, gatewayCfg config.GatewayConfig) *MCPHandler {
+	registry := NewToolRegistry()       // Load the full embedded MCP tool registry before applying operator-level disablement flags.
+	if gatewayCfg.DisableADBShellTool { // Remove adbShell from discovery and validation entirely when the operator disables the tool.
+		delete(registry.tools, "adbShell") // Delete the tool definition from the live registry so tools/list and tools/call both stop exposing it.
+	}
 	return &MCPHandler{
-		registry: NewToolRegistry(),
-		orch:     orch,
+		registry:         registry,                       // Preserve the filtered live registry so discovery and validation stay aligned.
+		orch:             orch,                           // Preserve the orchestrator dependency for tool execution paths.
+		adbShellDisabled: gatewayCfg.DisableADBShellTool, // Preserve the operator-level disable flag for direct safety checks inside adbShell execution.
 	}
 }
 
@@ -54,7 +73,7 @@ func (h *MCPHandler) Initialize(ctx context.Context, params json.RawMessage) (in
 				"listChanged": false, // Tools don't change dynamically
 			},
 			"resources": map[string]interface{}{
-				"subscribe":   true, // Support resource subscriptions
+				"subscribe":   false, // Advertise no MCP resource subscriptions because this server does not implement resources/subscribe today.
 				"listChanged": false,
 			},
 		},
@@ -103,7 +122,7 @@ func (h *MCPHandler) ToolsCall(ctx context.Context, params json.RawMessage) (int
 	result, err := h.executeTool(ctx, p.Name, p.Arguments)
 	if err != nil {
 		logger.Error("mcp tools/call execute failed", "tool", p.Name, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log tool execution failures with elapsed time.
-		return nil, normalizeToolError(p.Name, err) // Normalize per-tool errors into structured MCP payloads.
+		return nil, normalizeToolError(p.Name, err)                                                                                      // Normalize per-tool errors into structured MCP payloads.
 	}
 
 	// Wrap result in MCP format
@@ -117,7 +136,7 @@ func (h *MCPHandler) ToolsCall(ctx context.Context, params json.RawMessage) (int
 		"isError": false,
 	}
 	logger.Info("mcp tools/call done", "tool", p.Name, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful tool completion with elapsed time.
-	return response, nil                                                                                        // Return standard MCP response and nil error.
+	return response, nil                                                                                    // Return standard MCP response and nil error.
 }
 
 // internalCodePattern matches internal error markers like [E.CONFIG.MISSING] inside wrapped error strings.
@@ -168,7 +187,7 @@ func stringifyErrorData(data interface{}, fallback error) string {
 // extractInternalCode executes this operation.
 func extractInternalCode(raw string) string {
 	matches := internalCodePattern.FindAllStringSubmatch(raw, -1) // Collect all embedded internal codes from wrapped error chains.
-	if len(matches) == 0 {                                         // Return empty code when source text has no standardized marker.
+	if len(matches) == 0 {                                        // Return empty code when source text has no standardized marker.
 		return ""
 	}
 	last := matches[len(matches)-1] // Use the innermost/root cause code from the wrapped chain.
@@ -370,6 +389,9 @@ func (h *MCPHandler) handleGetDeviceFarmRun(ctx context.Context, arguments json.
 
 // handleAdbShell executes this operation.
 func (h *MCPHandler) handleAdbShell(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
+	if h.adbShellDisabled { // Reject direct adbShell execution when the operator-level disable flag has removed the tool from the public registry.
+		return nil, &MCPError{Code: -32601, Message: "Tool not found: adbShell"} // Return the standard tool-not-found protocol error so callers observe the same behavior as an absent tool definition.
+	}
 	var args struct {
 		DeviceSerial string   `json:"deviceSerial"`
 		Command      []string `json:"command"`
@@ -424,9 +446,11 @@ func (h *MCPHandler) handleStartSession(ctx context.Context, arguments json.RawM
 // handleExecutePlan executes this operation.
 func (h *MCPHandler) handleExecutePlan(ctx context.Context, arguments json.RawMessage) (interface{}, error) {
 	var args struct {
-		SessionID string          `json:"sessionId"`
-		Plan      json.RawMessage `json:"plan"`
-		TraceID   string          `json:"traceId"`
+		SessionID         string          `json:"sessionId"`
+		Plan              json.RawMessage `json:"plan"`
+		TraceID           string          `json:"traceId"`
+		WaitForCompletion *bool           `json:"waitForCompletion"`
+		WaitTimeoutMs     int             `json:"waitTimeoutMs"`
 	}
 
 	if err := json.Unmarshal(arguments, &args); err != nil {
@@ -447,10 +471,143 @@ func (h *MCPHandler) handleExecutePlan(ctx context.Context, arguments json.RawMe
 		}
 	}
 
-	return map[string]interface{}{
-		"traceId": traceID,
-		"status":  "running",
-	}, nil
+	waitForCompletion := true          // Default MCP executePlan to synchronous waiting so stdio clients can receive one terminal result when feasible.
+	if args.WaitForCompletion != nil { // Respect the caller's explicit wait preference when one was supplied in the tool arguments.
+		waitForCompletion = *args.WaitForCompletion // Override the default behavior with the caller-provided value.
+	}
+	if !waitForCompletion { // Preserve the legacy asynchronous submit path when the caller opts out of synchronous waiting explicitly.
+		return map[string]interface{}{ // Return the accepted trace identifier immediately so polling clients can continue to use getTrace manually.
+			"traceId":             traceID,
+			"status":              "running",
+			"waitedForCompletion": false,
+			"pollingRequired":     true,
+		}, nil
+	}
+
+	totalSteps := int64(0)                                               // Default the total step count to zero so progress notifications can omit totals when parsing fails here.
+	if steps, parseErr := worker.ParsePlan(args.Plan); parseErr == nil { // Parse the submitted plan best-effort so progress notifications can expose a useful total without changing scheduling semantics.
+		totalSteps = int64(len(steps)) // Store the parsed step count so the wait loop can emit stable progress totals and return them in the final payload.
+	}
+
+	waitTimeout := defaultExecutePlanWaitTimeout // Start from the default wait timeout so MCP callers receive bounded synchronous behavior even without one explicit timeout.
+	if args.WaitTimeoutMs > 0 {                  // Respect the caller-supplied timeout when one positive millisecond value was provided.
+		waitTimeout = time.Duration(args.WaitTimeoutMs) * time.Millisecond // Convert the caller-provided millisecond timeout into one duration used by the wait loop.
+	}
+
+	waitCtx := ctx              // Start from the request context so authentication metadata and cancellation propagate into the wait loop.
+	cancelWait := func() {}     // Default to one no-op cancel so the defer below remains unconditional even when no derived timeout context is created.
+	if args.WaitTimeoutMs > 0 { // Respect an explicit per-call wait timeout even when the parent request context already carries its own deadline.
+		waitCtx, cancelWait = context.WithTimeout(ctx, waitTimeout) // Derive one bounded wait context so the caller-supplied timeout participates in the wait loop.
+	} else if _, hasDeadline := ctx.Deadline(); !hasDeadline { // Add one default local timeout only when the caller context itself does not already impose one deadline.
+		waitCtx, cancelWait = context.WithTimeout(ctx, waitTimeout) // Derive one bounded wait context so stdio tools/call does not block forever on long-running traces by default.
+	}
+	defer cancelWait() // Release the derived timeout timer promptly once the wait loop exits.
+
+	_ = ReportProgress(ctx, 0, totalSteps, "trace accepted") // Emit one initial progress notification best-effort so MCP clients can render immediate feedback before polling begins.
+
+	result, err := h.waitForTraceCompletion(waitCtx, ctx, traceID, totalSteps) // Block until the trace becomes terminal or the optional local wait timeout elapses.
+	if err != nil {                                                            // Map wait-loop failures into one structured MCP tool error so clients still receive tool-level context.
+		return nil, &MCPError{ // Preserve the underlying wait-loop error text inside the MCP error payload for diagnosis.
+			Code:    -32000,
+			Message: "Failed to wait for trace completion",
+			Data:    err.Error(),
+		}
+	}
+
+	return result, nil // Return the terminal or timed-out trace snapshot after the synchronous wait path completes.
+}
+
+// waitForTraceCompletion polls one trace until it reaches a terminal state or the local MCP wait timeout elapses.
+func (h *MCPHandler) waitForTraceCompletion(waitCtx context.Context, fallbackCtx context.Context, traceID string, totalSteps int64) (map[string]interface{}, error) {
+	ticker := time.NewTicker(executePlanPollInterval) // Poll the live trace on one fixed interval so short plans complete promptly without busy waiting.
+	defer ticker.Stop()                               // Release ticker resources promptly once the wait loop exits for any reason.
+
+	lastStatus := ""          // Track the last emitted trace status so duplicate progress notifications are avoided when nothing meaningful changes.
+	lastComplete := int64(-1) // Track the last emitted completed-step count so duplicate progress notifications are avoided during polling.
+
+	for { // Continue polling until the trace becomes terminal or one cancellation/timeout path ends the wait loop.
+		trace, events, err := h.orch.GetTrace(waitCtx, traceID) // Read the current trace snapshot and replayable events through the production orchestrator API.
+		if err != nil {                                         // Decide whether the read failure came from wait cancellation or from one actual service-layer error.
+			if waitCtx.Err() != nil { // Break cleanly when the derived wait context has ended because the caller cancelled or the local timeout expired.
+				break // Exit the polling loop so timeout/cancellation handling below can choose between one partial result and one hard error.
+			}
+			return nil, err // Surface non-timeout trace read failures directly because they indicate one actual orchestrator or storage problem.
+		}
+
+		completedSteps := countCompletedPlanSteps(events)                 // Count unique terminal step events so progress notifications reflect actual plan-step completion.
+		if completedSteps != lastComplete || trace.Status != lastStatus { // Emit progress only when either step completion or trace status changed since the previous poll.
+			_ = ReportProgress(waitCtx, completedSteps, totalSteps, "trace "+trace.Status) // Emit one best-effort progress notification so stdio MCP clients receive real-time updates.
+			lastComplete = completedSteps                                                  // Record the emitted completed-step count so duplicate notifications are suppressed on later polls.
+			lastStatus = trace.Status                                                      // Record the emitted trace status so duplicate notifications are suppressed on later polls.
+		}
+		if isTerminalTraceStatus(trace.Status) { // Stop waiting once the trace has reached one terminal lifecycle state in the authoritative store.
+			return buildExecutePlanWaitResult(traceID, trace, events, totalSteps, completedSteps, false), nil // Return the terminal trace snapshot and replayable events to the MCP client.
+		}
+
+		select {
+		case <-waitCtx.Done(): // Stop waiting promptly when the caller cancels or the local wait timeout expires.
+			break // Exit the polling loop so timeout/cancellation handling below can decide whether to return one partial result or one hard error.
+		case <-ticker.C: // Wait for the next polling interval before re-reading the trace state.
+			continue // Continue the polling loop on the next interval so terminal state changes are observed promptly.
+		}
+		break // Exit the polling loop after the wait context ended.
+	}
+
+	if waitCtx.Err() != nil && fallbackCtx.Err() == nil { // Return one partial result only when the local wait timeout elapsed while the parent request context is still alive.
+		trace, events, err := h.orch.GetTrace(fallbackCtx, traceID) // Re-read the current trace snapshot through the still-live parent context so timeout responses include the freshest persisted state.
+		if err != nil {                                             // Fall back to one minimal timeout payload when the trace can no longer be read even through the parent request context.
+			return map[string]interface{}{ // Return the accepted trace id and timeout marker so the client still knows which trace to inspect later.
+				"traceId":             traceID,
+				"status":              "running",
+				"waitedForCompletion": true,
+				"waitTimedOut":        true,
+				"pollingRequired":     true,
+			}, nil
+		}
+		return buildExecutePlanWaitResult(traceID, trace, events, totalSteps, countCompletedPlanSteps(events), true), nil // Return one partial timeout snapshot that still includes the current trace state and replayable events.
+	}
+
+	return nil, waitCtx.Err() // Surface caller-driven cancellation or parent-deadline expiry as one hard error because the request itself is no longer valid to complete.
+}
+
+// buildExecutePlanWaitResult assembles one consistent MCP executePlan wait payload for terminal and timed-out traces alike.
+func buildExecutePlanWaitResult(traceID string, trace *postgres.Trace, events []*postgres.PlanEvent, totalSteps int64, completedSteps int64, waitTimedOut bool) map[string]interface{} {
+	return map[string]interface{}{ // Return one stable result shape so clients can rely on the same fields for both terminal and timed-out wait outcomes.
+		"traceId":             traceID,
+		"status":              trace.Status,
+		"waitedForCompletion": true,
+		"waitTimedOut":        waitTimedOut,
+		"pollingRequired":     waitTimedOut,
+		"trace":               trace,
+		"events":              events,
+		"completedStepCount":  completedSteps,
+		"totalStepCount":      totalSteps,
+	}
+}
+
+// countCompletedPlanSteps counts unique plan steps that already emitted one terminal step-level event.
+func countCompletedPlanSteps(events []*postgres.PlanEvent) int64 {
+	completed := make(map[int]struct{}) // Track unique step indexes so retries or duplicate callbacks do not over-count one logical plan step.
+	for _, event := range events {      // Walk every replayable event in order so completed step indexes can be accumulated deterministically.
+		if event == nil || event.StepIndex < 0 { // Ignore nil and trace-level events because only non-negative step indexes represent concrete plan steps.
+			continue // Skip events that cannot contribute to plan-step completion progress.
+		}
+		if event.Status != "passed" && event.Status != "failed" { // Count only terminal step-level states because running events do not represent completed progress yet.
+			continue // Skip non-terminal step events so progress reflects actual completed steps only.
+		}
+		completed[event.StepIndex] = struct{}{} // Record the step index so later duplicate events for the same step do not inflate progress.
+	}
+	return int64(len(completed)) // Return the number of unique completed step indexes as the current progress value.
+}
+
+// isTerminalTraceStatus reports whether one persisted trace status is terminal from the MCP client's perspective.
+func isTerminalTraceStatus(status string) bool {
+	switch status { // Match the trace terminal states that should stop the MCP synchronous wait loop immediately.
+	case "completed", "failed", "cancelled":
+		return true // Report terminal status so the wait loop can stop polling and return the final trace snapshot.
+	default:
+		return false // Keep polling for any non-terminal trace status.
+	}
 }
 
 // handleEndSession executes this operation.
