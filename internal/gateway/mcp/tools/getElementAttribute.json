@@ -1,0 +1,23 @@
+{
+  "name": "getElementAttribute",
+  "description": "Retrieves a specific attribute value from an element. Common attributes include 'enabled' (whether element accepts input), 'selected' (for checkboxes/radio buttons), 'checked' (boolean state), 'displayed' (visibility), 'text' (same as getElementText), 'name', 'value', and 'contentDescription'. The available attributes vary by platform and element type. Use this to check element state before interacting with it.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "Active session ID"
+      },
+      "elementId": {
+        "type": "string",
+        "description": "Element identifier (from findElement)"
+      },
+      "attribute": {
+        "type": "string",
+        "description": "Name of the attribute to retrieve. Standard attributes: 'enabled', 'selected', 'checked', 'displayed', 'text', 'name', 'value', 'contentDescription'"
+      }
+    },
+    "required": ["sessionId", "elementId", "attribute"],
+    "additionalProperties": false
+  }
+}

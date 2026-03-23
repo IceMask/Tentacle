@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "sessionId": { "type": "string" },
+    "traceId": { "type": "string" },
+    "includeThumb": { "type": "boolean" }
+  },
+  "required": ["sessionId", "traceId"]
+}

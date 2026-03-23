@@ -1,0 +1,14 @@
+{
+  "name": "getDeviceFarmUpload",
+  "description": "Get AWS Device Farm upload status by upload ARN. When status becomes SUCCEEDED, server updates per-project cached app/test-package ARN (TTL: 24h).",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "uploadArn": {
+        "type": "string",
+        "description": "ARN of the Device Farm upload"
+      }
+    },
+    "required": ["uploadArn"]
+  }
+}

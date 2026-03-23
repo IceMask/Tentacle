@@ -1,0 +1,17 @@
+{
+  "name": "getDeviceFarmRun",
+  "description": "Fetches current status and result summary for an AWS Device Farm run.",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "runArn": {
+        "type": "string",
+        "description": "ARN of the Device Farm run to query."
+      }
+    },
+    "required": [
+      "runArn"
+    ]
+  }
+}

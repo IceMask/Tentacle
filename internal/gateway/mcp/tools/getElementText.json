@@ -1,0 +1,19 @@
+{
+  "name": "getElementText",
+  "description": "Retrieves the visible text content displayed within an element. This reads exactly what the user sees on screen, such as button labels, text view content, or list item text. Returns an empty string if the element has no text. Use this to verify expected content or extract information from the UI.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "Active session ID"
+      },
+      "elementId": {
+        "type": "string",
+        "description": "Element identifier whose text you want to retrieve (from findElement)"
+      }
+    },
+    "required": ["sessionId", "elementId"],
+    "additionalProperties": false
+  }
+}

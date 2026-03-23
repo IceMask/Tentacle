@@ -1,0 +1,35 @@
+name: Migration Replay Check
+
+on:
+  push:
+    paths:
+      - "cmd/migration_replay_check/**"
+      - "internal/storage/postgres/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/migration-replay-check.yml"
+  pull_request:
+    paths:
+      - "cmd/migration_replay_check/**"
+      - "internal/storage/postgres/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/migration-replay-check.yml"
+  workflow_dispatch:
+
+jobs:
+  migration-replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run Migration Replay Check
+        run: go run ./cmd/migration_replay_check

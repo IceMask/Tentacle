@@ -1,0 +1,14 @@
+{
+  "name": "getDeviceFarmRuntimeContext",
+  "description": "Returns server-side cached Device Farm runtime context (projectArn, appArn, testPackageArn, devicePoolArn). Cached ARNs are stored per project with TTL: 24h.",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "projectArn": {
+        "type": "string",
+        "description": "Optional Device Farm project ARN override. Uses configured devicefarm.project_arn when omitted."
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "getSemanticSnapshot",
+  "description": "Captures the current UI element tree structure of the app screen, returning a hierarchical representation of all visible and hidden elements with their properties (id, text, class, bounds, etc.). Essential for understanding what's on screen before deciding which elements to interact with. Supports differential updates via sinceRev to avoid redundant data transfer when the screen hasn't changed. Use this as the 'eyes' for exploratory testing workflows.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "Active session ID"
+      },
+      "sinceRev": {
+        "type": "string",
+        "description": "Optional revision ID from a previous snapshot. If provided and the UI hasn't changed, returns {changed: false} instead of the full tree, saving bandwidth"
+      }
+    },
+    "required": ["sessionId"],
+    "additionalProperties": false
+  }
+}

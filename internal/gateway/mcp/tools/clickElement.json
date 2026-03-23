@@ -1,0 +1,19 @@
+{
+  "name": "clickElement",
+  "description": "Performs a tap/click action on the element identified by elementId (obtained from findElement). This simulates a user tapping the element on a touchscreen. The element must be visible and enabled, otherwise the operation will fail. Use this for buttons, links, list items, and any tappable UI component.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "Active session ID"
+      },
+      "elementId": {
+        "type": "string",
+        "description": "Element identifier returned by findElement, uniquely identifying which element to click"
+      }
+    },
+    "required": ["sessionId", "elementId"],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "cancelPlan",
+  "description": "Immediately cancels a running test plan execution initiated by executePlan. The plan stops at the current step and its status is marked as cancelled. Use this when a test is taking too long, encountered unexpected state, or you need to abort for any reason.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "traceId": {
+        "type": "string",
+        "description": "The trace ID returned by executePlan that identifies which execution to cancel"
+      }
+    },
+    "required": ["traceId"],
+    "additionalProperties": false
+  }
+}

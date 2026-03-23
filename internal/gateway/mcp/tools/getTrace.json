@@ -1,0 +1,15 @@
+{
+  "name": "getTrace",
+  "description": "Retrieves the complete execution history and results for a test plan run, including step-by-step events, status (pending/running/completed/failed/cancelled), timing data, error messages, and references to artifacts like screenshots. Use this to check if an executePlan has finished and examine what happened during execution.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "traceId": {
+        "type": "string",
+        "description": "The trace ID returned by executePlan whose execution details you want to retrieve"
+      }
+    },
+    "required": ["traceId"],
+    "additionalProperties": false
+  }
+}

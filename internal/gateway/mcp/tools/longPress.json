@@ -1,0 +1,24 @@
+{
+  "name": "longPress",
+  "description": "Performs a long press (press and hold) gesture on an element for the specified duration. This typically triggers context menus, enables drag-and-drop mode, or activates editing modes depending on the app's behavior. The default duration of 1000ms (1 second) works for most apps, but you can adjust it if needed.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "Active session ID"
+      },
+      "elementId": {
+        "type": "string",
+        "description": "Element identifier to long press on (from findElement)"
+      },
+      "durationMs": {
+        "type": "integer",
+        "description": "How long to hold the press in milliseconds (default: 1000). Increase if the app requires longer presses to trigger the desired action",
+        "default": 1000
+      }
+    },
+    "required": ["sessionId", "elementId"],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "name": "sendKeysToElement",
+  "description": "Types the specified text into an input field or text area element. The element must support text input (e.g., EditText on Android, UITextField on iOS). This simulates keyboard input character by character. If the field already contains text, the new text is appended unless you clearElement first. The soft keyboard may appear during this operation.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "Active session ID"
+      },
+      "elementId": {
+        "type": "string",
+        "description": "Element identifier for the input field (from findElement)"
+      },
+      "text": {
+        "type": "string",
+        "description": "The text string to type into the field. Special characters and unicode are supported"
+      }
+    },
+    "required": ["sessionId", "elementId", "text"],
+    "additionalProperties": false
+  }
+}

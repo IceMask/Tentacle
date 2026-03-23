@@ -1,0 +1,26 @@
+{
+  "name": "createDeviceFarmUpload",
+  "description": "Create an AWS Device Farm upload slot and return a pre-signed upload URL. Server records temporary upload metadata (TTL: 2h) so successful uploads can refresh per-project ARN cache.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "projectArn": {
+        "type": "string",
+        "description": "Device Farm project ARN (optional if configured in config.yaml)"
+      },
+      "name": {
+        "type": "string",
+        "description": "Upload filename shown in Device Farm, e.g. app-debug.apk"
+      },
+      "type": {
+        "type": "string",
+        "description": "Device Farm upload type, e.g. ANDROID_APP or APPIUM_NODE_TEST_PACKAGE"
+      },
+      "contentType": {
+        "type": "string",
+        "description": "Optional MIME type, e.g. application/vnd.android.package-archive"
+      }
+    },
+    "required": ["name", "type"]
+  }
+}

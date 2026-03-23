@@ -1,0 +1,19 @@
+{
+  "name": "clearElement",
+  "description": "Clears all text content from an input field element, leaving it empty. Use this before sendKeysToElement if you need to replace existing content rather than append to it. Only works on elements that support text input; calling it on non-editable elements will fail.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "Active session ID"
+      },
+      "elementId": {
+        "type": "string",
+        "description": "Element identifier for the input field to clear (from findElement)"
+      }
+    },
+    "required": ["sessionId", "elementId"],
+    "additionalProperties": false
+  }
+}

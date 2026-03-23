@@ -1,0 +1,56 @@
+{
+  "name": "executePlan",
+  "description": "Executes a pre-defined test plan containing multiple steps (click, clearElement, sendKeys, wait, screenshot, tap, swipe, longPress, pressBack, hideKeyboard) in batch mode. By default, MCP tool calls wait for a terminal trace result and can emit notifications/progress updates when the client supplies a progressToken. Set waitForCompletion=false to preserve the legacy asynchronous submit behavior that returns a traceId immediately for later getTrace polling. Use this when you have a complete test sequence ready; for exploratory testing where you need to see results before deciding next steps, use the interactive element operations instead (findElement, clickElement, etc.).",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "Active session ID from startSession"
+      },
+      "plan": {
+        "type": "object",
+        "description": "Test plan containing an array of sequential steps to execute",
+        "properties": {
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "description": "Step action type",
+                  "enum": ["click", "clearElement", "sendKeys", "wait", "screenshot", "tap", "swipe", "longPress", "pressBack", "hideKeyboard"]
+                },
+                "selector": {
+                  "type": "string",
+                  "description": "Element locator using XPath or other strategy (required for click, clearElement, sendKeys, longPress)"
+                },
+                "params": {
+                  "type": "object",
+                  "description": "Additional parameters specific to the step type (for example {text: 'hello'} for sendKeys, {ms: 2000} for wait, {x: 100, y: 200} for tap, {startX: 0, startY: 0, endX: 100, endY: 300, durationMs: 250} for swipe)"
+                }
+              },
+              "required": ["type"]
+            }
+          }
+        }
+      },
+      "traceId": {
+        "type": "string",
+        "description": "Optional trace ID for correlating this execution with logs and artifacts. Auto-generated if not provided"
+      },
+      "waitForCompletion": {
+        "type": "boolean",
+        "description": "When omitted or true, the MCP tool call waits for terminal completion and returns the final trace snapshot; set false to return immediately with status=running"
+      },
+      "waitTimeoutMs": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Optional upper bound for the MCP synchronous wait path in milliseconds; when the timeout elapses the tool returns the latest trace snapshot with waitTimedOut=true instead of failing"
+      }
+    },
+    "required": ["sessionId", "plan"],
+    "additionalProperties": false
+  }
+}

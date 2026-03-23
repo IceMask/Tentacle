@@ -1,0 +1,23 @@
+{
+  "name": "tap",
+  "description": "Performs a tap action at the specified screen coordinates (x, y pixels from top-left corner). Use this when you need to tap at a specific location that doesn't have a reliable element ID, or when working with canvas/game elements. Coordinates are absolute screen pixels, so they may vary across different device resolutions. Prefer findElement + clickElement when possible as it's more reliable across devices.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "Active session ID"
+      },
+      "x": {
+        "type": "integer",
+        "description": "Horizontal coordinate in pixels from the left edge of the screen (0 = left edge)"
+      },
+      "y": {
+        "type": "integer",
+        "description": "Vertical coordinate in pixels from the top edge of the screen (0 = top edge)"
+      }
+    },
+    "required": ["sessionId", "x", "y"],
+    "additionalProperties": false
+  }
+}

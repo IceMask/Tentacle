@@ -1,0 +1,25 @@
+{
+  "name": "adbShell",
+  "description": "Executes one restricted read-only adb shell command against a connected Android device and returns command output. Only reviewed command families and safe subcommands/flags are accepted; mutating commands such as am, monkey, input, pm install, and settings put are rejected.",
+  "inputSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "deviceSerial": {
+        "type": "string",
+        "description": "Optional target device serial passed to adb -s."
+      },
+      "command": {
+        "type": "array",
+        "description": "Tokenized adb shell command. Only reviewed read-only command families and safe subcommands/flags are accepted.",
+        "items": {
+          "type": "string"
+        },
+        "minItems": 1
+      }
+    },
+    "required": [
+      "command"
+    ]
+  }
+}

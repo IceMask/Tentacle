@@ -1,0 +1,199 @@
+syntax = "proto3";
+
+package mcp.mobile.v1;
+
+option go_package = "mcp_for_appium/proto/gen/orchestrator";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// Orchestrator Service
+service OrchestratorService {
+  rpc StartSession(StartSessionRequest) returns (StartSessionResponse);
+  rpc EndSession(EndSessionRequest) returns (EndSessionResponse);
+  rpc ExecutePlan(ExecutePlanRequest) returns (stream PlanEvent);
+  rpc CancelPlan(CancelPlanRequest) returns (CancelPlanResponse);
+  rpc GetTrace(GetTraceRequest) returns (GetTraceResponse);
+  rpc GetEvents(GetEventsRequest) returns (GetEventsResponse);
+  rpc GetArtifacts(GetArtifactsRequest) returns (GetArtifactsResponse);
+  rpc ReplayPlan(ReplayPlanRequest) returns (stream PlanEvent);
+  rpc TakeScreenshot(TakeScreenshotRequest) returns (TakeScreenshotResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc GetSemanticSnapshot(GetSemanticSnapshotRequest) returns (GetSemanticSnapshotResponse);
+  rpc StartArtifactUpload(StartArtifactUploadRequest) returns (StartArtifactUploadResponse);
+  rpc CompleteArtifactUpload(CompleteArtifactUploadRequest) returns (CompleteArtifactUploadResponse);
+}
+
+// Messages
+message StartSessionRequest {
+  string project_id = 1;
+  string actor = 2;
+  map<string, string> labels = 3;
+  google.protobuf.Struct w3c_caps = 4;
+  string idempotency_key = 5;
+}
+
+message StartSessionResponse {
+  string session_id = 1;
+  google.protobuf.Struct negotiated_caps = 2;
+}
+
+message EndSessionRequest {
+  string session_id = 1;
+}
+
+message EndSessionResponse {
+  bool ok = 1;
+}
+
+message ExecutePlanRequest {
+  string session_id = 1;
+  string trace_id = 2; // optional, server generates if empty
+  google.protobuf.Struct plan = 3;
+}
+
+message PlanEvent {
+  int64 seq = 1;
+  int32 step_index = 2;
+  string status = 3; // running|passed|failed|skipped
+  string message = 4;
+  Metrics metrics = 5;
+  repeated ArtifactRef artifact_refs = 6;
+  string phase = 7; // precheck|exec|fallback|teardown|replay
+  string snapshot_ref = 8;
+  repeated string candidates = 9;
+  google.protobuf.Struct device_stats = 10;
+  google.protobuf.Timestamp timestamp = 11;
+}
+
+message Metrics {
+  int32 attempt = 1;
+  int32 wd_calls = 2;
+  int64 elapsed_ms = 3;
+}
+
+message ArtifactRef {
+  string key = 1;
+  string type = 2;
+  string url = 3;
+  int64 size = 4;
+}
+
+message CancelPlanRequest {
+  string trace_id = 1;
+}
+
+message CancelPlanResponse {
+  bool ok = 1;
+}
+
+message GetTraceRequest {
+  string trace_id = 1;
+}
+
+message GetTraceResponse {
+  string trace_id = 1;
+  string session_id = 2;
+  string project_id = 3;
+  string status = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+message GetEventsRequest {
+  string trace_id = 1;
+  int64 since_seq = 2;
+  int32 limit = 3;
+}
+
+message GetEventsResponse {
+  repeated PlanEvent events = 1;
+}
+
+message GetArtifactsRequest {
+  string trace_id = 1;
+  repeated string types = 2;
+}
+
+message GetArtifactsResponse {
+  repeated ArtifactRef artifacts = 1;
+}
+
+message ReplayPlanRequest {
+  string source_trace_id = 1;
+  string target = 2; // auto|local|adf
+  bool reuse_trace_id = 3;
+}
+
+message TakeScreenshotRequest {
+  string session_id = 1;
+  string trace_id = 2;
+  bool include_thumb = 3;
+}
+
+message TakeScreenshotResponse {
+  ArtifactRef full = 1;
+  ArtifactRef thumb = 2;
+}
+
+message HealthCheckRequest {
+  string trace_id = 1; // optional for diagnostics
+}
+
+message HealthCheckResponse {
+  string status = 1; // healthy|degraded|unavailable
+  repeated Issue issues = 2;
+}
+
+message Issue {
+  string type = 1;
+  string severity = 2;
+  string message = 3;
+  string suggestion = 4;
+}
+
+message GetSemanticSnapshotRequest {
+  string session_id = 1;
+  string since_rev = 2;
+}
+
+message GetSemanticSnapshotResponse {
+  bool changed = 1;
+  string rev = 2;
+  string snapshot_ref = 3;
+  google.protobuf.Struct tree = 4; // optional, only if changed
+}
+
+message StartArtifactUploadRequest {
+  string trace_id = 1;
+  string key = 2;
+  string content_type = 3;
+  int64 size = 4;
+}
+
+message StartArtifactUploadResponse {
+  string upload_id = 1;
+  repeated PresignedPart parts = 2;
+}
+
+message PresignedPart {
+  int32 part_number = 1;
+  string url = 2;
+}
+
+message CompleteArtifactUploadRequest {
+  string trace_id = 1;
+  string key = 2;
+  string upload_id = 3;
+  repeated CompletedPart parts = 4;
+}
+
+message CompletedPart {
+  int32 part_number = 1;
+  string etag = 2;
+}
+
+message CompleteArtifactUploadResponse {
+  string artifact_ref = 1;
+  bool ok = 2;
+}

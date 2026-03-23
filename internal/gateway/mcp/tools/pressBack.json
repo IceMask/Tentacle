@@ -1,0 +1,15 @@
+{
+  "name": "pressBack",
+  "description": "Simulates pressing the device's back/return button. On Android, this triggers the system back button which typically closes the current screen, dismisses dialogs, or exits the app. On iOS, this performs a navigation back gesture where supported. Use this to navigate backward in the app or dismiss modal screens.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "sessionId": {
+        "type": "string",
+        "description": "Active session ID"
+      }
+    },
+    "required": ["sessionId"],
+    "additionalProperties": false
+  }
+}

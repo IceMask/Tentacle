@@ -1,0 +1,29 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "sessionId": { "type": "string" },
+    "traceId": { "type": "string" },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "steps": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "type": { "type": "string" },
+              "selector": { "type": "string" },
+              "params": { "type": "object" }
+            },
+            "required": ["type"]
+          }
+        }
+      },
+      "required": ["steps"]
+    }
+  },
+  "required": ["sessionId", "plan"]
+}

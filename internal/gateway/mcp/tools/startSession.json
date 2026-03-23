@@ -1,0 +1,45 @@
+{
+  "name": "startSession",
+  "description": "Creates a new mobile testing session by connecting to an Appium server and initializing the device with specified capabilities. This is always the first step before any test automation can begin. Returns a sessionId that must be used in all subsequent operations. The session will remain active until explicitly ended with endSession or the server restarts.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "projectId": {
+        "type": "string",
+        "description": "Project identifier for organizing and tracking test sessions across different projects or teams"
+      },
+      "actorId": {
+        "type": "string",
+        "description": "Optional identifier for the user or system initiating the session, useful for audit trails"
+      },
+      "labels": {
+        "type": "object",
+        "description": "Optional key-value pairs for tagging sessions with custom metadata (e.g., environment, build number)",
+        "additionalProperties": {
+          "type": "string"
+        }
+      },
+      "w3cCapsJson": {
+        "type": "object",
+        "description": "W3C WebDriver standard capabilities defining device configuration. Must include platformName (iOS/Android), deviceName, and app path or bundle ID",
+        "properties": {
+          "platformName": {
+            "type": "string",
+            "enum": ["iOS", "Android"],
+            "description": "Target platform - iOS or Android"
+          },
+          "deviceName": {
+            "type": "string",
+            "description": "Device identifier, e.g., 'iPhone 13', 'Pixel 6', or specific UDID for physical devices"
+          },
+          "app": {
+            "type": "string",
+            "description": "Path to .app/.ipa/.apk file, or bundle ID for installed apps (e.g., com.example.app)"
+          }
+        }
+      }
+    },
+    "required": ["projectId", "w3cCapsJson"],
+    "additionalProperties": false
+  }
+}
