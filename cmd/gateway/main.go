@@ -90,9 +90,6 @@ func runStdioMode(cfg *config.Config) {
 	if err := startup.CheckS3BucketAccess(preflightCtx, s3Client); err != nil { // Verify the artifact bucket exists and is reachable before accepting stdio traffic.
 		log.Fatalf("stdio startup preflight failed for s3: %v", err) // Stop immediately so later artifact writes do not fail on the first real request.
 	}
-	if err := startup.CheckAppiumReachability(preflightCtx, cfg.Worker.AppiumURL); err != nil { // Verify the embedded Appium dependency is reachable before the monolith orchestrator starts.
-		log.Fatalf("stdio startup preflight failed for appium: %v", err) // Stop immediately so session creation does not fail only after the first user request.
-	}
 
 	orchSvc := orchestrator.NewService(cfg.Orchestrator, cfg.RPC.Security, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)
 	if err := orchSvc.Start(ctx); err != nil {
@@ -149,9 +146,6 @@ func runHTTPMode(cfg *config.Config) {
 	defer preflightCancel()                                                                   // Release the dependency-check timeout resources after startup validation finishes.
 	if err := startup.CheckS3BucketAccess(preflightCtx, s3Client); err != nil {               // Verify the artifact bucket exists and is reachable before the HTTP server starts.
 		log.Fatalf("http startup preflight failed for s3: %v", err) // Stop immediately so artifact operations do not fail only after requests arrive.
-	}
-	if err := startup.CheckAppiumReachability(preflightCtx, cfg.Worker.AppiumURL); err != nil { // Verify the embedded Appium dependency is reachable before the monolith orchestrator starts.
-		log.Fatalf("http startup preflight failed for appium: %v", err) // Stop immediately so session creation does not fail only after requests arrive.
 	}
 
 	orchSvc := orchestrator.NewService(cfg.Orchestrator, cfg.RPC.Security, cfg.Worker, cfg.AWS, cfg.DeviceFarm, pgDAO, redisCache, s3Client)

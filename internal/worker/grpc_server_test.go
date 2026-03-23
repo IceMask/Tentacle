@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	apperrors "mcp_for_appium/internal/errors"
 	"mcp_for_appium/internal/rpc"
 )
 
@@ -140,5 +141,45 @@ func TestRunPlanAttachesSessionAndReportsCallbacks(t *testing.T) {
 	}
 	if reporter.completions[0].Attempt != 7 { // Fail the test when the worker terminal callback does not preserve the reserved attempt number.
 		t.Fatalf("expected distributed completion attempt 7, got %d", reporter.completions[0].Attempt) // Surface the unexpected attempt because stale-result protection depends on it.
+	}
+}
+
+// TestRunPlanFailsWhenAppiumReadyHookFails verifies that distributed worker execution reports one failed terminal result when the injected Appium readiness hook cannot make Appium available.
+func TestRunPlanFailsWhenAppiumReadyHookFails(t *testing.T) {
+	reporter := &fakeDistributedReporter{}                                                                        // Construct one fake distributed reporter so the worker terminal callback can be asserted deterministically.
+	server := NewGRPCServer("http://unused-appium", time.Second, time.Second, "worker-test", reporter, time.Hour) // Construct the worker gRPC server with one long renewal interval so the short failure path does not depend on lease-renewal timing.
+	ensureReadyCalls := 0                                                                                         // Track how many times the worker invoked the injected Appium readiness hook before attempting plan execution.
+	server.SetAppiumReadyFunc(func(ctx context.Context) error {                                                   // Inject one deterministic Appium readiness failure so the worker must stop before plan parsing or execution begins.
+		ensureReadyCalls++                                                   // Count the readiness invocation so the test can prove the worker actually ran the injected hook.
+		return apperrors.New(apperrors.CodeHealthDown, "appium unavailable") // Return one stable dependency-health failure so the worker must terminalize the trace immediately.
+	}) // Close the injected readiness hook installation.
+	server.newClient = func(url string) sessionAwareAppiumClient { // Replace the production Appium client factory with one panic stub because the readiness failure path must stop before any client is created.
+		t.Fatal("expected appium client factory not to be called when readiness hook fails") // Fail immediately when execution reaches Appium client creation despite the injected readiness failure.
+		return nil                                                                           // Return nil only to satisfy the compiler because the fatal assertion above should abort the test first.
+	} // Close the panic client-factory override.
+
+	server.runPlan("trace-2", "appium-session-2", 8, json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`)) // Execute one tiny plan synchronously so the worker failure path can be asserted immediately.
+
+	if ensureReadyCalls != 1 { // Fail the test when the worker did not invoke the readiness hook exactly once before deciding the trace outcome.
+		t.Fatalf("expected readiness hook to be called once, got %d", ensureReadyCalls) // Surface the unexpected readiness-hook call count because local Appium auto-start depends on this hook firing reliably.
+	}
+
+	reporter.mu.Lock()         // Snapshot the recorded callback state under the fake reporter lock so concurrent callback writes cannot race with assertions.
+	defer reporter.mu.Unlock() // Release the fake reporter lock after the callback assertions complete.
+
+	if len(reporter.reportedEvents) != 0 { // Fail the test when the worker emitted step events even though Appium readiness failed before execution began.
+		t.Fatalf("expected 0 distributed step events after readiness failure, got %d", len(reporter.reportedEvents)) // Surface the unexpected event count because no plan execution should begin after readiness failure.
+	}
+	if len(reporter.completions) != 1 { // Fail the test when the worker did not emit exactly one terminal callback for the readiness failure path.
+		t.Fatalf("expected 1 distributed completion callback after readiness failure, got %d", len(reporter.completions)) // Surface the unexpected completion count because the trace must reach one terminal state.
+	}
+	if reporter.completions[0].FinalStatus != "failed" { // Fail the test when the worker did not report the failed terminal outcome for the readiness failure path.
+		t.Fatalf("expected distributed completion status failed, got %q", reporter.completions[0].FinalStatus) // Surface the unexpected terminal status because readiness failure must close the trace as failed.
+	}
+	if reporter.completions[0].TerminalReason != "appium_unavailable" { // Fail the test when the worker did not preserve the dedicated terminal reason for Appium readiness failure.
+		t.Fatalf("expected distributed terminal reason appium_unavailable, got %q", reporter.completions[0].TerminalReason) // Surface the unexpected terminal reason because orchestrator diagnosis depends on it.
+	}
+	if reporter.completions[0].Attempt != 8 { // Fail the test when the worker terminal callback does not preserve the reserved attempt number on readiness failure.
+		t.Fatalf("expected distributed completion attempt 8, got %d", reporter.completions[0].Attempt) // Surface the unexpected attempt because stale-result protection still applies on failure paths.
 	}
 }

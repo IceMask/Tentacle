@@ -30,6 +30,15 @@ type fakeDeviceFarmAPI struct {
 	listDevicePoolsInput  *awsdevicefarm.ListDevicePoolsInput
 	listDevicePoolsOutput *awsdevicefarm.ListDevicePoolsOutput
 	listDevicePoolsErr    error
+	createRemoteInput     *awsdevicefarm.CreateRemoteAccessSessionInput
+	createRemoteOutput    *awsdevicefarm.CreateRemoteAccessSessionOutput
+	createRemoteErr       error
+	getRemoteInput        *awsdevicefarm.GetRemoteAccessSessionInput
+	getRemoteOutput       *awsdevicefarm.GetRemoteAccessSessionOutput
+	getRemoteErr          error
+	stopRemoteInput       *awsdevicefarm.StopRemoteAccessSessionInput
+	stopRemoteOutput      *awsdevicefarm.StopRemoteAccessSessionOutput
+	stopRemoteErr         error
 }
 
 // ScheduleRun records the incoming request and returns the preconfigured fake output for deterministic client tests.
@@ -70,6 +79,30 @@ func (f *fakeDeviceFarmAPI) ListDevicePools(ctx context.Context, params *awsdevi
 	_ = optFns                                           // Ignore AWS option functions because this fake SDK records only the normalized repository request shape.
 	f.listDevicePoolsInput = params                      // Preserve the request payload so the test can assert repository-side fallback behavior.
 	return f.listDevicePoolsOutput, f.listDevicePoolsErr // Return the preconfigured fake output so repository fallback handling can be asserted directly.
+}
+
+// CreateRemoteAccessSession records the incoming request and returns the preconfigured fake output for deterministic remote-access tests.
+func (f *fakeDeviceFarmAPI) CreateRemoteAccessSession(ctx context.Context, params *awsdevicefarm.CreateRemoteAccessSessionInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.CreateRemoteAccessSessionOutput, error) {
+	_ = ctx                                        // Ignore the context because this fake SDK returns one preconfigured in-memory result immediately.
+	_ = optFns                                     // Ignore AWS option functions because this fake SDK records only the normalized repository request shape.
+	f.createRemoteInput = params                   // Preserve the request payload so the test can assert repository-side remote-access normalization and fallbacks.
+	return f.createRemoteOutput, f.createRemoteErr // Return the preconfigured fake output so repository remote-access response mapping can be asserted directly.
+}
+
+// GetRemoteAccessSession records the incoming request and returns the preconfigured fake output for deterministic remote-access tests.
+func (f *fakeDeviceFarmAPI) GetRemoteAccessSession(ctx context.Context, params *awsdevicefarm.GetRemoteAccessSessionInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.GetRemoteAccessSessionOutput, error) {
+	_ = ctx                                  // Ignore the context because this fake SDK returns one preconfigured in-memory result immediately.
+	_ = optFns                               // Ignore AWS option functions because this fake SDK records only the normalized repository request shape.
+	f.getRemoteInput = params                // Preserve the request payload so the test can assert repository remote-access polling behavior.
+	return f.getRemoteOutput, f.getRemoteErr // Return the preconfigured fake output so repository remote-access response mapping can be asserted directly.
+}
+
+// StopRemoteAccessSession records the incoming request and returns the preconfigured fake output for deterministic remote-access tests.
+func (f *fakeDeviceFarmAPI) StopRemoteAccessSession(ctx context.Context, params *awsdevicefarm.StopRemoteAccessSessionInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.StopRemoteAccessSessionOutput, error) {
+	_ = ctx                                    // Ignore the context because this fake SDK returns one preconfigured in-memory result immediately.
+	_ = optFns                                 // Ignore AWS option functions because this fake SDK records only the normalized repository request shape.
+	f.stopRemoteInput = params                 // Preserve the request payload so the test can assert repository remote-access cleanup behavior.
+	return f.stopRemoteOutput, f.stopRemoteErr // Return the preconfigured fake output so repository remote-access cleanup behavior can be asserted directly.
 }
 
 // TestScheduleRunValidatesRequiredFields verifies that ScheduleRun fails fast on missing local configuration before any SDK call is needed.
@@ -179,5 +212,54 @@ func TestFirstDevicePoolARNRejectsEmptyResults(t *testing.T) {
 		t.Fatal("expected missing pool lookup to fail") // Surface the missing failure because callers depend on a stable error when no pools are available.
 	} else if !errors.IsCode(err, errors.CodeSchedNoWorker) { // Fail the test when the returned error does not preserve the stable no-worker code.
 		t.Fatalf("expected no-worker error, got %v", err) // Surface the unexpected error so pool-resolution regressions are obvious.
+	}
+}
+
+// TestCreateRemoteAccessSessionWaitsForRemoteDriverEndpoint verifies that the repository client waits for one WebDriver endpoint and normalizes the returned payload.
+func TestCreateRemoteAccessSessionWaitsForRemoteDriverEndpoint(t *testing.T) {
+	fakeSDK := &fakeDeviceFarmAPI{ // Preconfigure one fake SDK that immediately returns one ready remote-access session with a WebDriver endpoint so repository request shaping and response mapping can be asserted together.
+		createRemoteOutput: &awsdevicefarm.CreateRemoteAccessSessionOutput{
+			RemoteAccessSession: &types.RemoteAccessSession{
+				Arn:    aws.String("arn:session:1"),
+				Status: types.ExecutionStatusPending,
+			},
+		},
+		getRemoteOutput: &awsdevicefarm.GetRemoteAccessSessionOutput{
+			RemoteAccessSession: &types.RemoteAccessSession{
+				Arn:    aws.String("arn:session:1"),
+				Device: &types.Device{Arn: aws.String("arn:device:1")},
+				Name:   aws.String("remote-name"),
+				Status: types.ExecutionStatusRunning,
+				Endpoints: &types.RemoteAccessEndpoints{
+					InteractiveEndpoint:  aws.String("https://interactive.example/session"),
+					RemoteDriverEndpoint: aws.String("https://driver.example/wd/hub"),
+				},
+			},
+		},
+	}
+	client := &Client{sdk: fakeSDK, cfg: config.DeviceFarmConfig{ProjectARN: "arn:project:remote"}} // Construct one repository client around the fake SDK so remote-access fallback behavior can be asserted deterministically.
+
+	result, err := client.CreateRemoteAccessSession(context.Background(), CreateRemoteAccessSessionRequest{DeviceARN: "arn:device:1", Name: "remote-name"}) // Create one remote-access session without an explicit project ARN so the configured fallback and polling path are both exercised directly.
+	if err != nil {                                                                                                                                         // Fail the test when the repository client cannot create the fake remote-access session successfully.
+		t.Fatalf("expected remote access session creation to succeed, got error: %v", err) // Surface the unexpected error so remote-access regressions are obvious.
+	}
+	if aws.ToString(fakeSDK.createRemoteInput.ProjectArn) != "arn:project:remote" { // Fail the test when the repository client does not use the configured project fallback for remote-access creation.
+		t.Fatalf("expected fallback project ARN, got %q", aws.ToString(fakeSDK.createRemoteInput.ProjectArn)) // Surface the unexpected project ARN so fallback regressions are obvious.
+	}
+	if aws.ToString(fakeSDK.getRemoteInput.Arn) != "arn:session:1" { // Fail the test when the repository client does not poll the created remote-access session ARN.
+		t.Fatalf("expected remote-access poll to use created session ARN, got %q", aws.ToString(fakeSDK.getRemoteInput.Arn)) // Surface the unexpected poll ARN so readiness regressions are obvious.
+	}
+	if result["remoteDriverEndpoint"] != "https://driver.example/wd/hub" || result["interactiveEndpoint"] != "https://interactive.example/session" { // Fail the test when the repository client does not flatten the AWS endpoint payload into the documented response shape.
+		t.Fatalf("expected normalized remote endpoints, got %#v", result) // Surface the unexpected payload so response-mapping regressions are obvious.
+	}
+}
+
+// TestStopRemoteAccessSessionValidatesARN verifies that StopRemoteAccessSession rejects one empty ARN before any AWS call is attempted.
+func TestStopRemoteAccessSessionValidatesARN(t *testing.T) {
+	client := &Client{}                                                              // Construct one client without an SDK because this test exercises only the local ARN-validation path.
+	if err := client.StopRemoteAccessSession(context.Background(), ""); err == nil { // Attempt to stop one remote-access session with an empty ARN so the local validation path fails before SDK usage.
+		t.Fatal("expected empty remote access session ARN to fail") // Surface the missing validation failure because callers depend on fast local feedback for malformed cleanup requests.
+	} else if !errors.IsCode(err, errors.CodePlanInvalid) { // Fail the test when the returned error does not preserve the stable invalid-plan code.
+		t.Fatalf("expected plan invalid error, got %v", err) // Surface the unexpected error so validation regressions are obvious.
 	}
 }

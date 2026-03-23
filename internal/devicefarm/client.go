@@ -21,6 +21,9 @@ type deviceFarmAPI interface {
 	CreateUpload(ctx context.Context, params *awsdevicefarm.CreateUploadInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.CreateUploadOutput, error)
 	GetUpload(ctx context.Context, params *awsdevicefarm.GetUploadInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.GetUploadOutput, error)
 	ListDevicePools(ctx context.Context, params *awsdevicefarm.ListDevicePoolsInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.ListDevicePoolsOutput, error)
+	CreateRemoteAccessSession(ctx context.Context, params *awsdevicefarm.CreateRemoteAccessSessionInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.CreateRemoteAccessSessionOutput, error) // Allow the repository client to provision one live remote-access session whose Appium endpoint can back interactive MCP actions.
+	GetRemoteAccessSession(ctx context.Context, params *awsdevicefarm.GetRemoteAccessSessionInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.GetRemoteAccessSessionOutput, error)          // Allow the repository client to poll one remote-access session until its Appium endpoint is ready or the session fails.
+	StopRemoteAccessSession(ctx context.Context, params *awsdevicefarm.StopRemoteAccessSessionInput, optFns ...func(*awsdevicefarm.Options)) (*awsdevicefarm.StopRemoteAccessSessionOutput, error)       // Allow the repository client to stop one live remote-access session when the platform session ends or setup fails.
 }
 
 // Client wraps AWS Device Farm APIs used by run_api mode.

@@ -216,18 +216,15 @@ func validateDeviceFarmConfig(cfg *config.Config) error {
 		if strings.TrimSpace(cfg.DeviceFarm.ProjectARN) == "" { // Reject a missing default project ARN because run_api helper paths fall back to this config.
 			return errors.New(errors.CodeConfigMissing, "devicefarm.project_arn is required when devicefarm.mode=run_api") // Surface the missing project ARN before the service accepts Device Farm tool calls.
 		}
-	case "test_grid": // Validate the fields expected for test_grid mode even though the runtime integration is still limited.
-		if strings.TrimSpace(cfg.AWS.Region) == "" { // Reject an empty AWS region because the SDK client would still need it for test grid URL generation.
-			return errors.New(errors.CodeConfigMissing, "aws.region is required when devicefarm.mode=test_grid") // Surface the missing region before startup continues.
+	case "remote_access", "test_grid": // Treat the legacy test_grid selector as one compatibility alias for the real remote-access Appium mode.
+		if strings.TrimSpace(cfg.AWS.Region) == "" { // Reject an empty AWS region because the SDK client cannot create remote-access sessions without one target region.
+			return errors.New(errors.CodeConfigMissing, "aws.region is required when devicefarm.mode=remote_access") // Surface the missing region before startup continues.
 		}
-		if strings.TrimSpace(cfg.DeviceFarm.TestGridProjectARN) == "" && strings.TrimSpace(cfg.DeviceFarm.ProjectARN) == "" { // Accept either the dedicated test-grid ARN or the generic project ARN as the source project.
-			return errors.New(errors.CodeConfigMissing, "devicefarm.test_grid_project_arn or devicefarm.project_arn is required when devicefarm.mode=test_grid") // Surface the missing project identifier before startup continues.
-		}
-		if cfg.DeviceFarm.URLExpiresSeconds <= 0 { // Reject non-positive URL expiry because generated test-grid URLs must have a usable lifetime.
-			return errors.New(errors.CodeConfigInvalid, "devicefarm.url_expires_seconds must be > 0 when devicefarm.mode=test_grid") // Surface the invalid URL expiry before runtime URL generation is attempted.
+		if strings.TrimSpace(cfg.DeviceFarm.TestGridProjectARN) == "" && strings.TrimSpace(cfg.DeviceFarm.ProjectARN) == "" { // Accept either historical project field so existing compatibility configs keep booting while the runtime prefers the generic project ARN.
+			return errors.New(errors.CodeConfigMissing, "devicefarm.project_arn or devicefarm.test_grid_project_arn is required when devicefarm.mode=remote_access") // Surface the missing project identifier before startup continues.
 		}
 	default: // Defend against future callers that bypass config.Load validation and still reach startup preflight.
-		return errors.New(errors.CodeConfigInvalid, "devicefarm.mode must be one of: disabled, test_grid, run_api") // Return a stable config error for unsupported Device Farm modes.
+		return errors.New(errors.CodeConfigInvalid, "devicefarm.mode must be one of: disabled, remote_access, test_grid, run_api") // Return a stable config error for unsupported Device Farm modes.
 	}
 
 	return nil // Return success once the selected Device Farm mode has all required startup fields.

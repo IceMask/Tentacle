@@ -36,7 +36,7 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 | WebSocket 事件订阅 | `GA candidate` | 浏览器需先换短时 subscription token，trace 订阅已校验持久化 ownership |
 | `replay` / `subscribe` / `unsubscribe` JSON-RPC 方法 | `planned` | schema 预留，尚未实现 |
 | PAT / OIDC / HMAC 鉴权 | `GA candidate` | 已有权威模型与安全边界，但仍建议先按受控环境启用 |
-| Device Farm `run_api` / `test_grid` | `experimental` | 建议按具体环境验证后再进入生产 |
+| Device Farm `run_api` / `remote_access` | `experimental` | `run_api` 用于上传/调度/查状态，`remote_access` 用于实时 Appium 交互 |
 | Screenshot / artifact 持久化 | `GA candidate` | monolith 主链路和 artifact 集成链都已覆盖 |
 
 ### 快速开始
@@ -147,6 +147,7 @@ go test ./internal/integration -run TestDistributedFlowEndToEnd -count=1 -v
 - 手势工具：`tap` `swipe` `longPress` `pressBack` `hideKeyboard`
 - 实用工具：`getSemanticSnapshot` `takeScreenshot` `healthCheck`
 - Device Farm 工具：`createDeviceFarmUpload` `getDeviceFarmUpload` `getDeviceFarmRuntimeContext` `scheduleDeviceFarmRun` `getDeviceFarmRun`
+- `startSession` 在 `devicefarm.mode=remote_access` 时可通过 `w3cCapsJson` 里的 `devicefarm:deviceArn` / `devicefarm:appArn` / `devicefarm:projectArn` / `devicefarm:sessionName` 直连 AWS Device Farm remote access Appium endpoint
 - 设备调试工具：`adbShell`
 
 补充说明：
@@ -162,6 +163,13 @@ go test ./internal/integration -run TestDistributedFlowEndToEnd -count=1 -v
 - 上传元数据（用于把 uploadArn 归类为 app/test package）缓存 TTL：**2 小时**
 - 调用优先级：客户端显式参数 > 服务端缓存 > 默认/兜底逻辑
 - `getDeviceFarmRuntimeContext` 可供客户端 Agent 先探测当前可复用上下文，再决定是否补齐参数
+
+### Device Farm 实时 Appium 会话说明（remote_access 模式）
+
+- `devicefarm.mode=remote_access` 时，`startSession` 会先创建一个 Device Farm remote access session，再使用 AWS 返回的 `remoteDriverEndpoint` 创建 Appium session
+- 必填能力：`devicefarm:deviceArn`
+- 选填能力：`devicefarm:appArn` `devicefarm:projectArn` `devicefarm:sessionName`
+- 兼容说明：旧配置中的 `devicefarm.mode=test_grid` 仍可启动，但在运行时会按 `remote_access` 处理
 
 ### 文档
 

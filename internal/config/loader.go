@@ -280,10 +280,10 @@ func validate(cfg *Config) error {
 
 	// 4. Device Farm
 	switch strings.ToLower(strings.TrimSpace(cfg.DeviceFarm.Mode)) {
-	case "", "disabled", "test_grid", "run_api":
+	case "", "disabled", "test_grid", "remote_access", "run_api":
 		// valid
 	default:
-		return errors.New(errors.CodeConfigInvalid, "devicefarm.mode must be one of: disabled, test_grid, run_api")
+		return errors.New(errors.CodeConfigInvalid, "devicefarm.mode must be one of: disabled, remote_access, test_grid, run_api")
 	}
 
 	return nil

@@ -24,7 +24,7 @@ type AWSConfig struct {
 }
 
 type DeviceFarmConfig struct {
-	Mode               string `yaml:"mode" env:"DEVICEFARM__MODE" default:"disabled"` // disabled|test_grid|run_api
+	Mode               string `yaml:"mode" env:"DEVICEFARM__MODE" default:"disabled"` // disabled|remote_access|test_grid(compat alias)|run_api
 	ProjectARN         string `yaml:"project_arn" env:"DEVICEFARM__PROJECT_ARN"`
 	TestGridProjectARN string `yaml:"test_grid_project_arn" env:"DEVICEFARM__TEST_GRID_PROJECT_ARN"`
 	URLExpiresSeconds  int    `yaml:"url_expires_seconds" env:"DEVICEFARM__URL_EXPIRES_SECONDS" default:"600"`

@@ -32,10 +32,16 @@ func main() {
 	telemetry.InitLogger(cfg.Telemetry.LogLevel, cfg.Telemetry.LogFile) // Initialize structured logging with optional file sink.
 	log.SetOutput(telemetry.StdLogWriter())                             // Route standard log messages to configured sinks too.
 	logger := telemetry.Logger()
-	preflightCtx, preflightCancel := context.WithTimeout(context.Background(), 5*time.Second)   // Bound the Appium reachability probe so worker startup fails fast on unavailable devices.
-	defer preflightCancel()                                                                     // Release the dependency-check timeout resources after startup validation finishes.
-	if err := startup.CheckAppiumReachability(preflightCtx, cfg.Worker.AppiumURL); err != nil { // Verify the configured Appium endpoint is reachable before the worker starts serving plans.
-		log.Fatalf("worker startup preflight failed for appium: %v", err) // Stop immediately so the worker does not register as healthy while its primary dependency is down.
+	appiumSupervisor := startup.NewLocalAppiumSupervisor(cfg.Worker.AppiumURL) // Construct one worker-owned Appium supervisor so loopback Appium can be auto-started before registration and before later plan execution.
+	defer func() {                                                             // Stop any worker-owned local Appium child process during process shutdown so the worker does not leave an orphaned automation server behind.
+		if err := appiumSupervisor.Stop(); err != nil { // Surface supervisor shutdown failures without masking the rest of the worker shutdown flow.
+			logger.Warn("failed to stop managed local appium service", "error", err) // Log the managed Appium shutdown failure for operator diagnosis.
+		}
+	}() // Close the deferred worker-owned Appium supervisor shutdown closure.
+	preflightCtx, preflightCancel := context.WithTimeout(context.Background(), 5*time.Second) // Bound the Appium readiness probe so worker startup still fails fast when local auto-start or remote reachability cannot succeed.
+	defer preflightCancel()                                                                   // Release the dependency-check timeout resources after startup validation finishes.
+	if err := appiumSupervisor.EnsureReady(preflightCtx); err != nil {                        // Ensure the configured Appium endpoint is reachable and auto-start one local loopback Appium service before the worker registers as healthy.
+		log.Fatalf("worker startup preflight failed for appium: %v", err) // Stop immediately so the worker does not register as healthy while its primary automation dependency is unavailable.
 	}
 
 	advertiseAddress := buildWorkerAdvertiseAddress(cfg.Worker.AdvertiseAddr, cfg.Worker.GRPCPort) // Resolve one routable worker address so the orchestrator can call back into this worker without relying on localhost.
@@ -50,6 +56,7 @@ func main() {
 
 	// --- gRPC server (receives ExecutePlan / CancelPlan from orchestrator) ---
 	workerSvc := worker.NewGRPCServer(cfg.Worker.AppiumURL, cfg.Orchestrator.StepTimeout, cfg.Orchestrator.AutoWaitMax, workerID, orchClient, leaseRenewEvery(cfg.Worker.HeartbeatInterval)) // Construct the distributed worker handler with orchestrator callbacks, stable identity, and a lease-renewal cadence derived from worker heartbeats.
+	workerSvc.SetAppiumReadyFunc(appiumSupervisor.EnsureReady)                                                                                                                               // Reuse the same worker-owned Appium supervisor before every plan so local Appium is auto-started again if it goes away after startup.
 	grpcServerOptions, err := rpc.NewServerOptions(cfg.RPC.Security)                                                                                                                         // Build the worker gRPC server options that match the configured internal RPC transport mode and shared-token enforcement.
 	if err != nil {                                                                                                                                                                          // Stop immediately when the configured internal RPC security settings cannot be turned into a gRPC server safely.
 		log.Fatalf("failed to initialize worker gRPC security: %v", err) // Surface the gRPC security wiring failure before the listener starts.

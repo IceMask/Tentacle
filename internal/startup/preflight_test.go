@@ -110,6 +110,16 @@ func TestValidateWorkerStartupRejectsInvalidAppiumURL(t *testing.T) {
 	}
 }
 
+// TestValidateGatewayStartupAcceptsRemoteAccessCompatibilityAlias verifies that gateway startup accepts the legacy test_grid selector when the required remote-access project configuration is present.
+func TestValidateGatewayStartupAcceptsRemoteAccessCompatibilityAlias(t *testing.T) {
+	cfg := newValidConfig()                                       // Start from a fully valid baseline config so this test mutates only the Device Farm mode and project fields.
+	cfg.DeviceFarm.Mode = "test_grid"                             // Select the legacy compatibility alias so startup validation must treat it as remote_access.
+	cfg.DeviceFarm.ProjectARN = "arn:aws:devicefarm:project:test" // Provide one concrete Device Farm project ARN so the compatibility alias has the required remote-access project context.
+	if err := ValidateGatewayStartup(cfg, false); err != nil {    // Run gateway startup validation in HTTP mode against the compatibility-alias config.
+		t.Fatalf("expected gateway startup validation to accept test_grid compatibility alias, got error: %v", err) // Surface the unexpected validation failure because legacy configs should keep booting.
+	}
+}
+
 // TestValidateWorkerStartupRejectsTLSRPCWithoutFiles verifies that worker startup fails fast when internal RPC TLS mode is enabled without readable server certificate material.
 func TestValidateWorkerStartupRejectsTLSRPCWithoutFiles(t *testing.T) {
 	cfg := newValidConfig()                                  // Start from a fully valid baseline config so this test mutates only the internal RPC security fields.

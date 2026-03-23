@@ -13,6 +13,7 @@ import (
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/devicefarm"
 	"mcp_for_appium/internal/errors"
+	"mcp_for_appium/internal/startup"
 	"mcp_for_appium/internal/storage/postgres"
 	"mcp_for_appium/internal/storage/redis"
 	"mcp_for_appium/internal/storage/s3"
@@ -26,6 +27,8 @@ import (
 
 const (
 	appiumSessionKeyPrefix     = "session:appium:"
+	appiumSessionURLKeyPrefix  = "session:appium:url:"
+	deviceFarmRemoteKeyPrefix  = "session:devicefarm:remote:"
 	appiumSessionKeyTTL        = 24 * time.Hour
 	deviceFarmCacheTTL         = 24 * time.Hour
 	deviceFarmUploadMetaTTL    = 2 * time.Hour
@@ -50,6 +53,7 @@ type Service struct {
 	registry       *WorkerRegistry
 	publisher      *EventsPublisher
 	appiumURL      string
+	appiumRuntime  *startup.LocalAppiumSupervisor
 	appiumMu       sync.Mutex
 	appiumMap      map[string]*appium.Client
 	appiumLastUsed map[string]time.Time
@@ -61,7 +65,7 @@ type Service struct {
 	cleanupWG      sync.WaitGroup
 	logger         *slog.Logger
 	execMode       string
-	deviceFarm     *devicefarm.Client
+	deviceFarm     deviceFarmRuntimeClient
 	dfMode         string
 	dfProjectARN   string
 }
@@ -82,18 +86,19 @@ func NewService(cfg config.OrchestratorConfig, rpcCfg config.RPCSecurityConfig, 
 		registry:       registry,
 		publisher:      publisher,
 		appiumURL:      workerCfg.AppiumURL,
+		appiumRuntime:  startup.NewLocalAppiumSupervisor(workerCfg.AppiumURL), // Bind one local Appium supervisor to the configured Appium URL so monolith StartSession can auto-start one loopback Appium service on demand.
 		appiumMap:      make(map[string]*appium.Client),
 		appiumLastUsed: make(map[string]time.Time),
 		planCancel:     make(map[string]context.CancelFunc),
 		snapshots:      make(map[string]*snapshotCache),
 		logger:         telemetry.Logger(),
 		execMode:       mode,
-		dfMode:         strings.ToLower(strings.TrimSpace(dfCfg.Mode)),
-		dfProjectARN:   strings.TrimSpace(dfCfg.ProjectARN),
+		dfMode:         normalizeDeviceFarmMode(dfCfg.Mode),
+		dfProjectARN:   resolvedDeviceFarmProjectARN(dfCfg),
 	}
 
-	// Initialize Device Farm SDK client when run_api mode is explicitly enabled.
-	if svc.dfMode == "run_api" {
+	// Initialize the Device Farm SDK client when any supported Device Farm runtime mode is explicitly enabled.
+	if svc.dfMode == "run_api" || svc.dfMode == "remote_access" {
 		dfClient, err := devicefarm.NewClient(context.Background(), awsCfg, dfCfg)
 		if err != nil {
 			svc.logger.Warn("failed to init device farm client", "error", err)
@@ -151,6 +156,9 @@ func (s *Service) Stop() {
 	if s.registry != nil {
 		s.registry.Stop()
 	}
+	if err := s.stopManagedAppium(); err != nil { // Stop any locally managed Appium child process so monolith shutdown does not leave one orphaned automation server behind.
+		s.logger.Warn("failed to stop managed local appium service", "error", err) // Surface managed Appium shutdown failures without masking the rest of the orchestrator shutdown flow.
+	}
 	removedAppiumClients, removedSnapshots := s.clearInMemoryCaches() // Drop every remaining cached Appium client and snapshot entry so shutdown leaves no in-memory residue behind.
 	s.logger.Info("orchestrator service stopped", "cancelled_plans", cancelledPlans, "removed_appium_clients", removedAppiumClients, "removed_snapshots", removedSnapshots)
 }
@@ -162,15 +170,27 @@ func (s *Service) StartSession(ctx context.Context, projectID string, caps map[s
 	startedAt := time.Now()                                                                                       // Capture method start for duration logging.
 	s.logger.InfoContext(ctx, "orchestrator StartSession begin", "project_id", projectID, "caps_keys", len(caps)) // Log method entry with high-signal inputs.
 
-	if s.appiumURL == "" {
+	target, err := s.resolveStartSessionTarget(ctx, projectID, caps) // Resolve the concrete Appium endpoint and sanitized capability payload for either local Appium or one Device Farm remote-access reservation.
+	if err != nil {                                                  // Stop immediately when the local or Device Farm runtime target cannot be resolved safely.
+		s.logger.ErrorContext(ctx, "orchestrator StartSession failed", "project_id", projectID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log runtime-target resolution failures explicitly.
+		return nil, err                                                                                                                                            // Preserve the precise runtime-target resolution error for the caller.
+	}
+	if strings.TrimSpace(target.appiumURL) == "" {
 		s.logger.ErrorContext(ctx, "orchestrator StartSession failed", "project_id", projectID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", "appium_url is empty") // Log configuration failures explicitly.
 		return nil, errors.New(errors.CodeConfigMissing, "appium_url is empty")
 	}
+	if strings.TrimSpace(target.remoteAccessSessionARN) == "" { // Run the local Appium readiness and auto-start path only when the resolved session target is not backed by one Device Farm remote-access reservation.
+		if err := s.ensureAppiumReady(ctx); err != nil { // Ensure the configured local Appium endpoint is reachable and auto-start one local loopback Appium service when needed before session creation begins.
+			s.logger.ErrorContext(ctx, "orchestrator StartSession failed", "project_id", projectID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log Appium bootstrap failures explicitly so operators can see why session creation never reached the Appium new-session call.
+			return nil, errors.WrapPreservingCode("failed to ensure appium service", err)                                                                              // Preserve the reachability or bootstrap error code so gateway transports surface the correct failure semantics to clients.
+		}
+	}
 
-	app := appium.NewClient(s.appiumURL)
-	appiumSessionID, err := app.StartSession(ctx, caps)
-	if err != nil {
-		s.logger.ErrorContext(ctx, "orchestrator StartSession failed", "project_id", projectID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log upstream Appium failures with method latency.
+	app := appium.NewClient(target.appiumURL)                  // Construct one Appium client against the resolved local or Device Farm endpoint before creating the automation session.
+	appiumSessionID, err := app.StartSession(ctx, target.caps) // Start the Appium session against the resolved endpoint using the sanitized capability payload.
+	if err != nil {                                            // Stop immediately when the downstream Appium endpoint rejects or times out during new-session creation.
+		s.cleanupFailedStartSession(ctx, target)                                                                                                                   // Best-effort stop any just-created Device Farm remote-access reservation so failed Appium setup does not leak AWS device slots.
+		s.logger.ErrorContext(ctx, "orchestrator StartSession failed", "project_id", projectID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log Appium bootstrap failures explicitly so operators can see why session creation never reached the Appium new-session call.
 		return nil, errors.WrapPreservingCode("failed to start appium session", err)                                                                               // Preserve the downstream Appium timeout/not-found code so gateway transports keep the correct external status mapping.
 	}
 
@@ -192,14 +212,17 @@ func (s *Service) StartSession(ctx context.Context, projectID string, caps map[s
 
 	if err := s.dao.CreateSession(ctx, sess); err != nil {
 		_ = app.DeleteSession(ctx)
+		s.cleanupFailedStartSession(ctx, target)                                                                                                                   // Best-effort stop any just-created Device Farm remote-access reservation because the platform session row never persisted successfully.
 		s.logger.ErrorContext(ctx, "orchestrator StartSession failed", "project_id", projectID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log persistence failure before returning.
 		return nil, errors.Wrap(errors.CodeInternal, "failed to create session", err)
 	}
 
-	if err := s.cache.Set(ctx, appiumSessionKeyPrefix+sessID, appiumSessionID, appiumSessionKeyTTL); err != nil {
-		s.logger.WarnContext(ctx, "failed to persist appium session mapping",
+	if err := s.persistSessionAutomationState(ctx, sessID, appiumSessionID, target); err != nil { // Persist the Appium session id, concrete endpoint, and optional Device Farm reservation handle for later reuse and cleanup.
+		s.logger.WarnContext(ctx, "failed to persist session automation state",
 			"session_id", sessID,
 			"appium_session_id", appiumSessionID,
+			"appium_url", target.appiumURL,
+			"remote_access_session_arn", target.remoteAccessSessionARN,
 			"error", err)
 	}
 
@@ -208,7 +231,7 @@ func (s *Service) StartSession(ctx context.Context, projectID string, caps map[s
 	s.appiumLastUsed[sessID] = time.Now()
 	s.appiumMu.Unlock()
 
-	s.logger.InfoContext(ctx, "orchestrator StartSession done", "project_id", projectID, "session_id", sessID, "appium_session_id", appiumSessionID, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful method completion and key identifiers.
+	s.logger.InfoContext(ctx, "orchestrator StartSession done", "project_id", projectID, "session_id", sessID, "appium_session_id", appiumSessionID, "appium_url", target.appiumURL, "remote_access_session_arn", target.remoteAccessSessionARN, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful method completion and key identifiers.
 	return sess, nil
 }
 
@@ -309,19 +332,11 @@ func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 	}
 
 	s.appiumMu.Lock()
-	app := s.appiumMap[sessionID]
 	delete(s.appiumMap, sessionID)
 	delete(s.appiumLastUsed, sessionID)
 	s.appiumMu.Unlock()
 
-	if app != nil {
-		_ = app.DeleteSession(ctx)
-	}
-	if err := s.cache.Del(ctx, appiumSessionKeyPrefix+sessionID); err != nil {
-		s.logger.WarnContext(ctx, "failed to delete appium session mapping",
-			"session_id", sessionID,
-			"error", err)
-	}
+	s.releaseSessionAutomation(ctx, sessionID) // Release the Appium session, cached endpoint mappings, and any Device Farm remote-access reservation backing this platform session.
 
 	s.logger.InfoContext(ctx, "orchestrator EndSession done", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful session termination.
 	return nil
@@ -481,19 +496,10 @@ func (s *Service) getAppiumClient(ctx context.Context, sessionID string) (*appiu
 	}
 	s.appiumMu.Unlock()
 	if app == nil {
-		appiumSessionID, err := s.cache.Get(ctx, appiumSessionKeyPrefix+sessionID)
-		if err != nil {
-			if err.Error() == "redis: nil" {
-				return nil, errors.New(errors.CodeSessionNotFound, "session not found")
-			}
-			return nil, errors.Wrap(errors.CodeStoreRead, "failed to load appium session mapping", err)
+		restored, err := s.restoreAppiumClient(ctx, sessionID) // Rebuild one Appium client from the persisted per-session endpoint and Appium session mapping when the in-memory cache no longer has it.
+		if err != nil {                                        // Stop immediately when the persisted session mappings cannot be restored into one live Appium client.
+			return nil, err // Preserve the stable session-not-found or storage-read error returned by the restore helper.
 		}
-		if appiumSessionID == "" {
-			return nil, errors.New(errors.CodeSessionNotFound, "session not found")
-		}
-
-		restored := appium.NewClient(s.appiumURL)
-		restored.AttachSession(appiumSessionID)
 
 		s.appiumMu.Lock()
 		if existing := s.appiumMap[sessionID]; existing != nil {

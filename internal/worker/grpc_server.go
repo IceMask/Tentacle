@@ -24,6 +24,7 @@ type GRPCServer struct {
 	reporter    distributedPlanReporter
 	renewEvery  time.Duration
 	newClient   func(string) sessionAwareAppiumClient
+	ensureReady func(context.Context) error
 
 	planMu     sync.Mutex
 	planCancel map[string]context.CancelFunc
@@ -59,9 +60,15 @@ func NewGRPCServer(appiumURL string, stepTimeout, autoWaitMax time.Duration, wor
 		newClient: func(url string) sessionAwareAppiumClient { // Build the default Appium client factory once so tests can swap it with a stub easily.
 			return appium.NewClient(url) // Return the production Appium HTTP client used by distributed worker execution.
 		},
-		planCancel: make(map[string]context.CancelFunc),
-		logger:     telemetry.Logger(),
+		ensureReady: nil, // Leave Appium readiness unmanaged by default so callers can opt into local auto-start explicitly from process wiring.
+		planCancel:  make(map[string]context.CancelFunc),
+		logger:      telemetry.Logger(),
 	}
+}
+
+// SetAppiumReadyFunc installs one optional readiness function that is invoked before each distributed plan execution starts.
+func (s *GRPCServer) SetAppiumReadyFunc(ensure func(context.Context) error) {
+	s.ensureReady = ensure // Replace the per-plan Appium readiness hook so the caller can inject local auto-start or dependency-probe behavior.
 }
 
 // ActiveLoad returns the number of plans currently executing on this worker.
@@ -108,6 +115,13 @@ func (s *GRPCServer) runPlan(traceID string, sessionID string, attempt int64, pl
 
 	if s.reporter != nil { // Start the lease-renewal loop only when the worker has a wired orchestrator callback client.
 		go s.renewLeaseLoop(ctx, cancel, traceID, attempt) // Refresh the distributed ownership lease in the background until this run exits or loses ownership.
+	}
+	if s.ensureReady != nil { // Run the optional Appium readiness hook before parsing or executing the plan so local Appium auto-start can happen on demand per plan.
+		if err := s.ensureReady(ctx); err != nil { // Stop immediately when the configured Appium dependency is still unavailable after the readiness hook runs.
+			s.logger.Error("failed to ensure worker appium service", "trace_id", traceID, "attempt", attempt, "error", err)             // Log the worker-side Appium bootstrap failure so operators can diagnose local automation dependency issues quickly.
+			s.reportCompletion(traceID, attempt, "failed", "appium_unavailable", "trace failed before worker appium became ready", err) // Report one failed terminal result so the orchestrator closes the distributed trace instead of leaving it running forever.
+			return                                                                                                                      // Stop execution because no distributed plan can run without one reachable Appium dependency.
+		}
 	}
 
 	steps, err := ParsePlan(planRaw)
