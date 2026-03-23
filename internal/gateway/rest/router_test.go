@@ -1,4 +1,4 @@
-// router_test.go verifies that trace subscription token issuance enforces persisted trace ownership before minting WebSocket credentials.
+// router_test.go verifies that the remaining browser helper endpoint enforces persisted trace ownership before minting WebSocket subscription tokens.
 package rest
 
 import (
@@ -36,14 +36,14 @@ const (
 	routerTestDatabaseHost = "127.0.0.1"         // routerTestDatabaseHost keeps the embedded PostgreSQL test instance bound to IPv4 loopback only.
 )
 
-// traceSubscribeHarness owns the isolated PostgreSQL, Redis, orchestrator service, and REST router used by one trace-subscription authorization test.
+// traceSubscribeHarness owns the isolated PostgreSQL, Redis, orchestrator service, and helper router used by one trace-subscription authorization test.
 type traceSubscribeHarness struct {
 	dao    *postgres.DAO
 	cache  *redisstore.Cache
 	router *Router
 }
 
-// newTraceSubscribeHarness starts isolated PostgreSQL and Redis dependencies, applies migrations, and constructs a REST router ready for trace-subscription authorization tests.
+// newTraceSubscribeHarness starts isolated PostgreSQL and Redis dependencies, applies migrations, and constructs the trimmed helper router ready for trace-subscription authorization tests.
 func newTraceSubscribeHarness(t *testing.T) *traceSubscribeHarness {
 	ctx := context.Background()                                                        // Use one shared background context because the harness setup runs synchronously inside the current test.
 	port := reserveTraceSubscribeLoopbackPort(t)                                       // Reserve one loopback TCP port so the embedded PostgreSQL instance can bind without colliding with developer-managed services.
@@ -86,7 +86,7 @@ func newTraceSubscribeHarness(t *testing.T) *traceSubscribeHarness {
 	})
 
 	orchSvc := orchestrator.NewService(config.OrchestratorConfig{PlanTimeout: time.Minute, StepTimeout: 5 * time.Second, AutoWaitMax: 500 * time.Millisecond, SnapshotTTL: time.Minute, ExecutionMode: orchestrator.ExecutionModeMonolith}, config.RPCSecurityConfig{}, config.WorkerConfig{AppiumURL: "http://127.0.0.1:4723"}, config.AWSConfig{}, config.DeviceFarmConfig{Mode: "disabled"}, dao, cache, nil) // Construct the production orchestrator service with the minimum config required for trace reads.
-	router := NewRouter(orchSvc, cache, nil)                                                                                                                                                                                                                                                                                                                                                                     // Construct the production REST router around the real orchestrator service so subscription issuance runs through the live trace-read path.
+	router := NewRouter(orchSvc)                                                                                                                                                                                                                                                                                                                                                                                 // Construct the trimmed helper router around the real orchestrator service so token issuance runs through the live trace-read path.
 	router.SetSubscriptionTokenStore(gatewaywebsocket.NewSubscriptionTokenStore(cache, time.Minute))                                                                                                                                                                                                                                                                                                             // Inject the production subscription-token store so authorized callers receive real Redis-backed tokens.
 
 	return &traceSubscribeHarness{dao: dao, cache: cache, router: router} // Return the fully wired harness so individual tests can seed traces and hit the real subscription endpoint.
@@ -159,15 +159,15 @@ func (h *traceSubscribeHarness) seedOwnedTrace(t *testing.T, tenantID string, su
 	return traceID // Return the seeded trace identifier so the test can call the subscription endpoint under test.
 }
 
-// TestHandleTraceSubscribeRejectsUnauthorizedTraceOwner verifies that the REST subscription-token issuance endpoint denies authenticated callers that do not own the requested trace.
-func TestHandleTraceSubscribeRejectsUnauthorizedTraceOwner(t *testing.T) {
+// TestHandleTraceSubscriptionTokenRejectsUnauthorizedTraceOwner verifies that the browser token endpoint denies authenticated callers that do not own the requested trace.
+func TestHandleTraceSubscriptionTokenRejectsUnauthorizedTraceOwner(t *testing.T) {
 	harness := newTraceSubscribeHarness(t)                                                                                                    // Start one isolated router harness so this test can exercise the real trace-subscription authorization path.
 	traceID := harness.seedOwnedTrace(t, "tenant-a", "subject-owner")                                                                         // Seed one trace owned by a different subject so the endpoint must reject the mismatched caller.
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/traces/"+traceID+":subscribe", nil)                                              // Build one subscription-token issuance request that targets the owned trace.
+	request := httptest.NewRequest(http.MethodPost, "/api/ws/traces/"+traceID+"/subscription-token", nil)                                     // Build one browser token request that targets the owned trace through the non-A2A helper path.
 	request = request.WithContext(auth.WithSubject(request.Context(), &auth.Subject{ID: "subject-other", TenantID: "tenant-a", Type: "pat"})) // Attach a different authenticated subject from the same tenant so the exact subject-ownership rule is exercised.
 	recorder := httptest.NewRecorder()                                                                                                        // Capture the HTTP response generated by the production subscription endpoint.
 
-	harness.router.handleTraceSubscribe(recorder, request, traceID) // Execute the production trace-subscription endpoint against the unauthorized caller.
+	harness.router.handleTraceSubscriptionToken(recorder, request, traceID) // Execute the production browser token endpoint against the unauthorized caller.
 
 	if recorder.Code != http.StatusForbidden { // Fail the test when the endpoint does not map the ownership failure to HTTP 403.
 		t.Fatalf("expected forbidden status, got %d with body %s", recorder.Code, recorder.Body.String()) // Surface the unexpected status and body so routing regressions are easy to diagnose.
@@ -182,15 +182,15 @@ func TestHandleTraceSubscribeRejectsUnauthorizedTraceOwner(t *testing.T) {
 	}
 }
 
-// TestHandleTraceSubscribeIssuesTokenForAuthorizedOwner verifies that the REST subscription-token issuance endpoint mints one short-lived token for the authenticated trace owner.
-func TestHandleTraceSubscribeIssuesTokenForAuthorizedOwner(t *testing.T) {
+// TestHandleTraceSubscriptionTokenIssuesTokenForAuthorizedOwner verifies that the browser token endpoint mints one short-lived token for the authenticated trace owner.
+func TestHandleTraceSubscriptionTokenIssuesTokenForAuthorizedOwner(t *testing.T) {
 	harness := newTraceSubscribeHarness(t)                                                                                                    // Start one isolated router harness so this test can exercise the real trace-subscription issuance path.
 	traceID := harness.seedOwnedTrace(t, "tenant-a", "subject-owner")                                                                         // Seed one trace owned by the same subject that will request the subscription token.
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/traces/"+traceID+":subscribe", nil)                                              // Build one subscription-token issuance request that targets the owned trace.
+	request := httptest.NewRequest(http.MethodPost, "/api/ws/traces/"+traceID+"/subscription-token", nil)                                     // Build one browser token request that targets the owned trace through the non-A2A helper path.
 	request = request.WithContext(auth.WithSubject(request.Context(), &auth.Subject{ID: "subject-owner", TenantID: "tenant-a", Type: "pat"})) // Attach the matching authenticated subject so the endpoint should authorize the request.
 	recorder := httptest.NewRecorder()                                                                                                        // Capture the HTTP response generated by the production subscription endpoint.
 
-	harness.router.handleTraceSubscribe(recorder, request, traceID) // Execute the production trace-subscription endpoint against the authorized caller.
+	harness.router.handleTraceSubscriptionToken(recorder, request, traceID) // Execute the production browser token endpoint against the authorized caller.
 
 	if recorder.Code != http.StatusCreated { // Fail the test when the endpoint does not issue a subscription token for the authorized trace owner.
 		t.Fatalf("expected created status, got %d with body %s", recorder.Code, recorder.Body.String()) // Surface the unexpected status and body so issuance regressions are easy to diagnose.

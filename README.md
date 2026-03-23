@@ -2,7 +2,7 @@
 
 > **发布阶段**: `v0.x` 预发布
 > **当前实现口径**: `v4.4` 需求/设计基线
-> **协议支持**: 标准 MCP (Model Context Protocol) + JSON-RPC + REST + gRPC + WebSocket
+> **协议支持**: 标准 MCP (Model Context Protocol) + JSON-RPC + gRPC + WebSocket + HTTP 辅助端点
 
 ## 概述
 
@@ -13,7 +13,7 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 - ✅ **标准 MCP 协议支持**：实现 Anthropic MCP 标准（协议版本 2024-11-05）
 - ✅ **stdio 传输模式**：通过 `gateway --stdio` 启动，支持 Claude Desktop 配置
 - ✅ **MCP Tools 注册表**：26 个工具（会话/执行/元素/手势/实用/Device Farm/调试）暴露给 LLM
-- ✅ **向后兼容**：保持原有 HTTP/REST/gRPC/WebSocket 接口不变
+- ✅ **HTTP 辅助能力**：保留健康检查、指标与浏览器 WebSocket subscription token 签发端点
 - ✅ **当前 GA 候选模式**：`monolith`
 - ⚠️ **distributed**：功能已补齐 ownership lease、结果回传、worker 恢复、stale-result protection 与端到端回归，但首个稳定版仍明确按 `experimental` 管理
 
@@ -31,7 +31,8 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 | `monolith` 执行模式 | `GA candidate` | 当前推荐的正式运行模式 |
 | `distributed` 执行模式 | `experimental` | 已具备结果回传、lease、worker 恢复与 distributed E2E，但首个稳定版仍按实验特性发布 |
 | MCP `stdio` | `GA candidate` | 可供 Claude Desktop 等 MCP 客户端发现和调用 |
-| HTTP JSON-RPC / REST | `GA candidate` | 主链路可用 |
+| HTTP JSON-RPC | `GA candidate` | 主链路可用 |
+| HTTP 辅助端点 | `GA candidate` | 用于 `/healthz`、`/metrics` 与浏览器 WebSocket token 签发 |
 | WebSocket 事件订阅 | `GA candidate` | 浏览器需先换短时 subscription token，trace 订阅已校验持久化 ownership |
 | `replay` / `subscribe` / `unsubscribe` JSON-RPC 方法 | `planned` | schema 预留，尚未实现 |
 | PAT / OIDC / HMAC 鉴权 | `GA candidate` | 已有权威模型与安全边界，但仍建议先按受控环境启用 |

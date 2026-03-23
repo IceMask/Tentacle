@@ -167,9 +167,9 @@ func runHTTPMode(cfg *config.Config) {
 
 	// 构造 HTTP/WS 相关 handler
 	jsonrpcHandler := jsonrpc.NewHandler(orchSvc, capSvc)
-	restRouter := rest.NewRouter(orchSvc, redisCache, capSvc)
-	subscriptionTokenStore := websocket.NewSubscriptionTokenStore(redisCache, cfg.WebSocket.SubscriptionTokenTTL) // Construct the shared Redis-backed subscription-token store so REST issuance and WebSocket handshake validation use the same authority.
-	restRouter.SetSubscriptionTokenStore(subscriptionTokenStore)                                                  // Inject the shared token store into the REST router so the v4.4 subscribe endpoint can issue short-lived tokens.
+	restRouter := rest.NewRouter(orchSvc)
+	subscriptionTokenStore := websocket.NewSubscriptionTokenStore(redisCache, cfg.WebSocket.SubscriptionTokenTTL) // Construct the shared Redis-backed subscription-token store so the browser helper endpoint and WebSocket handshake validation use the same authority.
+	restRouter.SetSubscriptionTokenStore(subscriptionTokenStore)                                                  // Inject the shared token store into the trimmed HTTP helper router so browser clients can mint short-lived subscription tokens.
 	authMiddleware, err := buildGatewayAuthMiddleware(ctx, cfg, pgDAO, redisCache)                                // Construct the optional gateway auth middleware once so JSON-RPC and REST can share the same auth pipeline.
 	if err != nil {                                                                                               // Stop startup when a configured auth source cannot be initialized safely.
 		log.Fatalf("failed to init gateway auth: %v", err) // Surface the auth construction failure before the HTTP listener starts.
@@ -179,7 +179,7 @@ func runHTTPMode(cfg *config.Config) {
 
 	protectedMux := http.NewServeMux()              // Isolate auth-protected routes so health, metrics, and WebSocket can keep their dedicated exposure rules.
 	protectedMux.Handle("/jsonrpc", jsonrpcHandler) // Register the JSON-RPC endpoint inside the protected route subtree.
-	restRouter.RegisterRoutes(protectedMux)         // Register the REST API endpoints inside the same protected subtree.
+	restRouter.RegisterRoutes(protectedMux)         // Register the remaining browser helper endpoint that issues short-lived WebSocket subscription tokens.
 	protectedHandler := http.Handler(protectedMux)  // Seed the protected subtree handler with the raw mux before optional auth wrapping.
 	if authMiddleware != nil {                      // Wrap the protected subtree only when at least one auth validator is active.
 		protectedHandler = authMiddleware.Handle(protectedHandler) // Enforce HMAC/OIDC/PAT auth for JSON-RPC and REST requests.

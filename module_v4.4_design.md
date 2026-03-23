@@ -7,8 +7,8 @@
 ```
 ┌────────────────┐      ┌───────────────────┐      ┌─────────────────────┐
 │ MCP/Agent 客户端 │─HTTP→│ Gateway (Module I) │─gRPC→│ Orchestrator (Module I) │
-│ - JSON-RPC      │  WS  │ - JSON-RPC/A2A REST │     │ - 调度/并发配额           │
-│ - A2A REST/gRPC │      │ - WebSocket Hub     │     │ - 事件落库/发布           │
+│ - MCP JSON-RPC  │  WS  │ - JSON-RPC          │     │ - 调度/并发配额           │
+│ - WebSocket     │      │ - WebSocket Hub     │     │ - 事件落库/发布           │
 └────────────────┘      │ - Capabilities/健康 │     │ - Worker Registry        │
                          └─────────┬─────────┘     └──────────┬────────────┘
                                    │ gRPC                               │ gRPC
@@ -38,12 +38,11 @@
 ## 2. Module I 设计要点
 
 ### 2.1 Gateway
-- **main.go**：配置加载 → Telemetry 初始化 → gRPC 客户端与缓存初始化 → 构建 JSON-RPC Handler (`internal/gateway/jsonrpc`), REST Router (`internal/gateway/rest`), WebSocket Hub (`internal/gateway/websocket`) → 注册中间件（Auth→RateLimit→Logging）→ 按环境策略执行 TLS/HTTP Serve。
+- **main.go**：配置加载 → Telemetry 初始化 → gRPC 客户端与缓存初始化 → 构建 JSON-RPC Handler (`internal/gateway/jsonrpc`), 浏览器 token Helper Router (`internal/gateway/rest`), WebSocket Hub (`internal/gateway/websocket`) → 注册中间件（Auth→RateLimit→Logging）→ 按环境策略执行 TLS/HTTP Serve。
 - **JSON-RPC**：`methods.go` 按函数拆分逻辑；`healthCheck` 通过 orchestrator 聚合依赖状态；统一 `mapErrorToJSONRPC` 映射内部错误码。
-- **REST**：
-  - `POST /sessions` 等 handler 直接调用 orchestrator gRPC；`/capabilities` 复用 `capabilities.Service`。
-  - `Idempotency-Key` 通过 `util/idempotency.go` 写入 Redis（TTL 24h）。
-  - 浏览器订阅前通过 `POST /api/v1/traces/{id}:subscribe` 申请短时 subscription token。
+- **HTTP Helper**：
+  - 浏览器订阅前通过 `POST /api/ws/traces/{id}/subscription-token` 申请短时 subscription token。
+  - 该 helper 仅负责基于持久化 trace ownership 的授权校验与短时 token 签发，不再承载 A2A 风格业务接口。
 - **Auth Middleware**：
   - 按凭证类型分流：完整 HMAC 头 → HMAC；Bearer JWT → OIDC；`Bearer mcp_v1_...` → PAT。
   - 多套完整凭证并存时返回鉴权冲突，不做 OIDC 与 PAT 的盲目回退。
@@ -52,7 +51,7 @@
   - `publishCh` 异步广播，队列长度 256 drop-oldest；慢连接检测+断开；指标 `websocket_drops_total`、`ws_queue_len_histogram`。
   - 浏览器握手默认同源校验；配置 allowlist 时仅允许 allowlist；无 `Origin` 的非浏览器客户端可放行。
   - 浏览器 MVP 阶段统一使用 query parameter 传递 subscription token；服务端日志不得记录完整 token 明文。
-  - 语义保持 at-most-once，消费者需结合 A2A 事件拉取补齐。
+  - 语义保持 at-most-once，消费者需结合 `getTrace` / `GetEvents` 补齐。
 
 ### 2.2 Orchestrator
 - **service.go**：

@@ -689,7 +689,15 @@ for event in stub.ExecutePlan(mobile_pb2.ExecutePlanRequest(
 ### 连接示例
 
 ```javascript
-const ws = new WebSocket('ws://localhost:8080/ws/plan-events?traceId=trace_123');
+const tokenResp = await fetch('http://localhost:8080/api/ws/traces/trace_123/subscription-token', {
+    method: 'POST',
+    headers: {
+        Authorization: 'Bearer YOUR_TOKEN'
+    }
+});
+
+const { subscriptionToken } = await tokenResp.json();
+const ws = new WebSocket(`ws://localhost:8080/ws/plan-events?subscriptionToken=${subscriptionToken}&traceId=trace_123`);
 
 ws.onopen = () => {
     console.log('Connected to event stream');
@@ -709,11 +717,20 @@ ws.onerror = (error) => {
 
 ws.onclose = () => {
     console.log('Connection closed');
-    // 使用 HTTP 补偿获取缺失事件
-    fetch(`/api/v1/traces/${traceId}/events?sinceEventId=${lastEventId}`)
+    // 使用 JSON-RPC getTrace 补偿获取当前 trace 状态和事件
+    fetch('/jsonrpc', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'getTrace',
+            params: { traceId },
+            id: 1
+        })
+    })
         .then(resp => resp.json())
-        .then(events => {
-            events.forEach(updateProgress);
+        .then(payload => {
+            (payload.result?.events || []).forEach(updateProgress);
         });
 };
 ```
@@ -795,24 +812,7 @@ headers = sign_request('POST', '/jsonrpc', request_body, 'your-secret')
 ### 查询配额
 
 ```bash
-curl -X GET http://localhost:8080/api/v1/quota \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-响应：
-```json
-{
-  "tenant": "your-tenant",
-  "project": "your-project",
-  "limits": {
-    "concurrent_sessions": 5,
-    "daily_executions": 1000
-  },
-  "current": {
-    "concurrent_sessions": 2,
-    "daily_executions": 125
-  }
-}
+echo "当前版本暂未公开单独的 quota HTTP 接口"
 ```
 
 ---

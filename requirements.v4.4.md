@@ -5,13 +5,13 @@
 > 本版在 v3 的 Module I 基线之上，吸收 v4.1.2 详细规范以及治理/增值规划，明确 Module I 必须交付的接口与验收标准，并补充 Module II（平台治理）与 Module III（增值扩展）的路线图与约束，供各语言实现与平台部署团队共同遵循。
 
 ## 1. 背景 & 目标
-- 构建面向 AI Agent 的统一移动执行内核：默认正确（auto-wait）、可回放、稳态低时延、强可观测，支持多协议（JSON-RPC/A2A/WS/gRPC）与跨区域部署。
+- 构建面向 AI Agent 的统一移动执行内核：默认正确（auto-wait）、可回放、稳态低时延、强可观测，支持多协议（MCP JSON-RPC/WS/gRPC）与跨区域部署。
 - 体系分三层：
-  - **Module I 核心执行层（必须实现）**：计划执行、语义快照、事件流、工件、A2A、Appium/ADF 调度、观测、基础安全。
+  - **Module I 核心执行层（必须实现）**：计划执行、语义快照、事件流、工件、Appium/ADF 调度、观测、基础安全。
   - **Module II 平台级治理（可拆分部署）**：订阅/Webhook 管理、成本与配额治理、数据合规、多租户审计。
   - **Module III 增值扩展（路线图）**：探索/生成引擎、视觉与智能插件生态、计费与 SaaS 化运维。
 - 发布阶段：
-  - **MVP**：Module I v4.2 全量功能（JSON-RPC/A2A/WS、Plan 执行、工件直传、ADF、观测、安全基线、健康检查）。
+  - **MVP**：Module I v4.2 全量功能（JSON-RPC/WS、Plan 执行、工件直传、ADF、观测、安全基线、健康检查）。
   - **Beta**：Module II 的订阅治理、成本监控、租户审计、数据生命周期；Module III 选定试点能力（视觉插件/Agent 回放）。
   - **GA**：Module I 高可用与灾备、Module II/III 的多区域化、计费、SaaS 运维、合规认证。
 
@@ -52,13 +52,13 @@
   ```
 
 #### 2.1.2 传统协议（向后兼容）
-- 支持 MCP JSON-RPC（HTTP POST `/jsonrpc`）、WebSocket 事件流、A2A REST (`/api/v1/*`)、A2A gRPC (`mcp.mobile.v1.a2a`) 以及 Worker gRPC (`mobile_mcp.v1.worker`)。
+- 支持 MCP JSON-RPC（HTTP POST `/jsonrpc`）、WebSocket 事件流、浏览器 WebSocket token HTTP 辅助端点，以及 Worker / Orchestrator 内部 gRPC。
 - 所有接口需返回 `apiVersion` 或在 `describeCapabilities`/`GET /capabilities` 中声明版本、特性稳定级别与弃用计划（含 `sunsetAt`）。
 - gRPC/JSON 结构仅允许向后兼容扩展；弃用项至少提前两个次要版本公告。
 - JSON-RPC 请求/响应必须通过 `schemas/jsonrpc/*.json` 校验（`additionalProperties:false`），包含以下方法：
   `startSession`, `endSession`, `executePlan`, `getSemanticSnapshot`, `takeScreenshot`,
   `getArtifacts`, `replay`, `subscribe`, `unsubscribe`, `describeCapabilities`, `healthCheck`。
-- A2A REST 端点：`POST /sessions`、`POST /plans:execute`、`POST /plans/{traceId}:cancel`、`GET /traces/{id}`、`GET /traces/{id}/events`、`GET /artifacts`、`GET /capabilities`（复用 JSON-RPC 输出）、`POST /traces/{id}:subscribe`（为浏览器签发短时 WebSocket subscription token）。
+- 浏览器 WebSocket token HTTP 辅助端点：`POST /api/ws/traces/{id}/subscription-token`（为浏览器签发短时 WebSocket subscription token）。
 - WebSocket `GET /ws/plan-events`：at-most-once 投递；断线通过 `GetEvents(sinceEventId)` 补齐。
 - 浏览器 WebSocket 连接不得直接复用长期 PAT/OIDC Bearer；浏览器必须先通过受保护接口换取短时 subscription token。
 - `traceId` 仅作为资源标识，不作为订阅授权凭据。
@@ -97,7 +97,7 @@
 - Prometheus 指标：`execute_latency_seconds`, `plan_event_seq_gaps`, `concurrency_in_use`, `queue_wait_seconds`, `appium_rtt_ms`, `websocket_drops_total`, `ws_queue_len_histogram`, `stream_logs_backpressure_total`, `artifact_upload_latency`, `adf_lease_success_rate`, `error_code_total`, `health_status`。
 - OTEL Tracing：Gateway→Orchestrator→Worker→Appium，全链路传播 `traceId/sessionId/stepIndex`。
 - 日志：结构化 JSON，自动注入 `requestId/traceId/sessionId`；敏感字段遮蔽（`token|secret|password|pin`）。
-- `healthCheck`：JSON-RPC 方法 & REST `/healthz`（选），返回 `status=healthy|degraded|unavailable` 与 `issues[]`；错误码 `E.HEALTH.DEGRADED/E.HEALTH.DOWN`。
+- `healthCheck`：JSON-RPC 方法 & HTTP `/healthz`（选），返回 `status=healthy|degraded|unavailable` 与 `issues[]`；错误码 `E.HEALTH.DEGRADED/E.HEALTH.DOWN`。
 - `healthCheck` 与 `/healthz` 至少需补充以下安全维度：`external_tls_enabled`、`rpc_security_mode`、`certificate_days_remaining`、`auth_failure_rate`、`websocket_origin_policy_mode`。
 
 ### 2.4 安全
@@ -105,7 +105,7 @@
 - PAT：正式模式使用 Postgres 作为权威源，Redis 仅做缓存/加速；token 格式为 `mcp_v1_<token_id>_<secret>`；库中仅存 `token_id` 与 `secret_hash`；PAT 启停与数据源选择由 `auth.pat.mode` 决定。
 - OIDC：正式配置使用 `issuer_url + audience`；`jwks_url_override` 仅作 override；必须校验 `iss`、`aud`、`exp/nbf/iat`，并支持有限时钟漂移与可选 `required_claims`。
 - HMAC：必须使用 key registry；canonical request 至少覆盖 `method`、`canonical_path`、`canonical_query`、`body_sha256`、`timestamp`、`nonce`、`key_id`；签名窗口默认 `±5m`，nonce TTL 默认 `10m-15m`。
-- 外部 HTTP / JSON-RPC / REST / WebSocket：生产环境必须 TLS1.2+（推荐 1.3）。
+- 外部 HTTP / JSON-RPC / WebSocket：生产环境必须 TLS1.2+（推荐 1.3）。
 - 内部 gRPC：分阶段落地，第一阶段至少为 `server TLS + client token`，后续演进到 mTLS；`dev` 环境允许显式开启明文模式，`staging` 与 `prod` 不应默认明文。
 - 日志与事件需脱敏 `secure` 数据；Artifact 存储启用 SSE、版本/生命周期策略；提供租户级合规删除。
 - 浏览器 WebSocket subscription token 至少包含 `sub`、`tenant_id`、`trace_id`、`exp`、`jti`、`scope`，默认 TTL 建议为 60 秒。

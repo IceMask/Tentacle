@@ -1,8 +1,7 @@
-// timeout_test.go verifies that gateway REST and JSON-RPC session-start requests fail fast when Appium accepts the request but never responds.
+// timeout_test.go verifies that gateway JSON-RPC session-start requests fail fast when Appium accepts the request but never responds.
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -13,13 +12,13 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"mcp_for_appium/internal/config"
 	internalerrors "mcp_for_appium/internal/errors"
 	gatewayjsonrpc "mcp_for_appium/internal/gateway/jsonrpc"
-	gatewayrest "mcp_for_appium/internal/gateway/rest"
 	"mcp_for_appium/internal/orchestrator"
 	"mcp_for_appium/internal/storage/postgres"
 	redisstore "mcp_for_appium/internal/storage/redis"
@@ -105,7 +104,7 @@ func newGatewayTimeoutHarness(t *testing.T) *gatewayTimeoutHarness {
 		AppiumURL: appiumURL, // Point the service at the intentionally unresponsive Appium stub so request timeout propagation can be asserted.
 	}, config.AWSConfig{}, config.DeviceFarmConfig{Mode: "disabled"}, dao, cache, nil) // Disable Device Farm and S3 because these gateway timeout tests do not touch those integrations.
 
-	return &gatewayTimeoutHarness{service: service, cache: cache, stopPostgres: stopPostgres, stopRedis: stopRedis, stopAppiumStub: stopAppiumStub} // Return the fully wired harness so individual tests can exercise REST and JSON-RPC timeout behavior.
+	return &gatewayTimeoutHarness{service: service, cache: cache, stopPostgres: stopPostgres, stopRedis: stopRedis, stopAppiumStub: stopAppiumStub} // Return the fully wired harness so individual tests can exercise JSON-RPC timeout behavior.
 }
 
 // reserveGatewayLoopbackPort reserves one IPv4 loopback TCP port and returns it so embedded PostgreSQL can bind deterministically during gateway tests.
@@ -175,43 +174,6 @@ func gatewayRepositoryRoot(t *testing.T) string {
 	return filepath.Dir(filepath.Dir(filepath.Dir(file))) // Walk from internal/gateway/timeout_test.go back up to the repository root directory.
 }
 
-// TestRESTStartSessionRespectsRequestTimeout verifies that the REST start-session endpoint returns promptly with a timeout-derived failure when Appium never responds.
-func TestRESTStartSessionRespectsRequestTimeout(t *testing.T) {
-	harness := newGatewayTimeoutHarness(t)                               // Start one isolated gateway timeout harness so this test can exercise the real REST handler path.
-	router := gatewayrest.NewRouter(harness.service, harness.cache, nil) // Construct the production REST router against the isolated orchestrator service and cache.
-	mux := http.NewServeMux()                                            // Create one fresh HTTP mux so the test can invoke only the registered REST routes it cares about.
-	router.RegisterRoutes(mux)                                           // Register the production REST routes on the fresh HTTP mux for direct handler invocation in the test.
-
-	requestBody := []byte(`{"projectId":"gateway-timeout-project","w3cCapsJson":{"platformName":"Android"}}`)          // Build one valid REST start-session request body so the only failure comes from the hanging Appium dependency.
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)                                     // Bound the REST request context so the hanging Appium dependency must surface as a prompt timeout.
-	defer cancel()                                                                                                     // Release the timeout resources once the REST handler returns.
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", bytes.NewReader(requestBody)).WithContext(ctx) // Build the production REST request using the short-lived timeout context.
-	recorder := httptest.NewRecorder()                                                                                 // Capture the production REST response so the test can assert status code and JSON payload.
-
-	startedAt := time.Now()                         // Capture the handler start time so the test can verify the REST layer fails promptly.
-	mux.ServeHTTP(recorder, request)                // Invoke the production REST handler path against the intentionally unresponsive Appium dependency.
-	elapsed := time.Since(startedAt)                // Measure the wall-clock duration so the test can verify fail-fast timeout handling.
-	if recorder.Code != http.StatusGatewayTimeout { // Fail the test when the REST endpoint does not map the Appium timeout to the expected HTTP 504 response.
-		t.Fatalf("expected HTTP 504 for REST startSession timeout, got %d with body %s", recorder.Code, recorder.Body.String()) // Surface the unexpected REST response so timeout mapping bugs are obvious.
-	}
-	if elapsed >= time.Second { // Fail the test when the REST endpoint hangs far beyond its timeout budget instead of failing promptly.
-		t.Fatalf("expected REST startSession to fail fast, took %v", elapsed) // Surface the slow failure because unresponsive dependencies must not stall the gateway indefinitely.
-	}
-
-	var payload struct {
-		Error struct {
-			InternalCode string `json:"internalCode"`
-			RawError     string `json:"rawError"`
-		} `json:"error"`
-	} // Hold the decoded REST error envelope so the test can assert the propagated internal error classification.
-	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil { // Decode the REST error body into a lightweight assertion struct.
-		t.Fatalf("failed to decode REST error payload: %v", err) // Surface payload-decode failures because they would hide the actual timeout response semantics.
-	}
-	if payload.Error.InternalCode != string(internalerrors.CodeAppTimeout) { // Fail the test when the REST error envelope does not preserve the Appium timeout code.
-		t.Fatalf("expected REST internal code %s, got %s", internalerrors.CodeAppTimeout, payload.Error.InternalCode) // Surface the unexpected code because callers rely on it for retry and diagnostics.
-	}
-}
-
 // TestJSONRPCStartSessionRespectsRequestTimeout verifies that the JSON-RPC start-session endpoint returns promptly with the Appium timeout code in its error data when Appium never responds.
 func TestJSONRPCStartSessionRespectsRequestTimeout(t *testing.T) {
 	harness := newGatewayTimeoutHarness(t)                     // Start one isolated gateway timeout harness so this test can exercise the real JSON-RPC handler path.
@@ -220,7 +182,7 @@ func TestJSONRPCStartSessionRespectsRequestTimeout(t *testing.T) {
 	requestBody := []byte(`{"jsonrpc":"2.0","method":"startSession","params":{"projectId":"gateway-timeout-project","w3cCapsJson":{"platformName":"Android"}},"id":1}`) // Build one valid JSON-RPC start-session request body so the only failure comes from the hanging Appium dependency.
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)                                                                                      // Bound the JSON-RPC request context so the hanging Appium dependency must surface as a prompt timeout.
 	defer cancel()                                                                                                                                                      // Release the timeout resources once the JSON-RPC handler returns.
-	request := httptest.NewRequest(http.MethodPost, "/jsonrpc", bytes.NewReader(requestBody)).WithContext(ctx)                                                          // Build the production JSON-RPC HTTP request using the short-lived timeout context.
+	request := httptest.NewRequest(http.MethodPost, "/jsonrpc", strings.NewReader(string(requestBody))).WithContext(ctx)                                                // Build the production JSON-RPC HTTP request using the short-lived timeout context.
 	recorder := httptest.NewRecorder()                                                                                                                                  // Capture the production JSON-RPC response so the test can assert the mapped error payload.
 
 	startedAt := time.Now()              // Capture the handler start time so the test can verify the JSON-RPC layer fails promptly.
