@@ -1,36 +1,29 @@
 # Changelog
 
-All notable changes to this repository will be documented in this file.
+All notable changes to this repository are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions are intended to follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.0] - 2026-03-24
 
 ### Added
 
-- Distributed worker-to-orchestrator callbacks for step events, lease renewals, and terminal results.
-- Redis-backed distributed ownership leases with persisted `traces.current_attempt` and `traces.terminal_reason` state.
-- Worker-side session attachment and stable distributed callback propagation for existing Appium sessions.
-- Worker recovery-window handling in the registry so offline workers re-enter through `degraded` before returning to `healthy`.
-- Real distributed callback and worker recovery tests.
-- Persisted session and trace ownership metadata plus resource-level authorization checks for authenticated trace and session access.
-- Repository-wide CI workflow that runs `go test ./... -count=1`.
-- Release-tag verification workflow that runs the general suite plus migration replay and monolith integration checks.
-- `v1.0.0` release checklist for the remaining stabilization work.
-- Top-level `SECURITY.md` and draft `RELEASE_NOTES_v1.0.0.md` release documentation.
-- Production-oriented example configuration and end-to-end distributed plus artifact integration coverage.
+- Standard MCP `stdio` support for AI clients and desktop integrations
+- HTTP JSON-RPC gateway for service integrations
+- WebSocket subscription-token flow for browser event streaming
+- AWS Device Farm support for scheduled runs and live remote-access Appium sessions
+- Repository-wide CI, migration replay validation, and integration-test coverage
+- Production-oriented configuration examples, release notes, and security documentation
 
 ### Changed
 
-- Distributed dispatch now reserves an execution attempt before RPC dispatch and promotes that reserved attempt to `running` only after worker acceptance.
-- Watchdog handling now distinguishes plan timeout from ownership-lease expiry and prevents stale callbacks from overwriting active or terminal traces.
-- Worker registration now uses a routable advertise address instead of hard-coded `localhost`.
-- Migration docs and example configuration now include distributed execution-state and advertise-address fields.
-- Distributed dispatch now resolves the worker-facing Appium session id before RPC dispatch so workers attach to the real Appium session.
-- WebSocket subscription-token issuance now authorizes the requested trace against persisted ownership metadata before minting a browser credential.
+- Unified session, trace, event, and artifact handling across monolith and distributed execution flows
+- Strengthened worker orchestration with result callbacks, ownership tracking, and worker recovery handling
+- Hardened authentication, RPC security, browser subscription authorization, and `adbShell` operator controls
+- Removed the A2A-style REST business surface and kept only the supported public interfaces
 
 ### Fixed
 
-- Distributed workers no longer execute plans without reusing the orchestrator-created Appium session id.
-- Accepted distributed traces no longer rely solely on plan timeout for closure; stale ownership now expires independently.
-- Late distributed callbacks can no longer append replay events or overwrite a trace once the owning lease or attempt has changed.
+- Trace finalization, retry, timeout, and stale-result handling across local and distributed execution paths
+- Migration replay validation and release-branch CI gating
+- Tool and capability discovery alignment with the shipped runtime behavior

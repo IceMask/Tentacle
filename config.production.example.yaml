@@ -85,11 +85,9 @@ aws:
   profile: ""
 
 devicefarm:
-  # disabled | remote_access | test_grid (compat alias) | run_api
+  # disabled | remote_access | run_api
   mode: disabled
   project_arn: ""
-  test_grid_project_arn: ""
-  # Reserved legacy field for old test_grid configs; remote_access prefers project_arn.
   url_expires_seconds: 600
 
 telemetry:
