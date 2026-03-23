@@ -1,4 +1,4 @@
-# MCP for Appium local-development configuration template.
+# Tentacle local-development configuration template.
 # Keep this file and local config.yaml in sync for predictable debugging behavior.
 
 gateway:

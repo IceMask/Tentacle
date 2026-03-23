@@ -2,7 +2,7 @@
 
 ## Overview
 
-`v1.0.0` is the first stable release of MCP for Appium. It provides a production-ready MCP and JSON-RPC gateway for mobile automation, trace persistence, artifact storage, browser event streaming, and AWS Device Farm integration.
+`v1.0.0` is the first stable release of Tentacle. It provides a production-ready MCP and JSON-RPC gateway for mobile automation, trace persistence, artifact storage, browser event streaming, and AWS Device Farm integration.
 
 ## Highlights
 

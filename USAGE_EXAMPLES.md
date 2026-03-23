@@ -1,13 +1,13 @@
-# Usage Examples
+# Tentacle Usage Examples
 
-This document shows common ways to use MCP for Appium through MCP `stdio` and HTTP JSON-RPC.
+This document shows common ways to use Tentacle through MCP `stdio` and HTTP JSON-RPC.
 
 ## Claude Desktop Configuration
 
 ```json
 {
   "mcpServers": {
-    "mcp-for-appium": {
+    "tentacle": {
       "command": "/absolute/path/to/gateway",
       "args": ["--stdio", "--config", "/absolute/path/to/config.yaml"]
     }

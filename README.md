@@ -1,6 +1,6 @@
-# MCP for Appium
+# Tentacle
 
-MCP for Appium is a mobile automation gateway that exposes Appium and AWS Device Farm workflows through standard MCP, HTTP JSON-RPC, WebSocket event streaming, and internal gRPC services.
+Tentacle is a mobile automation gateway that exposes Appium and AWS Device Farm workflows through standard MCP, HTTP JSON-RPC, WebSocket event streaming, and internal gRPC services.
 
 It is designed for AI-assisted mobile testing, scripted automation, and browser-based monitoring. The repository ships with embedded validation tools, PostgreSQL migrations, and production-oriented configuration examples so the same codebase can be used for local development, CI, and hosted deployments.
 
@@ -17,12 +17,12 @@ It is designed for AI-assisted mobile testing, scripted automation, and browser-
 
 ### Claude Desktop
 
-Add the gateway as an MCP server in your Claude Desktop configuration:
+Add Tentacle as an MCP server in your Claude Desktop configuration:
 
 ```json
 {
   "mcpServers": {
-    "mcp-for-appium": {
+    "tentacle": {
       "command": "/absolute/path/to/gateway",
       "args": ["--stdio", "--config", "/absolute/path/to/config.yaml"]
     }

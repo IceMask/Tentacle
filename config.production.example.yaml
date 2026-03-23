@@ -1,4 +1,4 @@
-# MCP for Appium production-oriented configuration template.
+# Tentacle production-oriented configuration template.
 # Start from this file for staging or production deployments and only relax these settings deliberately for local development.
 
 gateway:
@@ -70,7 +70,7 @@ auth:
     static_tokens: {}
   oidc:
     issuer_url: https://issuer.example.com
-    audience: mcp-for-appium
+    audience: tentacle
     jwks_url_override: ""
   hmac:
     # disabled | static | postgres

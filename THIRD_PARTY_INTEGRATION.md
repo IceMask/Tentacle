@@ -1,6 +1,6 @@
-# Third-Party Integration Guide
+# Tentacle Third-Party Integration Guide
 
-This document describes the supported public integration paths for MCP for Appium.
+This document describes the supported public integration paths for Tentacle.
 
 ## Supported Integration Paths
 
