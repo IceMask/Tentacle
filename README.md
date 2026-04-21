@@ -10,8 +10,9 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 
 ### 当前发布定位
 
-- ✅ **标准 MCP 协议支持**：实现 Anthropic MCP 标准（协议版本 2024-11-05）
+- ✅ **标准 MCP 协议支持**：实现 MCP 标准核心能力（目标协议版本 2025-06-18）
 - ✅ **stdio 传输模式**：通过 `gateway --stdio` 启动，支持 Claude Desktop 配置
+- ✅ **Streamable HTTP 传输模式**：通过 `/mcp` 提供标准 MCP HTTP endpoint
 - ✅ **MCP Tools 注册表**：26 个工具（会话/执行/元素/手势/实用/Device Farm/调试）暴露给 LLM
 - ✅ **HTTP 辅助能力**：保留健康检查、指标与浏览器 WebSocket subscription token 签发端点
 - ✅ **当前 GA 候选模式**：`monolith`
@@ -31,7 +32,8 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 | `monolith` 执行模式 | `GA candidate` | 当前推荐的正式运行模式 |
 | `distributed` 执行模式 | `experimental` | 已具备结果回传、lease、worker 恢复与 distributed E2E，但首个稳定版仍按实验特性发布 |
 | MCP `stdio` | `GA candidate` | 可供 Claude Desktop 等 MCP 客户端发现和调用 |
-| HTTP JSON-RPC | `GA candidate` | 主链路可用 |
+| MCP Streamable HTTP `/mcp` | `GA candidate` | 标准 MCP HTTP endpoint，要求 post-initialize 请求携带 `MCP-Protocol-Version: 2025-06-18` |
+| HTTP JSON-RPC `/jsonrpc` | `compatibility` | 向后兼容入口，非标准 MCP Streamable HTTP transport |
 | HTTP 辅助端点 | `GA candidate` | 用于 `/healthz`、`/metrics` 与浏览器 WebSocket token 签发 |
 | WebSocket 事件订阅 | `GA candidate` | 浏览器需先换短时 subscription token，trace 订阅已校验持久化 ownership |
 | `replay` / `subscribe` / `unsubscribe` JSON-RPC 方法 | `planned` | schema 预留，尚未实现 |
@@ -69,15 +71,32 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 # 启动 HTTP 服务器模式（默认，本地调试可使用明文 HTTP）
 ./gateway --config config.yaml
 
-# 访问 JSON-RPC 端点
-curl -X POST http://localhost:8080/jsonrpc \
+# 标准 MCP Streamable HTTP initialize
+curl -X POST http://localhost:8080/mcp \
+  -H "Accept: application/json, text/event-stream" \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
-    "method": "tools/list",
-    "params": {},
+    "method": "initialize",
+    "params": {
+      "protocolVersion": "2025-06-18",
+      "capabilities": {},
+      "clientInfo": {"name": "local-test", "version": "1.0.0"}
+    },
     "id": 1
   }'
+
+# initialize 后的 MCP HTTP 请求需要协议版本 header
+curl -X POST http://localhost:8080/mcp \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Content-Type: application/json" \
+  -H "MCP-Protocol-Version: 2025-06-18" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":2}'
+
+# 兼容旧集成的 JSON-RPC endpoint 仍保留
+curl -X POST http://localhost:8080/jsonrpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}'
 ```
 
 #### 3. 初始化 PostgreSQL Schema

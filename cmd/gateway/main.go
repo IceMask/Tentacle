@@ -14,6 +14,7 @@ import (
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/gateway/capabilities"
 	"mcp_for_appium/internal/gateway/jsonrpc"
+	"mcp_for_appium/internal/gateway/mcphttp"
 	"mcp_for_appium/internal/gateway/rest"
 	"mcp_for_appium/internal/gateway/stdio"
 	"mcp_for_appium/internal/gateway/websocket"
@@ -171,11 +172,12 @@ func runHTTPMode(cfg *config.Config) {
 	wsHub := websocket.NewHub(redisCache)
 	go wsHub.Run(ctx)
 
-	protectedMux := http.NewServeMux()              // Isolate auth-protected routes so health, metrics, and WebSocket can keep their dedicated exposure rules.
-	protectedMux.Handle("/jsonrpc", jsonrpcHandler) // Register the JSON-RPC endpoint inside the protected route subtree.
-	restRouter.RegisterRoutes(protectedMux)         // Register the remaining browser helper endpoint that issues short-lived WebSocket subscription tokens.
-	protectedHandler := http.Handler(protectedMux)  // Seed the protected subtree handler with the raw mux before optional auth wrapping.
-	if authMiddleware != nil {                      // Wrap the protected subtree only when at least one auth validator is active.
+	protectedMux := http.NewServeMux()                                                          // Isolate auth-protected routes so health, metrics, and WebSocket can keep their dedicated exposure rules.
+	protectedMux.Handle("/jsonrpc", jsonrpcHandler)                                             // Register the JSON-RPC compatibility endpoint inside the protected route subtree.
+	protectedMux.Handle("/mcp", mcphttp.NewHandler(jsonrpcHandler, cfg.Gateway.AllowedOrigins)) // Register the standard MCP Streamable HTTP endpoint beside the compatibility endpoint.
+	restRouter.RegisterRoutes(protectedMux)                                                     // Register the remaining browser helper endpoint that issues short-lived WebSocket subscription tokens.
+	protectedHandler := http.Handler(protectedMux)                                              // Seed the protected subtree handler with the raw mux before optional auth wrapping.
+	if authMiddleware != nil {                                                                  // Wrap the protected subtree only when at least one auth validator is active.
 		protectedHandler = authMiddleware.Handle(protectedHandler) // Enforce HMAC/OIDC/PAT auth for JSON-RPC and REST requests.
 	}
 

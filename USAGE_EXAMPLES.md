@@ -263,7 +263,7 @@ curl -X POST http://localhost:8080/jsonrpc \
 在 stdin 中输入（一行）：
 
 ```json
-{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0.0"}},"id":1}
+{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0.0"}},"id":1}
 ```
 
 按回车发送。
@@ -273,7 +273,7 @@ curl -X POST http://localhost:8080/jsonrpc \
 从 stdout 读取响应：
 
 ```json
-{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":false},"resources":{"subscribe":true,"listChanged":false}},"serverInfo":{"name":"MCP Mobile Worker","version":"1.0.0"}},"id":1}
+{"jsonrpc":"2.0","result":{"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":false},"resources":{"subscribe":false,"listChanged":false}},"serverInfo":{"name":"MCP Mobile Worker","version":"1.0.0"}},"id":1}
 ```
 
 ### 完整测试脚本
@@ -291,7 +291,7 @@ GATEWAY_PID=$!
 sleep 2
 
 # 发送 initialize 请求
-echo '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}},"id":1}' | \
+echo '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}},"id":1}' | \
   ./gateway --stdio --config config.yaml
 
 # 清理

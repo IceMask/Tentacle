@@ -42,8 +42,8 @@ func TestMCPHandlerInitializeReturnsServerCapabilities(t *testing.T) {
 	if !ok {                                         // Reject non-map results because initialize must return a structured MCP response object.
 		t.Fatalf("expected initialize response map, got %T", result) // Surface the actual response type so protocol regressions are easy to diagnose.
 	}
-	if resultMap["protocolVersion"] != "2024-11-05" { // Assert the wire protocol version so clients can rely on a stable MCP handshake target.
-		t.Fatalf("expected protocolVersion 2024-11-05, got %#v", resultMap["protocolVersion"]) // Surface the actual version so handshake regressions are easy to diagnose.
+	if resultMap["protocolVersion"] != "2025-06-18" { // Assert the target MCP wire protocol version so clients can rely on the current alignment target.
+		t.Fatalf("expected protocolVersion 2025-06-18, got %#v", resultMap["protocolVersion"]) // Surface the actual version so handshake regressions are easy to diagnose.
 	}
 	capabilities, ok := resultMap["capabilities"].(map[string]interface{}) // Extract the capabilities map so tool and resource support can be asserted precisely.
 	if !ok {                                                               // Reject malformed capabilities because MCP clients rely on this shape during negotiation.

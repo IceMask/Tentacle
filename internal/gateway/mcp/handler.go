@@ -24,6 +24,7 @@ type MCPHandler struct {
 }
 
 const (
+	SupportedProtocolVersion      = "2025-06-18"           // SupportedProtocolVersion is the MCP protocol version this server advertises during initialize.
 	defaultExecutePlanWaitTimeout = 60 * time.Second       // defaultExecutePlanWaitTimeout bounds MCP synchronous executePlan waits when the caller does not supply one explicit timeout.
 	executePlanPollInterval       = 100 * time.Millisecond // executePlanPollInterval defines how often the MCP wait loop re-reads the trace while waiting for terminal completion.
 )
@@ -67,7 +68,7 @@ func (h *MCPHandler) Initialize(ctx context.Context, params json.RawMessage) (in
 
 	// Return server capabilities
 	return map[string]interface{}{
-		"protocolVersion": "2024-11-05",
+		"protocolVersion": SupportedProtocolVersion, // Advertise the single MCP protocol version supported by this server build.
 		"capabilities": map[string]interface{}{
 			"tools": map[string]interface{}{
 				"listChanged": false, // Tools don't change dynamically
