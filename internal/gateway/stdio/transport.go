@@ -45,7 +45,7 @@ func NewTransportWithIO(orch *orchestrator.Service, capSvc *capabilities.Service
 	}
 }
 
-// Run starts the stdio transport loop
+// Run reads newline-delimited JSON-RPC messages, dispatches requests asynchronously, handles notifications synchronously, and writes responses to stdout until EOF or context cancellation.
 func (t *Transport) Run(ctx context.Context) error {
 	// Log to stderr only (stdout is reserved for JSON-RPC responses)
 	log.SetOutput(t.stderr)
@@ -56,6 +56,7 @@ func (t *Transport) Run(ctx context.Context) error {
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024) // 1MB max message size
 
+	var requestWG sync.WaitGroup // Track asynchronous request handlers so EOF can wait for already accepted work to finish before returning.
 	for {
 		select {
 		case <-ctx.Done():
@@ -69,6 +70,7 @@ func (t *Transport) Run(ctx context.Context) error {
 				}
 				// EOF reached
 				log.Println("EOF on stdin, shutting down")
+				requestWG.Wait() // Wait for accepted asynchronous requests to finish so EOF does not drop responses that were already in progress.
 				return nil
 			}
 
@@ -78,7 +80,8 @@ func (t *Transport) Run(ctx context.Context) error {
 			}
 
 			// Process the JSON-RPC request
-			if err := t.handleRequest(ctx, line); err != nil {
+			lineCopy := append([]byte(nil), line...)                             // Copy the scanner buffer because request handling may continue asynchronously after the next Scan call.
+			if err := t.dispatchMessage(ctx, lineCopy, &requestWG); err != nil { // Dispatch the decoded line while keeping the read loop available for later notifications.
 				log.Printf("Error handling request: %v", err)
 				// Continue processing next request even if this one failed
 			}
@@ -86,23 +89,76 @@ func (t *Transport) Run(ctx context.Context) error {
 	}
 }
 
-// handleRequest processes a single JSON-RPC request
+// dispatchMessage routes notifications synchronously and request messages asynchronously so cancellation notifications can be read while requests run.
+func (t *Transport) dispatchMessage(ctx context.Context, reqData []byte, requestWG *sync.WaitGroup) error {
+	var req jsonrpc.Request
+	if err := json.Unmarshal(reqData, &req); err != nil { // Decode the line before deciding whether it can run asynchronously.
+		return t.writeError(nil, -32700, "Parse error", err.Error()) // Emit parse errors synchronously because malformed messages have no request id to track.
+	}
+
+	if !jsonrpc.IsRequest(&req) { // Handle notifications and invalid methodless messages synchronously because they either suppress responses or fail quickly.
+		return t.handleDecodedRequest(ctx, &req) // Reuse the normal decoded-message path so notification logging and suppression remain identical.
+	}
+
+	requestCtx, cleanup := t.prepareRequestContext(ctx, &req) // Register the request before starting the goroutine so later cancellation notifications can find it deterministically.
+	requestWG.Add(1)                                          // Track the request goroutine so EOF can wait for this accepted request to finish.
+	go func() {                                               // Process the request asynchronously so stdio can continue reading cancellation notifications.
+		defer requestWG.Done()                                           // Mark this asynchronous request complete once response writing and cleanup finish.
+		defer cleanup()                                                  // Remove the request from the in-flight registry and release the context when processing ends.
+		if err := t.handleDecodedRequest(requestCtx, &req); err != nil { // Process the request on a goroutine so stdio can keep reading notifications.
+			log.Printf("Error handling request: %v", err) // Keep asynchronous request errors visible because dispatchMessage cannot return them after spawning.
+		}
+	}()
+	return nil // Report successful dispatch because the request goroutine now owns processing and response emission.
+}
+
+// handleRequest processes one incoming JSON-RPC message and suppresses any response when the message is a notification.
 func (t *Transport) handleRequest(ctx context.Context, reqData []byte) error {
 	var req jsonrpc.Request
-	if err := json.Unmarshal(reqData, &req); err != nil {
-		return t.writeError(nil, -32700, "Parse error", err.Error())
+	if err := json.Unmarshal(reqData, &req); err != nil { // Decode the incoming line into one JSON-RPC message before dispatching it through the transport.
+		return t.writeError(nil, -32700, "Parse error", err.Error()) // Emit the standard parse-error response when the line is not valid JSON.
 	}
+
+	requestCtx, cleanup := t.prepareRequestContext(ctx, &req) // Register request ids for cancellation while leaving notifications attached to the original context.
+	defer cleanup()                                           // Remove the request from the in-flight registry and release context resources after synchronous processing.
+	return t.handleDecodedRequest(requestCtx, &req)           // Process the decoded message through the shared transport path used by synchronous tests and asynchronous Run dispatch.
+}
+
+// prepareRequestContext returns a cancellable request context and cleanup hook for request messages, or the original context for notifications.
+func (t *Transport) prepareRequestContext(ctx context.Context, req *jsonrpc.Request) (context.Context, func()) {
+	if !jsonrpc.IsRequest(req) { // Skip in-flight registration for notifications because they have no id and must not be cancellable by request id.
+		return ctx, func() {} // Return a no-op cleanup so callers can always defer cleanup safely.
+	}
+
+	requestCtx, cancel := context.WithCancel(ctx)                // Create the cancellable child context that notifications/cancelled will trigger.
+	cleanup := t.handler.RegisterInFlightRequest(req.ID, cancel) // Register the request id and cancel hook before business dispatch begins.
+	return requestCtx, func() {                                  // Return a cleanup closure that unregisters the request and releases the child context.
+		cleanup() // Remove the request id from the shared cancellation registry once processing finishes.
+		cancel()  // Release context resources and make cleanup idempotent even when no cancellation notification arrived.
+	} // Return the cancellable context and cleanup closure to the caller.
+}
+
+// handleDecodedRequest processes one decoded JSON-RPC message and emits a response only for request-style messages.
+func (t *Transport) handleDecodedRequest(ctx context.Context, req *jsonrpc.Request) error {
+	isNotification := jsonrpc.IsNotification(req) // Classify the decoded message once so request-vs-notification response handling stays consistent below.
 
 	// Log the request to stderr
 	log.Printf("Received request: method=%s id=%v", req.Method, req.ID)
 
-	if progressToken, ok := extractProgressToken(&req); ok { // Detect one optional MCP progress token so long-running tools can emit notifications/progress over stdio.
+	if progressToken, ok := extractProgressToken(req); ok { // Detect one optional MCP progress token so long-running tools can emit notifications/progress over stdio.
 		ctx = mcp.WithProgressToken(ctx, progressToken)                  // Attach the client-supplied progress token so downstream tool handlers can correlate notifications correctly.
 		ctx = mcp.WithProgressReporter(ctx, t.writeProgressNotification) // Attach the transport-backed progress reporter so downstream tool handlers can emit progress safely.
 	}
 
 	// Call the handler
-	result, err := t.processRequest(ctx, &req)
+	result, err := t.processRequest(ctx, req) // Dispatch the decoded message through the shared JSON-RPC handler.
+
+	if isNotification { // Suppress all notification responses because JSON-RPC notifications are fire-and-forget messages.
+		if err != nil { // Log notification failures locally because the transport intentionally will not emit a JSON-RPC error envelope.
+			log.Printf("Ignoring notification error: method=%s error=%v", req.Method, err) // Preserve observability for malformed or unsupported notifications without polluting stdout.
+		}
+		return nil // Report transport success because the notification was consumed without any response write.
+	}
 
 	if err != nil {
 		// Check if it's an MCP error or other error
@@ -113,7 +169,7 @@ func (t *Transport) handleRequest(ctx context.Context, reqData []byte) error {
 	return t.writeResult(req.ID, result)
 }
 
-// processRequest routes the request to the appropriate handler method
+// processRequest routes one decoded JSON-RPC request or notification to the shared handler after validating the protocol version.
 func (t *Transport) processRequest(ctx context.Context, req *jsonrpc.Request) (interface{}, error) {
 	if req.JSONRPC != "2.0" {
 		return nil, fmt.Errorf("invalid jsonrpc version")
