@@ -4,8 +4,11 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	stdErrors "errors"
 
 	"mcp_for_appium/internal/errors"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // PATToken stores one PostgreSQL-backed PAT credential record resolved by token ID.
@@ -39,8 +42,11 @@ func (d *DAO) GetPATToken(ctx context.Context, tokenID string) (*PATToken, error
 		FROM pat_tokens
 		WHERE token_id = $1
 	`, tokenID).Scan(&record.TokenID, &record.TenantID, &record.SubjectID, &record.DisplayName, &record.SecretHash, &record.Status, &record.ScopesJSON, &record.ExpiresAt) // Read the authoritative PAT row by token ID because PAT bearer validation starts from the parsed token identifier.
-	if err != nil { // Convert missing-row and database failures into the repository-standard storage read contract.
-		return nil, errors.Wrap(errors.CodeUnauthenticated, "pat token not found", err) // Preserve the raw lookup failure while returning a stable authentication-oriented code to the caller.
+	if stdErrors.Is(err, pgx.ErrNoRows) { // Map only an authoritative empty result to the credential-not-found contract.
+		return nil, errors.Wrap(errors.CodeUnauthenticated, "pat token not found", err) // Preserve no-row context without exposing it externally.
+	}
+	if err != nil { // Keep database availability and decoding failures distinct from an unknown token id.
+		return nil, errors.Wrap(errors.CodeStoreRead, "failed to read pat token", err) // Allow the gateway to return a server failure instead of misleading 401.
 	}
 
 	return record, nil // Return the authoritative PAT record so the caller can validate status, expiry, and secret hash.
@@ -54,8 +60,11 @@ func (d *DAO) GetHMACKey(ctx context.Context, keyID string) (*HMACKey, error) {
 		FROM hmac_keys
 		WHERE key_id = $1
 	`, keyID).Scan(&record.KeyID, &record.TenantID, &record.DisplayName, &record.SecretRef, &record.Status, &record.NotBefore, &record.NotAfter) // Read the authoritative HMAC key row by key ID because request-signature validation starts from the caller-supplied key identifier.
-	if err != nil { // Convert missing-row and database failures into the repository-standard storage read contract.
-		return nil, errors.Wrap(errors.CodeUnauthenticated, "hmac key not found", err) // Preserve the raw lookup failure while returning a stable authentication-oriented code to the caller.
+	if stdErrors.Is(err, pgx.ErrNoRows) { // Map only an authoritative empty result to the credential-not-found contract.
+		return nil, errors.Wrap(errors.CodeUnauthenticated, "hmac key not found", err) // Preserve no-row context without exposing it externally.
+	}
+	if err != nil { // Keep database availability and decoding failures distinct from an unknown key id.
+		return nil, errors.Wrap(errors.CodeStoreRead, "failed to read hmac key", err) // Allow the gateway to return a server failure instead of misleading 401.
 	}
 
 	return record, nil // Return the authoritative HMAC key record so the caller can validate status, validity window, and secret material.

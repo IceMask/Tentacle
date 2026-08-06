@@ -3,6 +3,7 @@ package orchestrator
 
 import (
 	"context"
+	stdErrors "errors"
 	"strings"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 	"mcp_for_appium/internal/errors"
 	"mcp_for_appium/internal/storage/postgres"
 	"mcp_for_appium/internal/worker/appium"
+
+	goredis "github.com/redis/go-redis/v9"
 )
 
 // deviceFarmRuntimeClient captures the Device Farm operations that the orchestrator actually needs across run_api and remote-access flows.
@@ -199,30 +202,54 @@ func (s *Service) cleanupFailedStartSession(ctx context.Context, target *startSe
 	}
 }
 
-// releaseSessionAutomation releases the Appium session, removes all persisted session-specific mappings, and stops any backing Device Farm remote-access reservation.
-func (s *Service) releaseSessionAutomation(ctx context.Context, sessionID string) {
-	client, err := s.restoreAppiumClient(ctx, sessionID) // Restore one Appium client from persisted mappings when the in-memory cache no longer holds the session-specific endpoint and session id.
-	if err == nil {                                      // Stop the live Appium session only when the restore succeeded and therefore identified one concrete automation session.
-		_ = client.DeleteSession(ctx) // Best-effort close the Appium session so local and remote backends both release the underlying automation state promptly.
+// releaseSessionAutomation closes one Appium session, stops its Device Farm reservation, and deletes persisted handles only after external cleanup succeeds.
+func (s *Service) releaseSessionAutomation(ctx context.Context, sessionID string, client *appium.Client) error {
+	if client == nil { // Restore the Appium handle only when no live in-memory client survived until cleanup.
+		restoredClient, restoreErr := s.restoreAppiumClient(ctx, sessionID)              // Rebuild the handle from Redis so cleanup remains restart-safe.
+		if restoreErr != nil && !errors.IsCode(restoreErr, errors.CodeSessionNotFound) { // Treat missing mappings as an already-cleaned retry while preserving real cache failures.
+			return restoreErr // Keep the session ending and its remaining handles intact on Redis read failures.
+		}
+		client = restoredClient // Use the restored client when available, or nil when a previous cleanup already removed the mapping.
 	}
-
-	if s.deviceFarm != nil { // Attempt Device Farm cleanup only when the orchestrator actually has one initialized Device Farm client.
-		if remoteAccessSessionARN, err := s.cache.Get(ctx, deviceFarmRemoteKeyPrefix+sessionID); err == nil && strings.TrimSpace(remoteAccessSessionARN) != "" { // Look up one persisted remote-access reservation ARN for this platform session before removing cache keys.
-			stopCtx, cancel := context.WithTimeout(ctx, 30*time.Second)                                  // Bound remote-access cleanup time so EndSession cannot hang forever on the AWS stop call.
-			_ = s.deviceFarm.StopRemoteAccessSession(stopCtx, strings.TrimSpace(remoteAccessSessionARN)) // Best-effort stop the remote-access reservation so the AWS device slot is released even after the Appium session closes.
-			cancel()                                                                                     // Release the cleanup timeout resources immediately after the Device Farm stop attempt returns.
+	if client != nil { // Close the live Appium session before deleting the only persisted reattachment handle.
+		cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)                                           // Bound Appium cleanup while allowing it to finish after caller cancellation.
+		deleteErr := client.DeleteSession(cleanupContext)                                                                                   // Ask Appium to release the concrete automation session exactly once per retry attempt.
+		cancel()                                                                                                                            // Release the Appium cleanup timer immediately after the request returns.
+		if deleteErr != nil && !errors.IsCode(deleteErr, errors.CodeSessionDead) && !errors.IsCode(deleteErr, errors.CodeSessionNotFound) { // Treat an already-dead backend session as successful idempotent cleanup.
+			return errors.WrapPreservingCode("failed to delete appium session", deleteErr) // Keep all Redis handles available for a later retry when Appium cleanup is ambiguous or failed.
 		}
 	}
 
-	if err := s.cache.Del(ctx, appiumSessionKeyPrefix+sessionID); err != nil { // Delete the persisted platform-to-Appium session id mapping after best-effort Appium cleanup has run.
-		s.logger.WarnContext(ctx, "failed to delete appium session mapping", "session_id", sessionID, "error", err) // Surface cleanup failures without masking the otherwise successful EndSession flow.
+	if s.cache == nil { // Refuse to report cleanup success when persisted handles cannot be inspected or deleted.
+		return errors.New(errors.CodeStoreRead, "session automation cache is unavailable") // Leave the session ending so cleanup can retry after Redis recovery.
 	}
-	if err := s.cache.Del(ctx, appiumSessionURLKeyPrefix+sessionID); err != nil { // Delete the persisted per-session Appium endpoint mapping after the automation session has been released.
-		s.logger.WarnContext(ctx, "failed to delete appium session url mapping", "session_id", sessionID, "error", err) // Surface cleanup failures without masking the otherwise successful EndSession flow.
+	remoteAccessSessionARN, remoteLookupErr := s.cache.Get(ctx, deviceFarmRemoteKeyPrefix+sessionID) // Read the Device Farm handle before deleting any persisted session mapping.
+	if remoteLookupErr != nil && !stdErrors.Is(remoteLookupErr, goredis.Nil) {                       // Ignore a missing handle because local sessions and completed retries legitimately have none.
+		return errors.Wrap(errors.CodeStoreRead, "failed to load device farm cleanup handle", remoteLookupErr) // Preserve retryability when Redis cannot determine whether a reservation exists.
 	}
-	if err := s.cache.Del(ctx, deviceFarmRemoteKeyPrefix+sessionID); err != nil { // Delete the persisted Device Farm remote-access reservation mapping after the AWS slot stop attempt has been made.
-		s.logger.WarnContext(ctx, "failed to delete device farm remote access mapping", "session_id", sessionID, "error", err) // Surface cleanup failures without masking the otherwise successful EndSession flow.
+	if strings.TrimSpace(remoteAccessSessionARN) != "" { // Stop the persisted AWS reservation before deleting its only durable handle.
+		if s.deviceFarm == nil { // Refuse to discard the reservation handle when no runtime client can release it.
+			return errors.New(errors.CodeConfigMissing, "device farm client is unavailable for session cleanup") // Keep the session ending until the dependency recovers.
+		}
+		stopContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)                  // Bound AWS cleanup while allowing it to finish after caller cancellation.
+		stopErr := s.deviceFarm.StopRemoteAccessSession(stopContext, strings.TrimSpace(remoteAccessSessionARN)) // Release the exact persisted Device Farm reservation.
+		cancel()                                                                                                // Release the Device Farm cleanup timer immediately after the request returns.
+		if stopErr != nil {                                                                                     // Keep the ARN and all other mappings when AWS does not confirm cleanup.
+			return errors.WrapPreservingCode("failed to stop device farm remote access session", stopErr) // Preserve the provider failure for a later retry.
+		}
 	}
+
+	var deletionErrors []error                                                 // Collect Redis deletion failures after external resources are confirmed closed so partial key deletion remains retryable.
+	if err := s.cache.Del(ctx, appiumSessionKeyPrefix+sessionID); err != nil { // Delete the Appium session id only after Appium and AWS cleanup succeed.
+		deletionErrors = append(deletionErrors, errors.Wrap(errors.CodeStoreWrite, "failed to delete appium session mapping", err)) // Preserve the failed key deletion for caller retry.
+	}
+	if err := s.cache.Del(ctx, appiumSessionURLKeyPrefix+sessionID); err != nil { // Delete the endpoint mapping after no future reattachment is required.
+		deletionErrors = append(deletionErrors, errors.Wrap(errors.CodeStoreWrite, "failed to delete appium session url mapping", err)) // Preserve the failed key deletion for caller retry.
+	}
+	if err := s.cache.Del(ctx, deviceFarmRemoteKeyPrefix+sessionID); err != nil { // Delete the AWS handle only after the provider confirmed reservation cleanup.
+		deletionErrors = append(deletionErrors, errors.Wrap(errors.CodeStoreWrite, "failed to delete device farm remote access mapping", err)) // Preserve the failed key deletion for caller retry.
+	}
+	return stdErrors.Join(deletionErrors...) // Return nil when every handle was deleted or a joined retryable storage error otherwise.
 }
 
 // cachedSessionAppiumURL returns the persisted per-session Appium endpoint, falling back to the configured local default when no session-specific mapping exists.

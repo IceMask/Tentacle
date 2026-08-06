@@ -63,9 +63,9 @@ func NewClient(url string) *Client {
 func (c *Client) StartSession(ctx context.Context, caps map[string]interface{}) (string, error) {
 	// Apply a bounded default timeout for session creation when the upstream caller omitted a deadline.
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline { // Respect explicit caller deadlines when they are already set.
-		var cancel context.CancelFunc                                        // Keep cancel handle to release timer resources.
-		ctx, cancel = context.WithTimeout(ctx, defaultStartSessionTimeout)   // Bound Appium session bootstrap duration.
-		defer cancel()                                                        // Ensure timer/context resources are always released.
+		var cancel context.CancelFunc                                      // Keep cancel handle to release timer resources.
+		ctx, cancel = context.WithTimeout(ctx, defaultStartSessionTimeout) // Bound Appium session bootstrap duration.
+		defer cancel()                                                     // Ensure timer/context resources are always released.
 	}
 
 	payload := map[string]interface{}{
@@ -379,8 +379,8 @@ func (c *Client) HideKeyboard(ctx context.Context) error {
 
 // do executes this operation.
 func (c *Client) do(ctx context.Context, method, path string, body interface{}, result interface{}) error {
-	logger := telemetry.WithContext(ctx) // Build context-enriched logger for per-request step tracing.
-	startedAt := time.Now()              // Capture overall call start for end-to-end duration reporting.
+	logger := telemetry.WithContext(ctx)                                                       // Build context-enriched logger for per-request step tracing.
+	startedAt := time.Now()                                                                    // Capture overall call start for end-to-end duration reporting.
 	logger.Info("appium request begin", "method", method, "path", path, "base_url", c.baseURL) // Log Appium call entry.
 
 	if err := c.checkBreaker(); err != nil {
@@ -422,7 +422,11 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 		if err != nil {
 			lastErr = c.mapTransportError(err)
 			logger.Error("appium request transport error", "method", method, "path", path, "attempt", attempt, "attempt_duration_ms", time.Since(start).Milliseconds(), "error", lastErr) // Log transport-layer failure per attempt.
-			if c.shouldRetry(nil, err, attempt) {
+			if c.shouldRetry(method, path, nil, err, attempt) {                                                                                                                           // Retry only explicitly safe Appium requests after a retryable transport failure.
+				if backoffErr := c.backoff(ctx, attempt); backoffErr != nil { // Stop retry scheduling when the caller context is cancelled or expires.
+					c.noteFailure()                        // Record the interrupted request as a terminal failure for circuit-breaker accounting.
+					return c.mapTransportError(backoffErr) // Preserve the context-driven transport failure through the standard Appium error mapping.
+				}
 				logger.Info("appium request retry", "method", method, "path", path, "attempt", attempt) // Log retry scheduling to reconstruct retry behavior.
 				continue
 			}
@@ -436,7 +440,11 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 		if readErr != nil {
 			lastErr = errors.Wrap(errors.CodeInternal, "failed to read response body", readErr)
 			logger.Error("appium response read failed", "method", method, "path", path, "attempt", attempt, "status_code", resp.StatusCode, "error", lastErr) // Log body-read errors for diagnostics.
-			if c.shouldRetry(resp, readErr, attempt) {
+			if c.shouldRetry(method, path, resp, readErr, attempt) {                                                                                          // Retry response-read failures only for explicitly safe Appium requests.
+				if backoffErr := c.backoff(ctx, attempt); backoffErr != nil { // Stop retry scheduling when the caller context is cancelled or expires.
+					c.noteFailure()                        // Record the interrupted request as a terminal failure for circuit-breaker accounting.
+					return c.mapTransportError(backoffErr) // Preserve the context-driven transport failure through the standard Appium error mapping.
+				}
 				logger.Info("appium request retry", "method", method, "path", path, "attempt", attempt) // Log retry scheduling after read failures.
 				continue
 			}
@@ -448,7 +456,11 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 		if resp.StatusCode >= 400 {
 			lastErr = c.mapAppiumError(resp.StatusCode, b)
 			logger.Error("appium response status error", "method", method, "path", path, "attempt", attempt, "status_code", resp.StatusCode, "error", lastErr) // Log HTTP status failures with mapped internal error.
-			if c.shouldRetry(resp, nil, attempt) {
+			if c.shouldRetry(method, path, resp, nil, attempt) {                                                                                               // Retry server-status failures only for explicitly safe Appium requests.
+				if backoffErr := c.backoff(ctx, attempt); backoffErr != nil { // Stop retry scheduling when the caller context is cancelled or expires.
+					c.noteFailure()                        // Record the interrupted request as a terminal failure for circuit-breaker accounting.
+					return c.mapTransportError(backoffErr) // Preserve the context-driven transport failure through the standard Appium error mapping.
+				}
 				logger.Info("appium request retry", "method", method, "path", path, "attempt", attempt, "status_code", resp.StatusCode) // Log retry scheduling for retryable status errors.
 				continue
 			}
@@ -461,7 +473,11 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 			if err := json.Unmarshal(b, result); err != nil {
 				lastErr = errors.Wrap(errors.CodeInternal, "failed to decode response", err)
 				logger.Error("appium response decode failed", "method", method, "path", path, "attempt", attempt, "error", lastErr) // Log JSON decode failures for payload diagnostics.
-				if c.shouldRetry(resp, err, attempt) {
+				if c.shouldRetry(method, path, resp, err, attempt) {                                                                // Retry response-decode failures only for explicitly safe Appium requests.
+					if backoffErr := c.backoff(ctx, attempt); backoffErr != nil { // Stop retry scheduling when the caller context is cancelled or expires.
+						c.noteFailure()                        // Record the interrupted request as a terminal failure for circuit-breaker accounting.
+						return c.mapTransportError(backoffErr) // Preserve the context-driven transport failure through the standard Appium error mapping.
+					}
 					logger.Info("appium request retry", "method", method, "path", path, "attempt", attempt) // Log retry scheduling for decode errors.
 					continue
 				}
@@ -540,18 +556,19 @@ func (c *Client) mapAppiumError(status int, body []byte) error {
 	return errors.New(errors.CodeInternal, fmt.Sprintf("appium error %d: %s", status, msg))
 }
 
-// shouldRetry executes this operation.
-func (c *Client) shouldRetry(resp *http.Response, err error, attempt int) bool {
+// shouldRetry reports whether an explicitly idempotent or read-only Appium request may be repeated after the supplied failure.
+func (c *Client) shouldRetry(method string, path string, resp *http.Response, err error, attempt int) bool {
 	if attempt >= c.maxRetries {
 		return false
 	}
+	if !retrySafeRequest(method, path) { // Refuse automatic retries for session creation, clicks, text entry, gestures, navigation, and deletion.
+		return false // Prevent duplicate user-visible side effects after an ambiguous response or transport failure.
+	}
 	if err != nil {
 		if stdErrors.Is(err, syscall.ECONNRESET) || stdErrors.Is(err, syscall.EPIPE) || stdErrors.Is(err, io.EOF) {
-			c.backoff(attempt)
 			return true
 		}
 		if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
-			c.backoff(attempt)
 			return true
 		}
 		return false
@@ -560,14 +577,25 @@ func (c *Client) shouldRetry(resp *http.Response, err error, attempt int) bool {
 		return false
 	}
 	if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
-		c.backoff(attempt)
 		return true
 	}
 	return false
 }
 
-// backoff executes this operation.
-func (c *Client) backoff(attempt int) {
+// retrySafeRequest reports whether repeating one Appium command cannot duplicate a user-visible state mutation.
+func retrySafeRequest(method string, path string) bool {
+	switch method { // Classify ordinary HTTP methods first because every Appium read endpoint uses one of these safe methods.
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true // Permit automatic retries for protocol-defined idempotent reads and metadata requests.
+	case http.MethodPost:
+		return strings.HasSuffix(path, "/element") || strings.HasSuffix(path, "/elements") // Permit element lookup POSTs because repeating a lookup does not mutate the device application state.
+	default:
+		return false // Reject retries for DELETE and every unknown method to avoid ambiguous cleanup or mutation outcomes.
+	}
+}
+
+// backoff waits for one bounded exponential retry delay and returns promptly when the request context is cancelled.
+func (c *Client) backoff(ctx context.Context, attempt int) error {
 	delay := c.minRetryDelay
 	for i := 0; i < attempt; i++ {
 		delay *= 2
@@ -576,7 +604,14 @@ func (c *Client) backoff(attempt int) {
 			break
 		}
 	}
-	time.Sleep(delay)
+	timer := time.NewTimer(delay) // Allocate a stoppable timer so cancelled requests do not sleep through the retry delay.
+	defer timer.Stop()            // Release timer resources promptly on every return path.
+	select {                      // Race the retry delay against caller cancellation or deadline expiration.
+	case <-ctx.Done():
+		return ctx.Err() // Preserve the exact request-context error for standard Appium transport mapping.
+	case <-timer.C:
+		return nil // Permit the next safe request attempt once the bounded delay elapses.
+	}
 }
 
 // checkBreaker executes this operation.

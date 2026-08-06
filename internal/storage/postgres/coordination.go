@@ -3,6 +3,8 @@ package postgres
 
 import (
 	"context"
+	stdErrors "errors"
+	"strings"
 	"time"
 
 	"mcp_for_appium/internal/errors"
@@ -64,8 +66,11 @@ func (d *TxDAO) GetSessionForUpdate(ctx context.Context, id string) (*Session, e
 		WHERE id = $1
 		FOR UPDATE
 	`, id).Scan(&session.ID, &session.ProjectID, &session.TenantID, &session.SubjectID, &session.Status, &session.Capabilities, &session.CreatedAt, &session.UpdatedAt, &session.EndedAt) // Lock the session row together with its ownership metadata so authorization and lifecycle mutations serialize on the same record.
-	if err != nil { // Convert missing-row and query failures into the repository's session-not-found contract.
-		return nil, errors.Wrap(errors.CodeSessionNotFound, "session not found", err) // Preserve the wrapped database error while keeping the existing caller-facing code path stable.
+	if stdErrors.Is(err, pgx.ErrNoRows) { // Map only an authoritative empty locked query to session-not-found.
+		return nil, errors.Wrap(errors.CodeSessionNotFound, "session not found", err) // Preserve the no-row cause under the stable lookup code.
+	}
+	if err != nil { // Keep lock acquisition, connection, and scan failures distinct from absence.
+		return nil, errors.Wrap(errors.CodeStoreRead, "failed to lock session", err) // Surface infrastructure failures through the storage-read contract.
 	}
 
 	return session, nil // Return the locked session snapshot to the transactional caller.
@@ -80,8 +85,11 @@ func (d *TxDAO) GetTraceForUpdate(ctx context.Context, id string) (*Trace, error
 		WHERE id = $1
 		FOR UPDATE
 	`, id).Scan(&trace.ID, &trace.SessionID, &trace.ProjectID, &trace.TenantID, &trace.SubjectID, &trace.Status, &trace.CurrentAttempt, &trace.TerminalReason, &trace.CreatedAt, &trace.UpdatedAt) // Lock the trace row together with its ownership metadata so authorization and attempt checks observe one serialized view.
-	if err != nil { // Convert missing-row and query failures into the repository's trace-not-found contract.
-		return nil, errors.Wrap(errors.CodeTraceNotFound, "trace not found", err) // Preserve the wrapped PostgreSQL failure while keeping the caller-facing code stable.
+	if stdErrors.Is(err, pgx.ErrNoRows) { // Map only an authoritative empty locked query to trace-not-found.
+		return nil, errors.Wrap(errors.CodeTraceNotFound, "trace not found", err) // Preserve the no-row cause under the stable lookup code.
+	}
+	if err != nil { // Keep lock acquisition, connection, and scan failures distinct from absence.
+		return nil, errors.Wrap(errors.CodeStoreRead, "failed to lock trace", err) // Surface infrastructure failures through the storage-read contract.
 	}
 
 	return trace, nil // Return the locked trace snapshot to the transactional caller.
@@ -99,6 +107,32 @@ func (d *TxDAO) EndSessionIfActive(ctx context.Context, id string, endedAt time.
 	}
 
 	return tag.RowsAffected() == 1, nil // Report whether this transaction performed the state transition.
+}
+
+// MarkSessionEnding moves one locked non-terminal session into the cleanup-in-progress state and reports whether this call changed the row.
+func (d *TxDAO) MarkSessionEnding(ctx context.Context, id string, updatedAt time.Time) (bool, error) {
+	tag, err := d.tx.Exec(ctx, `
+		UPDATE sessions
+		SET status = 'ending', updated_at = $2
+		WHERE id = $1 AND status NOT IN ('ending', 'ended')
+	`, id, updatedAt) // Block new session operations before external Appium and Device Farm cleanup begins.
+	if err != nil { // Surface storage failures before callers attempt any non-transactional resource cleanup.
+		return false, errors.Wrap(errors.CodeStoreWrite, "failed to mark session ending", err) // Preserve the PostgreSQL cause under the stable write-error contract.
+	}
+	return tag.RowsAffected() == 1, nil // Report whether this transaction performed the transition into cleanup-in-progress.
+}
+
+// EndSessionIfEnding marks one locked cleanup-in-progress session as ended only after external resource cleanup has succeeded.
+func (d *TxDAO) EndSessionIfEnding(ctx context.Context, id string, endedAt time.Time) (bool, error) {
+	tag, err := d.tx.Exec(ctx, `
+		UPDATE sessions
+		SET status = 'ended', ended_at = $2, updated_at = $2
+		WHERE id = $1 AND status = 'ending'
+	`, id, endedAt) // Commit the terminal lifecycle state only for a session whose cleanup phase was prepared explicitly.
+	if err != nil { // Surface storage failures so the caller can retry finalization without repeating successful cleanup unsafely.
+		return false, errors.Wrap(errors.CodeStoreWrite, "failed to complete session end", err) // Preserve the PostgreSQL cause under the stable write-error contract.
+	}
+	return tag.RowsAffected() == 1, nil // Report whether this transaction committed the ending-to-ended transition.
 }
 
 // InsertPlanEvent stores a plan event inside the caller's open transaction.
@@ -216,7 +250,7 @@ func (d *DAO) MarkTraceAttemptRunning(ctx context.Context, id string, attempt in
 	return tag.RowsAffected() == 1, nil // Report whether the reserved attempt still owned the trace and therefore entered the running state successfully.
 }
 
-// AppendPlanEventForAttempt appends one ordered step event only when the supplied attempt still owns the running trace.
+// AppendPlanEventForAttempt appends one ordered step event when the supplied attempt owns a reserved pending or running trace.
 func (d *DAO) AppendPlanEventForAttempt(ctx context.Context, id string, expectedAttempt int64, event *PlanEvent) (bool, error) {
 	if event == nil { // Reject nil event payloads because distributed callbacks must persist concrete step metadata.
 		return false, errors.New(errors.CodePlanInvalid, "plan event is required") // Surface the missing event explicitly so callback handlers do not succeed silently.
@@ -228,7 +262,7 @@ func (d *DAO) AppendPlanEventForAttempt(ctx context.Context, id string, expected
 		if err != nil {                             // Stop immediately when the trace row cannot be loaded or locked.
 			return err // Preserve the trace lookup failure for the caller.
 		}
-		if trace.Status != "running" || trace.CurrentAttempt != expectedAttempt { // Ignore stale or late worker callbacks once the trace is no longer owned by this running attempt.
+		if (trace.Status != "pending" && trace.Status != "running") || trace.CurrentAttempt != expectedAttempt { // Accept immediate worker callbacks across the pending-to-running acknowledgement boundary while rejecting every stale or terminal attempt.
 			return nil // Treat stale callbacks as successful no-ops so higher layers can respond with a clean stale acknowledgement.
 		}
 
@@ -370,7 +404,7 @@ func (d *DAO) InsertAuditLog(ctx context.Context, log *AuditLog) error {
 	_, err := d.pool.Exec(ctx, `
 		INSERT INTO audit_logs (id, project_id, session_id, trace_id, actor, action, resource_type, resource_id, payload, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, log.ID, log.ProjectID, log.SessionID, log.TraceID, log.Actor, log.Action, log.ResourceType, log.ResourceID, log.Payload, log.CreatedAt) // Persist the append-only audit record in the shared audit table.
+	`, log.ID, log.ProjectID, nullableAuditReference(log.SessionID), nullableAuditReference(log.TraceID), log.Actor, log.Action, log.ResourceType, log.ResourceID, log.Payload, log.CreatedAt) // Persist optional foreign keys as SQL NULL instead of invalid empty-string references.
 	if err != nil { // Return a wrapped storage error when the audit insert fails.
 		return errors.Wrap(errors.CodeStoreWrite, "failed to insert audit log", err) // Preserve the underlying database failure for diagnostics.
 	}
@@ -383,10 +417,19 @@ func (d *TxDAO) InsertAuditLog(ctx context.Context, log *AuditLog) error {
 	_, err := d.tx.Exec(ctx, `
 		INSERT INTO audit_logs (id, project_id, session_id, trace_id, actor, action, resource_type, resource_id, payload, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, log.ID, log.ProjectID, log.SessionID, log.TraceID, log.Actor, log.Action, log.ResourceType, log.ResourceID, log.Payload, log.CreatedAt) // Persist the audit record atomically with the caller's surrounding transaction.
+	`, log.ID, log.ProjectID, nullableAuditReference(log.SessionID), nullableAuditReference(log.TraceID), log.Actor, log.Action, log.ResourceType, log.ResourceID, log.Payload, log.CreatedAt) // Persist optional foreign keys as SQL NULL instead of invalid empty-string references.
 	if err != nil { // Convert raw PostgreSQL failures into the repository's write-error contract.
 		return errors.Wrap(errors.CodeStoreWrite, "failed to insert audit log", err) // Preserve the database failure while returning the standard storage write code.
 	}
 
 	return nil // Return success after the audit insert has been staged inside the current transaction.
+}
+
+// nullableAuditReference converts an optional audit foreign-key identifier into nil for SQL NULL or a normalized non-empty string.
+func nullableAuditReference(value string) interface{} {
+	normalizedValue := strings.TrimSpace(value) // Normalize optional identifiers before deciding whether a real foreign key exists.
+	if normalizedValue == "" {                  // Store absent session and trace references as SQL NULL.
+		return nil // Avoid foreign-key failures against the invalid empty-string identifier.
+	}
+	return normalizedValue // Preserve the concrete normalized foreign-key identifier when supplied.
 }

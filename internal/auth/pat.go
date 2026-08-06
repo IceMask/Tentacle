@@ -4,6 +4,7 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"strings"
@@ -49,18 +50,24 @@ func (v *PATValidator) Validate(ctx context.Context, token string) (*Subject, er
 
 	record, err := v.lookup(ctx, tokenID) // Resolve the authoritative PAT metadata by token ID so validation can enforce status, expiry, and secret hash.
 	if err != nil {                       // Stop immediately when the PAT ID is unknown or the lookup source fails.
+		if errors.IsCode(err, errors.CodeStoreRead) || errors.IsCode(err, errors.CodeStoreConn) { // Preserve source availability failures instead of misclassifying them as bad credentials.
+			return nil, err // Let the HTTP layer fail closed with a server error while keeping backend details private.
+		}
 		return nil, errors.Wrap(errors.CodeUnauthenticated, "token not found", err) // Preserve the source failure while returning the stable unauthenticated code.
 	}
-	if strings.EqualFold(strings.TrimSpace(record.Status), "revoked") { // Reject revoked PATs before the secret hash comparison because revoked credentials must never authenticate again.
-		return nil, errors.New(errors.CodeUnauthenticated, "token revoked") // Surface revoked PATs as standard authentication failures.
+	if record == nil { // Reject a lookup that succeeds without authoritative PAT metadata because validation cannot continue safely.
+		return nil, errors.New(errors.CodeUnauthenticated, "token not found") // Fail closed without dereferencing a nil lookup result.
+	}
+	if !strings.EqualFold(strings.TrimSpace(record.Status), "active") { // Accept only the explicit active lifecycle state so unknown, revoked, or future states fail closed.
+		return nil, errors.New(errors.CodeUnauthenticated, "token is not active") // Surface every inactive PAT through one stable authentication failure.
 	}
 	if record.ExpiresAt != nil && time.Now().UTC().After(record.ExpiresAt.UTC()) { // Reject expired PATs before the secret hash comparison because expired credentials must never authenticate again.
 		return nil, errors.New(errors.CodeTokenExpired, "token expired") // Surface PAT expiry distinctly so callers can distinguish expiry from bad secrets.
 	}
 
-	secretHash := sha256.Sum256([]byte(secret))              // Hash the presented secret exactly once so it can be compared against the stored authoritative digest.
-	encodedHash := hex.EncodeToString(secretHash[:])         // Normalize the presented secret hash into the same lowercase hex format stored by the source of truth.
-	if encodedHash != strings.TrimSpace(record.SecretHash) { // Reject mismatched secret digests because the presented PAT secret does not match the authoritative record.
+	secretHash := sha256.Sum256([]byte(secret))                                                             // Hash the presented secret exactly once so it can be compared against the stored authoritative digest.
+	encodedHash := hex.EncodeToString(secretHash[:])                                                        // Normalize the presented secret hash into the same lowercase hex format stored by the source of truth.
+	if subtle.ConstantTimeCompare([]byte(encodedHash), []byte(strings.TrimSpace(record.SecretHash))) != 1 { // Compare equal-length hexadecimal digests without data-dependent early exit.
 		return nil, errors.New(errors.CodeUnauthenticated, "invalid token secret") // Surface secret mismatches as standard authentication failures.
 	}
 
@@ -70,7 +77,7 @@ func (v *PATValidator) Validate(ctx context.Context, token string) (*Subject, er
 		subjectID = record.TokenID // Preserve a stable authenticated subject identifier even for legacy static PAT records that do not store subject IDs explicitly.
 	}
 
-	return &Subject{ID: subjectID, Type: "pat", TenantID: strings.TrimSpace(record.TenantID), Scopes: scopes}, nil // Return the authenticated PAT subject for downstream tenant-aware request handling.
+	return &Subject{ID: subjectID, Type: "pat", CredentialID: strings.TrimSpace(record.TokenID), TenantID: strings.TrimSpace(record.TenantID), Scopes: scopes}, nil // Return the authenticated PAT subject with its safe token identifier for downstream authorization and audit.
 }
 
 // splitPATToken parses one PAT bearer token in the repository wire format and returns the token ID plus secret components.

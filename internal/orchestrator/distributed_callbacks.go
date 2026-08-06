@@ -32,7 +32,7 @@ func (s *Service) RenewDistributedExecutionLease(ctx context.Context, traceID st
 	return renewed, nil // Report whether the distributed lease still belongs to the supplied worker attempt.
 }
 
-// ReportDistributedPlanEvent appends one worker-emitted step event when the supplied worker attempt still owns the running trace.
+// ReportDistributedPlanEvent appends one worker-emitted step event when the supplied worker attempt owns the reserved pending or running trace.
 func (s *Service) ReportDistributedPlanEvent(ctx context.Context, req *rpc.ReportPlanEventRequest) (bool, error) {
 	if req == nil { // Reject nil callback payloads because no trace, worker, or event data can be validated safely from them.
 		return false, errors.New(errors.CodePlanInvalid, "report plan event request is required") // Surface invalid callback payloads before any lease or DAO work begins.
@@ -100,16 +100,16 @@ func (s *Service) CompleteDistributedPlan(ctx context.Context, req *rpc.Complete
 		return false, err // Preserve the wrapped DAO or serialization failure for higher-layer transport mapping and worker logging.
 	}
 
-	released, releaseErr := s.dispatcher.ReleaseExecutionLease(ctx, req.TraceID, req.WorkerID, req.Attempt) // Remove the Redis-backed ownership lease once this worker attempt has either finalized or been confirmed stale.
-	if releaseErr != nil {                                                                                  // Log lease-release failures without discarding the already-persisted terminal outcome.
-		s.logger.WarnContext(ctx, "failed to release distributed execution lease", "trace_id", req.TraceID, "worker_id", req.WorkerID, "attempt", req.Attempt, "error", releaseErr) // Surface the Redis cleanup failure for operator visibility.
-	}
-	if !released { // Log lease-release misses so operators can see when another path already cleaned up the ownership record first.
-		s.logger.InfoContext(ctx, "distributed execution lease already released", "trace_id", req.TraceID, "worker_id", req.WorkerID, "attempt", req.Attempt) // Record the benign double-cleanup so races stay observable.
-	}
 	if !finalized { // Treat late results rejected by the DAO attempt guard as a benign stale callback after lease validation already succeeded.
 		s.logger.InfoContext(ctx, "ignored distributed completion after DAO ownership check", "trace_id", req.TraceID, "worker_id", req.WorkerID, "attempt", req.Attempt, "final_status", req.FinalStatus) // Log the stale drop so operators can correlate it with terminalization races.
 		return false, nil                                                                                                                                                                                  // Report the stale callback without surfacing it as an infrastructure failure.
+	}
+
+	released, releaseErr := s.dispatcher.ReleaseExecutionLease(ctx, req.TraceID, req.WorkerID, req.Attempt) // Remove Redis ownership and exact local capacity only after the database terminal transition commits.
+	if releaseErr != nil {                                                                                  // Log lease-release failures without discarding the already-persisted terminal outcome.
+		s.logger.WarnContext(ctx, "failed to release distributed execution lease", "trace_id", req.TraceID, "worker_id", req.WorkerID, "attempt", req.Attempt, "error", releaseErr) // Surface the Redis cleanup failure for operator visibility.
+	} else if !released { // Log lease-release misses only when cleanup completed without an infrastructure error.
+		s.logger.InfoContext(ctx, "distributed execution lease already released", "trace_id", req.TraceID, "worker_id", req.WorkerID, "attempt", req.Attempt) // Record the benign double-cleanup so races stay observable.
 	}
 
 	return true, nil // Report that the worker terminal callback finalized the current distributed attempt successfully.
@@ -127,10 +127,11 @@ func (s *Service) finalizeDistributedAttempt(ctx context.Context, traceID string
 		"terminalStatus": nextStatus,     // Duplicate the terminal lifecycle state inside the payload for clients that rely on payload inspection alone.
 		"terminalReason": terminalReason, // Persist the structured terminal reason so replay consumers can distinguish timeout, orphaned, cancelled, and normal completion outcomes.
 	}
-	if cause != nil { // Attach the underlying error details only when the terminal transition was triggered by a failure path.
-		payloadMap["error"] = cause.Error()       // Preserve the original error string so operators can diagnose distributed terminal failures from event replay alone.
-		if code, ok := errors.CodeOf(cause); ok { // Attach the structured error code when the failure path used the repository-standard error type.
+	if cause != nil { // Attach only a stable machine-readable classification when the terminal transition was triggered by failure.
+		if code, ok := errors.CodeOf(cause); ok { // Resolve the repository code without exposing worker or backend error text in replay payloads.
 			payloadMap["errorCode"] = string(code) // Preserve the stable machine-readable error code for downstream diagnostics and metrics correlation.
+		} else {
+			payloadMap["errorCode"] = string(errors.CodeInternal) // Classify untyped failures generically while keeping raw diagnostic text server-side only.
 		}
 	}
 
@@ -139,8 +140,8 @@ func (s *Service) finalizeDistributedAttempt(ctx context.Context, traceID string
 		return false, errors.Wrap(errors.CodeInternal, "failed to marshal distributed terminal trace event", err) // Surface payload serialization failures as internal orchestrator errors.
 	}
 
-	terminalReasonCopy := terminalReason                                                                                                                      // Copy the terminal reason into one addressable local variable for PostgreSQL parameter binding.
-	finalized, err := s.dao.TransitionTraceAttemptWithEvent(ctx, traceID, attempt, []string{"running"}, nextStatus, &terminalReasonCopy, &postgres.PlanEvent{ // Commit the terminal status change, reason, and final event only when this attempt still owns the running trace.
+	terminalReasonCopy := terminalReason                                                                                                                                 // Copy the terminal reason into one addressable local variable for PostgreSQL parameter binding.
+	finalized, err := s.dao.TransitionTraceAttemptWithEvent(ctx, traceID, attempt, []string{"pending", "running"}, nextStatus, &terminalReasonCopy, &postgres.PlanEvent{ // Commit terminal state when this attempt wins either side of the worker-acceptance boundary.
 		TraceID:   traceID,    // Target the same trace row that is transitioning into its terminal state.
 		StepIndex: -1,         // Use a sentinel step index so clients can distinguish trace-level terminal events from step-level execution events.
 		Status:    nextStatus, // Mirror the terminal trace state in the event status for simple client-side filtering.

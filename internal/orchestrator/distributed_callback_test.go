@@ -4,11 +4,56 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"testing"
 	"time"
 
 	"mcp_for_appium/internal/rpc"
+
+	"google.golang.org/grpc"
 )
+
+// immediateCompletionWorkerService reports terminal completion before returning ExecutePlan acceptance to reproduce the distributed acknowledgement race deterministically.
+type immediateCompletionWorkerService struct {
+	service  *Service
+	workerID string
+}
+
+// ExecutePlan completes the leased attempt synchronously before acknowledging worker admission.
+func (s immediateCompletionWorkerService) ExecutePlan(ctx context.Context, req *rpc.ExecutePlanRequest) (*rpc.ExecutePlanResponse, error) {
+	accepted, err := s.service.CompleteDistributedPlan(ctx, &rpc.CompletePlanRequest{TraceID: req.TraceID, WorkerID: s.workerID, Attempt: req.Attempt, FinalStatus: "completed", TerminalReason: "completed", Message: "completed before acceptance response"}) // Send the terminal callback while the trace row is still pending but its attempt and Redis lease already exist.
+	if err != nil {                                                                                                                                                                                                                                             // Surface callback infrastructure failures through the fake worker RPC so the test fails at dispatch.
+		return nil, err // Preserve the callback error for direct diagnosis by the dispatcher test.
+	}
+	if !accepted { // Reject dispatch when the pending-state callback was incorrectly classified as stale.
+		return &rpc.ExecutePlanResponse{Status: "rejected", Message: "completion callback was stale"}, nil // Make the lost race visible as a deterministic worker rejection.
+	}
+	return &rpc.ExecutePlanResponse{Status: "accepted"}, nil // Acknowledge only after the terminal callback has durably completed.
+}
+
+// CancelPlan reports that no active run remains because this fake worker completes before its ExecutePlan response returns.
+func (s immediateCompletionWorkerService) CancelPlan(ctx context.Context, req *rpc.CancelPlanRequest) (*rpc.CancelPlanResponse, error) {
+	return &rpc.CancelPlanResponse{Status: "not_found"}, nil // Preserve idempotent dispatcher rollback after the fast callback already finished the trace.
+}
+
+// startImmediateCompletionWorkerServer starts one loopback gRPC worker that deterministically completes before acknowledging ExecutePlan.
+func startImmediateCompletionWorkerServer(t *testing.T, service *Service, workerID string) (string, func()) {
+	t.Helper()                                         // Attribute listener and server setup failures to the calling race test.
+	listener, err := net.Listen("tcp4", "127.0.0.1:0") // Reserve one IPv4 loopback endpoint for the production worker client path.
+	if err != nil {                                    // Skip only when the environment cannot provide loopback networking.
+		t.Skipf("skipping immediate completion callback test because loopback listen failed: %v", err) // Surface the environment limitation explicitly.
+	}
+	server := grpc.NewServer()                                                                                      // Construct one plain in-process gRPC server for the fake worker implementation.
+	rpc.RegisterWorkerServiceServer(server, immediateCompletionWorkerService{service: service, workerID: workerID}) // Register the race-producing worker under the production RPC contract.
+	go func() {                                                                                                     // Serve worker RPCs concurrently while dispatcher execution remains synchronous in the test goroutine.
+		_ = server.Serve(listener) // Ignore the expected shutdown error after the test stops the server.
+	}()
+	stop := func() { // Return one deterministic cleanup closure for the test.
+		server.GracefulStop() // Drain and stop the fake worker gRPC server.
+		_ = listener.Close()  // Release the loopback listener even when the server already closed it.
+	}
+	return listener.Addr().String(), stop // Return the routable endpoint and its matching cleanup closure.
+}
 
 // TestDistributedCallbacksFinalizeAcceptedTrace verifies that one accepted distributed worker attempt can append step events and finalize the trace successfully.
 func TestDistributedCallbacksFinalizeAcceptedTrace(t *testing.T) {
@@ -94,6 +139,42 @@ func TestDistributedCallbacksFinalizeAcceptedTrace(t *testing.T) {
 
 	if _, err := harness.cache.Get(context.Background(), inflightTracePrefix+traceID); err == nil { // Verify that successful completion removed the distributed execution lease from Redis.
 		t.Fatalf("expected inflight trace assignment to be removed after distributed completion") // Surface leaked lease state because later callbacks and cancels would see stale ownership metadata.
+	}
+}
+
+// TestDistributedCompletionBeforeAcceptanceResponse verifies that a worker terminal callback can atomically win while the reserved trace is still pending.
+func TestDistributedCompletionBeforeAcceptanceResponse(t *testing.T) {
+	harness := newTraceTerminalHarness(t)                                                                                                                                      // Start isolated PostgreSQL and Redis dependencies for the real distributed state machine.
+	defer harness.service.Stop()                                                                                                                                               // Stop dispatcher, registry, and background resources after the race scenario completes.
+	sessionID, traceID := harness.seedPendingTrace(t)                                                                                                                          // Seed the pending trace and Appium session mapping required before distributed dispatch.
+	const workerID = "worker-immediate-completion"                                                                                                                             // Use one stable worker identity across registry, lease, and callback validation.
+	workerAddress, stopWorker := startImmediateCompletionWorkerServer(t, harness.service, workerID)                                                                            // Start the worker that invokes completion before returning acceptance.
+	defer stopWorker()                                                                                                                                                         // Stop the loopback gRPC worker after all state assertions complete.
+	if err := harness.service.registry.Register(context.Background(), &WorkerNode{ID: workerID, Address: workerAddress, Capacity: 1, Tags: map[string]string{}}); err != nil { // Make the race-producing worker eligible for scheduler reservation.
+		t.Fatalf("failed to register immediate completion worker: %v", err) // Surface fixture failure because dispatch cannot reproduce the race without registration.
+	}
+	harness.service.dispatcher.executor = nil                                                                                           // Force the production distributed gRPC dispatch path instead of monolith execution.
+	plan := string(json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`))                                                              // Build one valid minimal plan whose contents are irrelevant to the fake worker callback.
+	if err := harness.service.dispatcher.dispatchToWorker(context.Background(), traceID, "test-project", sessionID, plan); err != nil { // Dispatch through lease creation, capacity reservation, worker callback, and delayed acceptance promotion.
+		t.Fatalf("expected immediate completion dispatch to succeed, got error: %v", err) // Surface any acknowledgement-boundary regression directly.
+	}
+
+	trace, events := harness.loadTraceAndEvents(t, traceID) // Read the durable lifecycle and replay state after dispatch returns.
+	if trace.Status != "completed" {                        // Require the fast callback to win instead of leaving the trace pending or running forever.
+		t.Fatalf("expected trace status completed after pre-acceptance callback, got %s", trace.Status) // Surface the lost terminal transition.
+	}
+	if trace.CurrentAttempt != 1 { // Preserve the exact reserved ownership token across the pending-state finalization.
+		t.Fatalf("expected current attempt 1 after pre-acceptance callback, got %d", trace.CurrentAttempt) // Surface attempt drift that would weaken stale-result protection.
+	}
+	if len(events) != 1 || events[0].Status != "completed" { // Require exactly one terminal replay event from the fast callback.
+		t.Fatalf("expected one completed terminal event, got %#v", events) // Surface missing or duplicate callback persistence.
+	}
+	if _, err := harness.cache.Get(context.Background(), inflightTracePrefix+traceID); err == nil { // Confirm successful terminalization removed the provisional ownership lease.
+		t.Fatal("expected pre-acceptance completion to remove the inflight lease") // Surface stale Redis ownership that could accept late callbacks incorrectly.
+	}
+	workerSnapshot := harness.service.registry.GetWorker(workerID) // Read an isolated post-dispatch worker capacity snapshot.
+	if workerSnapshot == nil || workerSnapshot.ActiveLoad != 0 {   // Require exact reservation cleanup even though dispatcher rollback runs after callback cleanup.
+		t.Fatalf("expected worker active load 0 after immediate completion, got %#v", workerSnapshot) // Surface leaked or double-adjusted capacity state.
 	}
 }
 

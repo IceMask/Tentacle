@@ -21,13 +21,18 @@ var logWriterMu sync.Mutex
 // init executes this operation.
 func init() {
 	// Default to text handler for dev, can be changed to JSON
-	defaultLogger = slog.New(slog.NewJSONHandler(os.Stdout, nil)) // Keep stdout logging by default before config is loaded.
-	slog.SetDefault(defaultLogger)                                 // Register the default logger globally.
-	stdLogWriter = os.Stderr                                       // Route standard-library log package output to stderr by default.
+	defaultLogger = slog.New(slog.NewJSONHandler(os.Stderr, nil)) // Keep pre-configuration logs off stdout so stdio protocol frames cannot be corrupted.
+	slog.SetDefault(defaultLogger)                                // Register the default logger globally.
+	stdLogWriter = os.Stderr                                      // Route standard-library log package output to stderr by default.
 }
 
 // InitLogger initializes the global logger with the specified level and format.
 func InitLogger(level string, logFilePath string) {
+	InitLoggerWithConsole(level, logFilePath, os.Stdout) // Preserve console logging on stdout for ordinary HTTP and worker processes.
+}
+
+// InitLoggerWithConsole initializes structured logging with an explicit console destination so stdio processes can reserve stdout for protocol frames.
+func InitLoggerWithConsole(level string, logFilePath string, console io.Writer) {
 	var l slog.Level
 	switch level {
 	case "debug":
@@ -40,11 +45,14 @@ func InitLogger(level string, logFilePath string) {
 		l = slog.LevelInfo // Default to info-level output.
 	}
 
-	writer := io.Writer(os.Stdout)                                 // Always keep console output for local troubleshooting.
-	stdWriter := io.Writer(os.Stderr)                              // Keep standard log package bound to stderr for stdio safety.
+	if console == nil { // Fall back safely when a caller omits the explicit console destination.
+		console = os.Stderr // Keep logs observable without risking an implicit write to protocol stdout.
+	}
+	writer := console                                                                                        // Keep structured console output on the caller-selected safe stream.
+	stdWriter := io.Writer(os.Stderr)                                                                        // Keep standard log package bound to stderr for stdio safety.
 	if resolvedFileWriter, err := buildLogFileWriter(logFilePath); err == nil && resolvedFileWriter != nil { // Attempt file logging only when configured and creatable.
-		writer = io.MultiWriter(os.Stdout, resolvedFileWriter)     // Mirror structured logs to both stdout and file.
-		stdWriter = io.MultiWriter(os.Stderr, resolvedFileWriter)   // Mirror stdlib logs to both stderr and file.
+		writer = io.MultiWriter(console, resolvedFileWriter)      // Mirror structured logs to the explicit console destination and file.
+		stdWriter = io.MultiWriter(os.Stderr, resolvedFileWriter) // Mirror stdlib logs to both stderr and file.
 	}
 
 	opts := &slog.HandlerOptions{
@@ -53,6 +61,11 @@ func InitLogger(level string, logFilePath string) {
 			// Mask sensitive values in top-level attributes
 			if a.Value.Kind() == slog.KindString {
 				a.Value = slog.StringValue(util.MaskSecrets(a.Value.String())) // Redact common secret patterns before writing logs.
+			}
+			if a.Value.Kind() == slog.KindAny { // Inspect error-valued attributes because slog otherwise serializes them without string masking.
+				if errorValue, ok := a.Value.Any().(error); ok { // Limit conversion to errors so structured non-error attributes retain their original type.
+					a.Value = slog.StringValue(util.MaskSecrets(errorValue.Error())) // Redact secrets embedded in wrapped downstream error messages before emission.
+				}
 			}
 			return a // Return transformed attribute for final emission.
 		},
@@ -79,7 +92,7 @@ func WithContext(ctx context.Context) *slog.Logger {
 	}
 	return defaultLogger.With(
 		"trace_id", sc.TraceID().String(), // Attach trace id for request-level correlation.
-		"span_id", sc.SpanID().String(),   // Attach span id for operation-level correlation.
+		"span_id", sc.SpanID().String(), // Attach span id for operation-level correlation.
 	) // Return enriched logger with tracing metadata.
 }
 
@@ -99,23 +112,23 @@ func setStdLogWriter(w io.Writer) {
 
 // buildLogFileWriter executes this operation.
 func buildLogFileWriter(logFilePath string) (io.Writer, error) {
-	trimmedPath := filepath.Clean(logFilePath) // Normalize configured path before filesystem operations.
+	trimmedPath := filepath.Clean(logFilePath)   // Normalize configured path before filesystem operations.
 	if trimmedPath == "." || trimmedPath == "" { // Treat empty configuration as no file logging.
 		return nil, nil // Skip file writer creation when path is not configured.
 	}
-	logWriterMu.Lock() // Serialize file handle updates.
+	logWriterMu.Lock()         // Serialize file handle updates.
 	defer logWriterMu.Unlock() // Ensure lock release on every return path.
-	if logFileHandle != nil { // Close previous file handle before reconfiguring to avoid descriptor leaks.
+	if logFileHandle != nil {  // Close previous file handle before reconfiguring to avoid descriptor leaks.
 		_ = logFileHandle.Close() // Best-effort close; new handle creation result determines next writer state.
-		logFileHandle = nil // Clear stale handle regardless of close result.
+		logFileHandle = nil       // Clear stale handle regardless of close result.
 	}
 	if err := os.MkdirAll(filepath.Dir(trimmedPath), 0o755); err != nil { // Ensure parent directory exists for log file.
 		return nil, err // Propagate directory creation errors to caller.
 	}
 	f, err := os.OpenFile(trimmedPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644) // Open file in append mode to preserve history.
-	if err != nil { // Handle open failure without breaking process startup.
+	if err != nil {                                                                // Handle open failure without breaking process startup.
 		return nil, err // Return error so caller can keep console-only logging.
 	}
 	logFileHandle = f // Retain handle for future reconfiguration close.
-	return f, nil // Return file writer for multi-writer composition.
+	return f, nil     // Return file writer for multi-writer composition.
 }

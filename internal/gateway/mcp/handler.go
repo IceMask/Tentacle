@@ -10,6 +10,7 @@ import (
 
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/devicefarm"
+	internalerrors "mcp_for_appium/internal/errors"
 	"mcp_for_appium/internal/orchestrator"
 	"mcp_for_appium/internal/storage/postgres"
 	"mcp_for_appium/internal/telemetry"
@@ -46,7 +47,7 @@ func NewMCPHandlerWithConfig(orch *orchestrator.Service, gatewayCfg config.Gatew
 	}
 }
 
-// Initialize handles the MCP initialize request
+// Initialize negotiates initialization-based MCP clients while deliberately excluding the stateless 2026-07-28 revision that removed this method.
 func (h *MCPHandler) Initialize(ctx context.Context, params json.RawMessage) (interface{}, error) {
 	var p struct {
 		ProtocolVersion string                 `json:"protocolVersion"`
@@ -57,39 +58,28 @@ func (h *MCPHandler) Initialize(ctx context.Context, params json.RawMessage) (in
 		} `json:"clientInfo"`
 	}
 
-	if err := json.Unmarshal(params, &p); err != nil {
+	if err := json.Unmarshal(params, &p); err != nil { // Decode the legacy handshake fields before choosing one initialization-based protocol revision.
 		return nil, &MCPError{
-			Code:    -32602,
-			Message: "Invalid params",
-			Data:    err.Error(),
+			Code:    -32602,           // Use the standard invalid-params error for a malformed initialize payload.
+			Message: "Invalid params", // Keep the legacy error message stable for existing clients.
+			Data:    err.Error(),      // Preserve the JSON decoding diagnostic for client troubleshooting.
 		}
 	}
 
-	// Return server capabilities
-	return map[string]interface{}{
-		"protocolVersion": "2024-11-05",
-		"capabilities": map[string]interface{}{
-			"tools": map[string]interface{}{
-				"listChanged": false, // Tools don't change dynamically
-			},
-			"resources": map[string]interface{}{
-				"subscribe":   false, // Advertise no MCP resource subscriptions because this server does not implement resources/subscribe today.
-				"listChanged": false,
-			},
-		},
-		"serverInfo": map[string]interface{}{
-			"name":    "MCP Mobile Worker",
-			"version": "1.0.0",
-		},
+	protocolVersion := NegotiateLegacyProtocolVersion(p.ProtocolVersion) // Select a supported legacy revision without ever advertising modern stateless semantics through initialize.
+	return map[string]interface{}{                                       // Return the initialization result shape required by legacy MCP clients.
+		"protocolVersion": protocolVersion,      // Echo the selected initialization-based revision for subsequent legacy requests.
+		"capabilities":    ServerCapabilities(), // Advertise the same implemented tool and resource features exposed by modern discovery.
+		"serverInfo":      ServerInfo(),         // Identify the server implementation using the shared cross-era metadata source.
 	}, nil
 }
 
-// ToolsList handles the tools/list request
+// ToolsList returns the complete deterministic tool catalog; modern result decoration adds current-protocol result and cache metadata.
 func (h *MCPHandler) ToolsList(ctx context.Context, params json.RawMessage) (interface{}, error) {
-	tools := h.registry.List()
+	tools := h.registry.List() // Read the deterministic registry snapshot used by both legacy and modern clients.
 
-	return map[string]interface{}{
-		"tools": tools,
+	return map[string]interface{}{ // Return the legacy-compatible base shape before era-specific result decoration runs.
+		"tools": tools, // Expose every enabled tool in deterministic name order.
 	}, nil
 }
 
@@ -115,14 +105,17 @@ func (h *MCPHandler) ToolsCall(ctx context.Context, params json.RawMessage) (int
 	// Validate tool exists and arguments
 	if err := h.registry.Validate(p.Name, p.Arguments); err != nil {
 		logger.Error("mcp tools/call validate failed", "tool", p.Name, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log schema/validation failures as explicit step failures.
-		return nil, err
+		if mcpErr, ok := err.(*MCPError); ok && mcpErr.Code == -32602 {                                                                   // Return caller-correctable tool input failures through the MCP tool-result contract.
+			return newToolErrorResult(p.Name, err), nil // Mark invalid arguments with isError instead of turning them into a JSON-RPC protocol failure.
+		}
+		return nil, err // Preserve unknown-tool and internal registry defects as protocol-level JSON-RPC errors.
 	}
 
 	// Route to the appropriate business method
 	result, err := h.executeTool(ctx, p.Name, p.Arguments)
 	if err != nil {
 		logger.Error("mcp tools/call execute failed", "tool", p.Name, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log tool execution failures with elapsed time.
-		return nil, normalizeToolError(p.Name, err)                                                                                      // Normalize per-tool errors into structured MCP payloads.
+		return newToolErrorResult(p.Name, err), nil                                                                                      // Return business and downstream failures as normal MCP tool results marked with isError.
 	}
 
 	// Wrap result in MCP format
@@ -133,7 +126,8 @@ func (h *MCPHandler) ToolsCall(ctx context.Context, params json.RawMessage) (int
 				"text": formatToolResult(p.Name, result),
 			},
 		},
-		"isError": false,
+		"structuredContent": result, // Preserve the native tool result as arbitrary JSON for clients that prefer structured outputs.
+		"isError":           false,  // Mark the completed tool execution as successful for both modern and legacy clients.
 	}
 	logger.Info("mcp tools/call done", "tool", p.Name, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful tool completion with elapsed time.
 	return response, nil                                                                                    // Return standard MCP response and nil error.
@@ -142,32 +136,35 @@ func (h *MCPHandler) ToolsCall(ctx context.Context, params json.RawMessage) (int
 // internalCodePattern matches internal error markers like [E.CONFIG.MISSING] inside wrapped error strings.
 var internalCodePattern = regexp.MustCompile(`\[(E\.[A-Z0-9._]+)\]`) // Compile once to avoid per-request regex allocations.
 
-// normalizeToolError executes this operation.
-func normalizeToolError(toolName string, err error) error {
-	if mcpErr, ok := err.(*MCPError); ok { // Reuse existing MCP error objects produced by handler methods.
-		rawError := stringifyErrorData(mcpErr.Data, err) // Preserve the most specific raw error text for users and debugging.
-		data := map[string]interface{}{                  // Return structured data so clients can render richer diagnostics.
-			"interface":    "tools/call",                        // Identify the failed interface category for consumers.
-			"tool":         toolName,                            // Identify the exact failing tool for quick triage.
-			"rawError":     rawError,                            // Keep original downstream/native error message if available.
-			"internalCode": extractInternalCode(rawError),       // Parse standardized internal code when present.
-			"hint":         toolFailureHint(toolName, rawError), // Add actionable hint without hiding source error.
-		}
-		mcpErr.Data = data // Overwrite flat string data with structured details while keeping top-level MCP code/message.
-		return mcpErr      // Return same MCPError instance to preserve code/message semantics.
+// newToolErrorResult converts one input, business, or downstream failure into the normal MCP tools/call result shape without exposing wrapped backend details.
+func newToolErrorResult(toolName string, err error) map[string]interface{} {
+	publicMessage := "Tool execution failed" // Start with a stable diagnostic for untyped failures whose text may contain sensitive backend data.
+	rawDiagnostic := err.Error()             // Retain the full server-side diagnostic only for code extraction and predefined hint selection.
+	if mcpErr, ok := err.(*MCPError); ok {   // Reuse protocol handler classifications when a tool path already supplied one.
+		publicMessage = mcpErr.Message                       // Expose the concise MCP message while keeping its potentially sensitive data private.
+		rawDiagnostic = stringifyErrorData(mcpErr.Data, err) // Use detailed data only to derive a stable internal code and remediation hint.
 	}
-
-	// Convert non-MCP errors to MCP server errors with full context.
-	return &MCPError{ // Wrap unknown error types so clients still receive consistent diagnostic fields.
-		Code:    -32000, // Use server error code for unexpected tool execution failures.
-		Message: "Tool execution failed",
-		Data: map[string]interface{}{
-			"interface":    "tools/call",                           // Mark this as a tool-call execution failure.
-			"tool":         toolName,                               // Include tool name for routing/debugging on client side.
-			"rawError":     err.Error(),                            // Preserve original error text from lower layers.
-			"internalCode": extractInternalCode(err.Error()),       // Extract internal code when wrapped text includes it.
-			"hint":         toolFailureHint(toolName, err.Error()), // Provide lightweight next-step guidance.
+	internalCode := extractInternalCode(rawDiagnostic) // Recover an embedded repository code from wrapped MCP diagnostics when present.
+	if code, ok := internalerrors.CodeOf(err); ok {    // Prefer a directly typed repository code over text extraction when available.
+		internalCode = string(code) // Preserve the stable machine-readable classification without returning the wrapped cause.
+	}
+	hint := toolFailureHint(toolName, rawDiagnostic) // Select a predefined actionable hint from the private diagnostic.
+	structuredContent := map[string]interface{}{     // Build a machine-readable failure payload containing only sanitized fields.
+		"interface":    "tools/call",  // Identify the protocol interface that completed with an application-level failure.
+		"tool":         toolName,      // Identify the selected tool without reflecting any argument values.
+		"message":      publicMessage, // Return the concise public classification supplied by the tool layer.
+		"internalCode": internalCode,  // Return the stable internal code when one could be determined.
+		"hint":         hint,          // Return a safe remediation hint that does not quote the backend error.
+	}
+	return map[string]interface{}{ // Return a successful JSON-RPC result whose MCP-level outcome is explicitly an error.
+		"content": []map[string]interface{}{ // Provide a text fallback for clients that do not consume structuredContent.
+			{
+				"type": "text",                                                // Identify the fallback content block as plain text.
+				"text": fmt.Sprintf("%s failed: %s", toolName, publicMessage), // Summarize the tool failure without including raw downstream data.
+			},
 		},
+		"structuredContent": structuredContent, // Preserve the sanitized machine-readable failure details for modern clients.
+		"isError":           true,              // Mark the normal tools/call result as a failed tool execution per the MCP contract.
 	}
 }
 
@@ -218,7 +215,7 @@ func toolFailureHint(toolName string, raw string) string {
 	case strings.Contains(lower, "exec: \"adb\": executable file not found"):
 		return "Install Android platform-tools and ensure adb is in PATH."
 	}
-	return fmt.Sprintf("Inspect rawError for %s and fix the upstream dependency/configuration.", toolName) // Provide a deterministic fallback hint.
+	return fmt.Sprintf("Inspect server logs for %s and fix the upstream dependency or configuration.", toolName) // Provide a deterministic fallback without promising raw backend details in the client response.
 }
 
 // executeTool routes tool calls to business logic
@@ -749,36 +746,59 @@ func (h *MCPHandler) handleHealthCheck(ctx context.Context, arguments json.RawMe
 	return h.orch.HealthCheck(ctx), nil
 }
 
-// ResourcesList handles the resources/list request
-func (h *MCPHandler) ResourcesList(ctx context.Context, params json.RawMessage) (interface{}, error) {
-	// Define available resources
-	resources := []map[string]interface{}{
-		{
-			"uri":         "mcp://appium/artifacts/{traceId}",
-			"name":        "Test Artifacts",
-			"description": "获取测试执行产生的工件（截图、日志等）",
-			"mimeType":    "application/json",
-		},
-		{
-			"uri":         "mcp://appium/traces/{traceId}",
-			"name":        "Execution Trace",
-			"description": "获取测试执行的详细追踪记录",
-			"mimeType":    "application/json",
-		},
-		{
-			"uri":         "mcp://appium/sessions/{sessionId}",
-			"name":        "Session Info",
-			"description": "获取会话详细信息",
-			"mimeType":    "application/json",
-		},
+// ResourcesList returns the historical template-like resource catalog retained for initialization-era client compatibility.
+func (h *MCPHandler) ResourcesList(_ context.Context, _ json.RawMessage) (interface{}, error) {
+	resources := make([]map[string]interface{}, 0, 3)    // Allocate the fixed legacy catalog while preserving JSON array output when templates are transformed.
+	for _, resource := range appiumResourceTemplates() { // Convert each standard resource template into the non-standard shape returned by earlier repository versions.
+		resource["uri"] = resource["uriTemplate"] // Preserve the historical uri field so existing initialization-era clients do not lose catalog entries.
+		delete(resource, "uriTemplate")           // Remove the modern template field because legacy consumers expect the old resource object shape.
+		resources = append(resources, resource)   // Append the transformed request-local map without mutating any shared catalog state.
 	}
-
-	return map[string]interface{}{
-		"resources": resources,
+	return map[string]interface{}{ // Return the legacy-compatible base shape without modern cache or result metadata.
+		"resources": resources, // Expose each historical parameterized Appium resource under its old field name.
 	}, nil
 }
 
-// ResourcesRead handles the resources/read request
+// ModernResourcesList returns the concrete resources currently enumerable for a modern caller, which is empty because this server resolves only ID-parameterized resources.
+func (h *MCPHandler) ModernResourcesList(_ context.Context, _ json.RawMessage) (interface{}, error) {
+	resources := make([]map[string]interface{}, 0) // Allocate an explicit empty array because no trace or session IDs can be enumerated without caller-supplied identifiers.
+	return map[string]interface{}{                 // Return the standard resources/list base shape before modern cache and result decoration.
+		"resources": resources, // Report the empty concrete resource set while directing clients to resources/templates/list for URI patterns.
+	}, nil
+}
+
+// ResourcesTemplatesList returns the standard parameterized Appium resource templates used to construct artifacts, traces, and session URIs.
+func (h *MCPHandler) ResourcesTemplatesList(_ context.Context, _ json.RawMessage) (interface{}, error) {
+	return map[string]interface{}{ // Return the standard template-list base shape before era-specific result decoration.
+		"resourceTemplates": appiumResourceTemplates(), // Expose all supported URI templates under the protocol-defined result field.
+	}, nil
+}
+
+// appiumResourceTemplates returns a new static catalog of parameterized resource definitions so callers may transform entries without shared mutation.
+func appiumResourceTemplates() []map[string]interface{} {
+	return []map[string]interface{}{ // Allocate request-local maps because legacy compatibility rewrites the URI field in place.
+		{
+			"uriTemplate": "mcp://appium/artifacts/{traceId}", // Define the trace identifier placeholder using the MCP resource-template field.
+			"name":        "Test Artifacts",                   // Provide a stable programmatic display name for artifact data.
+			"description": "获取测试执行产生的工件（截图、日志等）",              // Explain that this template resolves screenshots, logs, and related run artifacts.
+			"mimeType":    "application/json",                 // Declare that resolved artifact content is serialized JSON text.
+		},
+		{
+			"uriTemplate": "mcp://appium/traces/{traceId}", // Define the trace identifier placeholder for detailed execution history.
+			"name":        "Execution Trace",               // Provide a stable programmatic display name for trace data.
+			"description": "获取测试执行的详细追踪记录",                 // Explain that this template resolves detailed test execution traces.
+			"mimeType":    "application/json",              // Declare that resolved trace content is serialized JSON text.
+		},
+		{
+			"uriTemplate": "mcp://appium/sessions/{sessionId}", // Define the Appium session identifier placeholder for session metadata.
+			"name":        "Session Info",                      // Provide a stable programmatic display name for session data.
+			"description": "获取会话详细信息",                          // Explain that this template resolves detailed Appium session information.
+			"mimeType":    "application/json",                  // Declare that resolved session content is serialized JSON text.
+		},
+	}
+}
+
+// ResourcesRead resolves one Appium resource URI and returns JSON text whose modern decoration uses a short private cache lifetime.
 func (h *MCPHandler) ResourcesRead(ctx context.Context, params json.RawMessage) (interface{}, error) {
 	var p struct {
 		URI string `json:"uri"`
@@ -807,21 +827,21 @@ func (h *MCPHandler) ResourcesRead(ctx context.Context, params json.RawMessage) 
 	case "artifacts":
 		artifacts, err := h.orch.GetArtifacts(ctx, id)
 		if err != nil {
-			return nil, &MCPError{Code: -32000, Message: "Failed to get artifacts", Data: err.Error()}
+			return nil, newResourceReadError(p.URI, "get artifacts", err) // Map missing and internal artifact failures to current resource error semantics.
 		}
 		content = map[string]interface{}{"traceId": id, "artifacts": artifacts}
 
 	case "traces":
 		trace, events, err := h.orch.GetTrace(ctx, id)
 		if err != nil {
-			return nil, &MCPError{Code: -32000, Message: "Failed to get trace", Data: err.Error()}
+			return nil, newResourceReadError(p.URI, "get trace", err) // Map missing and internal trace failures to current resource error semantics.
 		}
 		content = map[string]interface{}{"trace": trace, "events": events}
 
 	case "sessions":
 		sess, err := h.orch.GetSession(ctx, id)
 		if err != nil {
-			return nil, &MCPError{Code: -32000, Message: "Failed to get session", Data: err.Error()}
+			return nil, newResourceReadError(p.URI, "get session", err) // Map missing and internal session failures to current resource error semantics.
 		}
 		var caps interface{}
 		if sess.Capabilities != nil {
@@ -843,15 +863,41 @@ func (h *MCPHandler) ResourcesRead(ctx context.Context, params json.RawMessage) 
 	}
 
 	text, _ := json.MarshalIndent(content, "", "  ")
-	return map[string]interface{}{
-		"contents": []map[string]interface{}{
+	return newResourceReadResult(p.URI, string(text)), nil // Build the legacy-compatible resource payload before modern private cache metadata is attached.
+}
+
+// newResourceReadError maps unavailable or unauthorized resources to Invalid Params and all other backend failures to the standard JSON-RPC internal error.
+func newResourceReadError(uri string, operation string, err error) *MCPError {
+	if internalerrors.IsCode(err, internalerrors.CodeTraceNotFound) || internalerrors.IsCode(err, internalerrors.CodeSessionNotFound) || internalerrors.IsCode(err, internalerrors.CodePermissionDenied) { // Treat unavailable and unauthorized caller-scoped resources identically to avoid disclosing their existence.
+		return &MCPError{ // Return the exact current-protocol resource-not-found error family.
+			Code:    -32602,               // Use Invalid Params because MCP 2026-07-28 retired the legacy resource-not-found server code.
+			Message: "Resource not found", // Give clients the canonical resource availability diagnostic.
+			Data: map[string]interface{}{ // Include only the requested identifier so clients can correct or discard the stale URI.
+				"uri": uri, // Echo the unavailable resource URI without exposing backend or authorization details.
+			},
+		}
+	}
+	return &MCPError{ // Return a standard internal failure for storage, decoding, and other server-side resource errors.
+		Code:    -32603,                    // Use JSON-RPC Internal error instead of allocating a forbidden legacy MCP server code.
+		Message: "Failed to read resource", // Identify the failed protocol operation without incorrectly reporting absence.
+		Data: map[string]interface{}{ // Preserve stable request context while keeping backend diagnostics in server logs only.
+			"uri":       uri,       // Identify the resource whose backend read failed.
+			"operation": operation, // Identify the internal read stage that returned the error.
+		},
+	}
+}
+
+// newResourceReadResult builds one legacy-compatible JSON text resource response for subsequent era-specific result decoration.
+func newResourceReadResult(uri string, text string) map[string]interface{} {
+	return map[string]interface{}{ // Return one resource payload without adding fields unknown to initialization-era clients.
+		"contents": []map[string]interface{}{ // Provide the standard MCP resource contents array even though one URI resolves to one document.
 			{
-				"uri":      p.URI,
-				"mimeType": "application/json",
-				"text":     string(text),
+				"uri":      uri,                // Echo the exact resource identifier that produced this content.
+				"mimeType": "application/json", // Identify the text payload as a serialized JSON document.
+				"text":     text,               // Return the preformatted JSON document as MCP text resource content.
 			},
 		},
-	}, nil
+	}
 }
 
 // parseResourceURI parses mcp://appium/{resource}/{id} into resource type and id

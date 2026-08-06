@@ -428,6 +428,27 @@ func TestRetryOn5xx(t *testing.T) {
 	}
 }
 
+// TestNonIdempotentCommandDoesNotRetry verifies that an ambiguous Appium failure cannot duplicate a device-side click action.
+func TestNonIdempotentCommandDoesNotRetry(t *testing.T) {
+	attempts := 0                                                                                // Count received click commands so the test can prove the client sends only one mutation.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { // Return one retryable-looking server error for every received command.
+		attempts++                                                                                                                                        // Record each network attempt made by the Appium client.
+		w.WriteHeader(http.StatusInternalServerError)                                                                                                     // Simulate an ambiguous 500 response after the server may have processed the click.
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": map[string]interface{}{"error": "internal error", "message": "ambiguous failure"}}) // Return a valid Appium error envelope.
+	}))
+	defer server.Close() // Release the loopback test server after the retry assertion completes.
+
+	client := NewClient(server.URL)                                         // Construct the production client against the failing Appium endpoint.
+	client.sessionID = "test-session"                                       // Attach one session directly so the click command can be issued without session setup.
+	client.maxRetries = 2                                                   // Leave retries enabled to prove policy, rather than configuration, suppresses mutation retries.
+	if err := client.Click(context.Background(), "element-1"); err == nil { // Execute one non-idempotent click that receives the ambiguous server error.
+		t.Fatal("expected click failure") // Require the server failure to reach the caller after the single request.
+	}
+	if attempts != 1 { // Reject any duplicate click command regardless of the configured retry count.
+		t.Fatalf("expected one non-idempotent request, got %d", attempts) // Surface unsafe retry regressions directly.
+	}
+}
+
 // TestCircuitBreaker tests circuit breaker functionality
 func TestCircuitBreaker(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

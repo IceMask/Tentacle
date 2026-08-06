@@ -1,6 +1,7 @@
 package errors
 
 import (
+	stdErrors "errors"
 	"fmt"
 	"net/http"
 
@@ -112,8 +113,8 @@ func WrapPreservingCode(msg string, err error) *Error {
 
 // MapToGRPC maps an internal error to a gRPC status error.
 func MapToGRPC(err error) error {
-	e, ok := err.(*Error)
-	if !ok {
+	var e *Error                // Allocate a typed target so wrapped and joined repository errors preserve their transport classification.
+	if !stdErrors.As(err, &e) { // Search the complete error chain instead of requiring the repository error at the outermost layer.
 		return status.Error(codes.Unknown, err.Error())
 	}
 
@@ -148,8 +149,8 @@ func MapToGRPC(err error) error {
 
 // MapToHTTP maps an internal error to an HTTP status code.
 func MapToHTTP(err error) int {
-	e, ok := err.(*Error)
-	if !ok {
+	var e *Error                // Allocate a typed target so wrapped and joined repository errors preserve their HTTP classification.
+	if !stdErrors.As(err, &e) { // Search the complete error chain instead of requiring the repository error at the outermost layer.
 		return http.StatusInternalServerError
 	}
 
@@ -186,14 +187,13 @@ type JSONRPCError struct {
 
 // MapToJSONRPC maps an internal error to a JSON-RPC error.
 func MapToJSONRPC(err error) *JSONRPCError {
-	e, ok := err.(*Error)
-	if !ok {
-		return &JSONRPCError{ // Return unknown error types with raw text for direct diagnostics.
+	var e *Error                // Allocate a typed target so wrapped and joined repository errors preserve their JSON-RPC classification.
+	if !stdErrors.As(err, &e) { // Search the complete error chain instead of requiring the repository error at the outermost layer.
+		return &JSONRPCError{ // Return unknown error types with a stable classification and no wrapped backend text.
 			Code:    -32603, // Use JSON-RPC internal error code for non-standard error wrappers.
 			Message: "Internal error",
-			Data: map[string]interface{}{ // Return structured data instead of plain string for consistency with MCP.
-				"internalCode": "",          // Leave code empty when no standardized internal code is available.
-				"rawError":     err.Error(), // Preserve original/native error for clients.
+			Data: map[string]interface{}{ // Return only the stable internal classification for programmatic handling.
+				"internalCode": string(CodeInternal), // Classify untyped server failures without exposing their raw text.
 			},
 		}
 	}
@@ -214,20 +214,19 @@ func MapToJSONRPC(err error) *JSONRPCError {
 		code = -32603 // Internal error
 	}
 
-	return &JSONRPCError{ // Return mapped JSON-RPC error with internal and raw details.
+	return &JSONRPCError{ // Return the mapped JSON-RPC error with only its stable internal classification.
 		Code:    code,      // Keep mapped transport-level JSON-RPC code.
 		Message: e.Message, // Keep concise business-facing message.
-		Data: map[string]interface{}{ // Include both stable internal code and full wrapped chain.
+		Data: map[string]interface{}{ // Include the stable internal code without exposing the wrapped cause chain.
 			"internalCode": string(e.Code), // Expose standardized internal code for programmatic handling.
-			"rawError":     e.Error(),      // Expose full wrapped error string for debugging/root-cause analysis.
 		},
 	}
 }
 
 // CodeOf extracts the internal error code, if present.
 func CodeOf(err error) (ErrorCode, bool) {
-	e, ok := err.(*Error)
-	if !ok {
+	var e *Error                // Allocate a typed target so wrapped and joined errors expose their first repository classification.
+	if !stdErrors.As(err, &e) { // Search the complete error chain instead of requiring the repository error at the outermost layer.
 		return "", false
 	}
 	return e.Code, true

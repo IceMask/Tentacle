@@ -3,10 +3,13 @@ package websocket
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"mcp_for_appium/internal/audit"
 	"mcp_for_appium/internal/auth"
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/errors"
@@ -46,6 +49,53 @@ func TestSubscriptionTokenStoreIssueAndLookup(t *testing.T) {
 	}
 	if claims.SubjectID != "subject-1" || claims.TenantID != "tenant-1" || claims.TraceID != "trace-1" { // Fail the test when the lookup does not preserve the issued subject and trace binding.
 		t.Fatalf("expected claims subject-1/tenant-1/trace-1, got %#v", claims) // Surface the unexpected claim set so token-store drift is easy to diagnose.
+	}
+}
+
+// TestSubscriptionTokenStoreAuditOmitsOpaqueToken verifies that issuance audit records use JTI and never persist the browser credential itself.
+func TestSubscriptionTokenStoreAuditOmitsOpaqueToken(t *testing.T) {
+	store, cleanup := newSubscriptionTokenStoreForTest(t)                                          // Construct one disposable Redis-backed token store for audited issuance.
+	defer cleanup()                                                                                // Release Redis resources after the audit assertions complete.
+	var recordedEvents []audit.Event                                                               // Collect append-only token events through an in-memory recorder.
+	store.SetAuditRecorder(audit.RecorderFunc(func(ctx context.Context, event audit.Event) error { // Install one deterministic recorder under the production token store API.
+		recordedEvents = append(recordedEvents, event) // Preserve the exact token lifecycle event emitted after Redis persistence.
+		return nil                                     // Keep audit persistence successful so issuance behavior remains unchanged.
+	}))
+	requestContext := audit.WithRequestContext(context.Background(), audit.RequestContext{RequestID: "request-ws-token", SourceIP: "192.0.2.20"}) // Attach the safe gateway correlation metadata used by runtime issuance.
+	subject := &auth.Subject{ID: "subject-token-audit", TenantID: "tenant-token-audit", Type: "pat", CredentialID: "pat-safe-id"}                 // Build one fully attributable authenticated issuer.
+	issuedToken, err := store.Issue(requestContext, subject, "trace-token-audit")                                                                 // Issue one real opaque token through Redis and audit recording.
+	if err != nil {                                                                                                                               // Fail when audited issuance unexpectedly rejects the valid request.
+		t.Fatalf("expected audited subscription token issuance to succeed, got error: %v", err) // Surface setup or audit integration failures.
+	}
+	if len(recordedEvents) != 1 { // Require exactly one token issuance event.
+		t.Fatalf("expected one subscription token audit event, got %d", len(recordedEvents)) // Surface missing or duplicated token audit writes.
+	}
+	event := recordedEvents[0]                                                                                                                             // Read the sole issuance event for safe identifier assertions.
+	if event.Result != "success" || event.CredentialID != "pat-safe-id" || event.TraceID != "trace-token-audit" || event.RequestID != "request-ws-token" { // Require complete issuer, trace, and request attribution.
+		t.Fatalf("unexpected subscription token audit event: %#v", event) // Surface malformed lifecycle metadata.
+	}
+	if strings.TrimSpace(event.Metadata["jti"].(string)) == "" { // Require one independent token identifier for audit correlation.
+		t.Fatal("expected subscription token audit event to include a non-empty JTI") // Surface missing safe token identity.
+	}
+	serializedEvent, err := json.Marshal(event) // Serialize every event field for opaque-token leakage detection.
+	if err != nil {                             // Fail when the event cannot be represented by the PostgreSQL recorder.
+		t.Fatalf("failed to serialize subscription token audit event: %v", err) // Surface incompatible metadata.
+	}
+	if strings.Contains(string(serializedEvent), issuedToken.Token) { // Reject the actual browser credential anywhere in the audit event.
+		t.Fatalf("subscription token audit event leaked opaque token: %s", serializedEvent) // Surface unsafe token persistence immediately.
+	}
+}
+
+// TestSubscriptionTokenStoreLookupClassifiesRedisFailure verifies that token-store outages remain server errors instead of invalid-credential responses.
+func TestSubscriptionTokenStoreLookupClassifiesRedisFailure(t *testing.T) {
+	store, cleanup := newSubscriptionTokenStoreForTest(t) // Construct one real cache wrapper before forcing its client closed.
+	defer cleanup()                                       // Release the already closed client and in-memory Redis listener idempotently after the assertion.
+	if err := store.cache.Close(); err != nil {           // Close the production Redis client so Lookup encounters an infrastructure failure.
+		t.Fatalf("failed to close websocket token cache: %v", err) // Surface fixture failure because the classification scenario was not created.
+	}
+	_, err := store.Lookup(context.Background(), "unknown-opaque-token") // Resolve one token while the authoritative store is unavailable.
+	if !errors.IsCode(err, errors.CodeStoreRead) {                       // Require infrastructure classification rather than unauthenticated.
+		t.Fatalf("expected closed token store lookup to return %q, got %v", errors.CodeStoreRead, err) // Surface fail-open or misclassified outage behavior.
 	}
 }
 
