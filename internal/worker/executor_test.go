@@ -298,6 +298,40 @@ func TestExecuteWaitStepUsesConfiguredDuration(t *testing.T) {
 	}
 }
 
+// TestExecuteWaitStepStopsOnCallerCancellation verifies that a long wait does not outlive a cancelled plan context.
+func TestExecuteWaitStepStopsOnCallerCancellation(t *testing.T) {
+	executor, recordedEvents := newTestExecutor(&recordingAppiumClient{}, 5*time.Second, time.Second) // Construct an executor whose step timeout is much longer than the cancellation window.
+	ctx, cancel := context.WithCancel(context.Background())                                           // Create one caller-controlled plan context for deterministic cancellation.
+	go func() {                                                                                       // Cancel shortly after execution starts so the wait branch has entered its timer select.
+		time.Sleep(25 * time.Millisecond) // Allow the executor to emit its running event before cancellation.
+		cancel()                          // Cancel the plan so the wait must stop without sleeping for its requested duration.
+	}()
+	startedAt := time.Now()                                                                          // Capture wall-clock start time to assert prompt cancellation.
+	err := executor.Execute(ctx, []PlanStep{{Type: "wait", Params: json.RawMessage(`{"ms":5000}`)}}) // Execute one five-second wait under the shortly cancelled context.
+	if !stdErrors.Is(err, context.Canceled) {                                                        // Require the caller cancellation to propagate unchanged.
+		t.Fatalf("expected context cancellation, got %v", err) // Surface masking or delayed completion regressions.
+	}
+	if elapsed := time.Since(startedAt); elapsed >= time.Second { // Require termination far before the requested five-second delay.
+		t.Fatalf("expected cancelled wait to stop promptly, took %v", elapsed) // Surface any reintroduction of uncancellable sleep behavior.
+	}
+	if len(*recordedEvents) != 2 || (*recordedEvents)[1].Status != "failed" { // Require replayable running and failed events for the interrupted step.
+		t.Fatalf("expected running/failed events, got %#v", *recordedEvents) // Surface missing cancellation observability.
+	}
+}
+
+// TestExecuteWaitStepStopsAtStepDeadline verifies that the configured step timeout bounds a longer requested wait duration.
+func TestExecuteWaitStepStopsAtStepDeadline(t *testing.T) {
+	executor, _ := newTestExecutor(&recordingAppiumClient{}, 30*time.Millisecond, time.Second)                        // Construct an executor with a short per-step deadline.
+	startedAt := time.Now()                                                                                           // Capture wall-clock start time to assert timeout enforcement.
+	err := executor.Execute(context.Background(), []PlanStep{{Type: "wait", Params: json.RawMessage(`{"ms":5000}`)}}) // Execute one five-second wait under the short step timeout.
+	if !stdErrors.Is(err, context.DeadlineExceeded) {                                                                 // Require the step deadline to propagate unchanged.
+		t.Fatalf("expected step deadline error, got %v", err) // Surface timeout masking regressions.
+	}
+	if elapsed := time.Since(startedAt); elapsed >= time.Second { // Require termination far before the requested five-second delay.
+		t.Fatalf("expected timed-out wait to stop promptly, took %v", elapsed) // Surface any reintroduction of uncancellable wait behavior.
+	}
+}
+
 // TestExecuteTapStepUsesConfiguredCoordinates verifies that a successful tap step forwards the configured coordinates directly to Appium.
 func TestExecuteTapStepUsesConfiguredCoordinates(t *testing.T) {
 	client := &recordingAppiumClient{}                                            // Construct one recording Appium client so the test can assert tap gesture dispatch precisely.

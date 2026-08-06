@@ -79,7 +79,7 @@ func (rt *Router) handleTraceSubscriptionToken(w http.ResponseWriter, r *http.Re
 
 	issuedToken, err := rt.subscriptionTokenStore.Issue(r.Context(), subject, traceID) // Issue the short-lived opaque token bound to the caller and requested trace ID.
 	if err != nil {                                                                    // Stop immediately when token issuance fails because no WebSocket subscription can be established without it.
-		writeAPIError(w, errors.MapToHTTP(err), "failed to issue subscription token", err) // Surface token-store failures with internal codes and raw cause details.
+		writeAPIError(w, errors.MapToHTTP(err), "failed to issue subscription token", err) // Surface token-store failures with a stable internal code and no backend cause text.
 		return                                                                             // Stop after the issuance failure because no valid response payload exists.
 	}
 
@@ -101,9 +101,7 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 // writeAPIError writes one structured helper-endpoint error payload that preserves the internal error code when available.
 func writeAPIError(w http.ResponseWriter, status int, message string, err error) {
 	internalCode := "" // Initialize the internal code field so untyped errors still produce a stable response shape.
-	rawError := ""     // Initialize the raw-error field so downstream-native details can be preserved when an error is available.
 	if err != nil {    // Fill the structured error fields only when a downstream error has actually been supplied.
-		rawError = err.Error()                  // Preserve the exact wrapped or native error text for diagnostics.
 		if code, ok := errors.CodeOf(err); ok { // Prefer the typed internal error code whenever the downstream error uses the repository-standard error wrapper.
 			internalCode = string(code) // Copy the stable machine-readable internal code into the helper error envelope.
 		}
@@ -113,7 +111,6 @@ func writeAPIError(w http.ResponseWriter, status int, message string, err error)
 		"error": map[string]interface{}{ // Nest the details under the conventional error key so clients can parse failures uniformly.
 			"message":      message,      // Return the human-readable summary describing why the helper request failed.
 			"internalCode": internalCode, // Return the stable machine-readable internal code when one was available downstream.
-			"rawError":     rawError,     // Return the original downstream or native error text for diagnostics.
 		},
 	})
 }

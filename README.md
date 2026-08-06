@@ -1,7 +1,7 @@
 # MCP Mobile Worker - Appium 自动化测试平台
 
 > **发布阶段**: `v0.x` 预发布
-> **当前实现口径**: `v4.4` 需求/设计基线
+> **当前实现口径**: `v4.4` 需求/设计基线 + MCP `2026-07-28` alignment
 > **协议支持**: 标准 MCP (Model Context Protocol) + JSON-RPC + gRPC + WebSocket + HTTP 辅助端点
 
 ## 概述
@@ -10,10 +10,10 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 
 ### 当前发布定位
 
-- ✅ **标准 MCP 协议支持**：实现 MCP 标准核心能力（目标协议版本 2025-06-18）
+- ✅ **标准 MCP 协议支持**：支持最新 `2026-07-28` 无状态协议，并兼容 `2025-11-25` / `2025-06-18` initialize-based 客户端
 - ✅ **stdio 传输模式**：通过 `gateway --stdio` 启动，支持 Claude Desktop 配置
 - ✅ **Streamable HTTP 传输模式**：通过 `/mcp` 提供标准 MCP HTTP endpoint
-- ✅ **MCP Tools 注册表**：26 个工具（会话/执行/元素/手势/实用/Device Farm/调试）暴露给 LLM
+- ✅ **MCP Tools 注册表**：内置 26 个工具；启用 `gateway.disable_adb_shell_tool` 后对外暴露 25 个
 - ✅ **HTTP 辅助能力**：保留健康检查、指标与浏览器 WebSocket subscription token 签发端点
 - ✅ **当前 GA 候选模式**：`monolith`
 - ⚠️ **distributed**：功能已补齐 ownership lease、结果回传、worker 恢复、stale-result protection 与端到端回归，但首个稳定版仍明确按 `experimental` 管理
@@ -23,6 +23,7 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 - 推荐运行模式：`monolith`
 - `distributed`：**experimental**，`v1.0.0` 首个稳定版仍不作为生产 GA 入口模式
 - Gateway 的 HTTP 与 `stdio` 入口当前都以 `monolith` 为正式支持模式
+- Gateway 尚未连接外部 orchestrator；standalone orchestrator/worker 当前用于 distributed 集成验证和后续部署接线
 - JSON-RPC 预留方法 `replay` `subscribe` `unsubscribe` 当前仍未实现
 
 ### 功能矩阵
@@ -32,7 +33,7 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 | `monolith` 执行模式 | `GA candidate` | 当前推荐的正式运行模式 |
 | `distributed` 执行模式 | `experimental` | 已具备结果回传、lease、worker 恢复与 distributed E2E，但首个稳定版仍按实验特性发布 |
 | MCP `stdio` | `GA candidate` | 可供 Claude Desktop 等 MCP 客户端发现和调用 |
-| MCP Streamable HTTP `/mcp` | `GA candidate` | 标准 MCP HTTP endpoint，要求 post-initialize 请求携带 `MCP-Protocol-Version: 2025-06-18` |
+| MCP Streamable HTTP `/mcp` | `GA candidate` | `2026-07-28` 仅使用 POST，并校验 `MCP-Protocol-Version`、`Mcp-Method` 与按方法要求的 `Mcp-Name`；同时保留 legacy initialize 路径 |
 | HTTP JSON-RPC `/jsonrpc` | `compatibility` | 向后兼容入口，非标准 MCP Streamable HTTP transport |
 | HTTP 辅助端点 | `GA candidate` | 用于 `/healthz`、`/metrics` 与浏览器 WebSocket token 签发 |
 | WebSocket 事件订阅 | `GA candidate` | 浏览器需先换短时 subscription token，trace 订阅已校验持久化 ownership |
@@ -43,67 +44,22 @@ MCP Mobile Worker 是一个面向 AI Agent 的统一移动测试执行平台，�
 
 ### 快速开始
 
-#### 1. 本地开发：作为 MCP Server 使用（Claude Desktop 集成）
+#### 1. 准备依赖、配置和 PostgreSQL Schema
 
-在 Claude Desktop 配置文件中添加：
+本地运行 `gateway` 需要：
 
-```json
-{
-  "mcpServers": {
-    "appium-mobile-testing": {
-      "command": "/path/to/gateway",
-      "args": ["--stdio"],
-      "env": {
-        "CONFIG_PATH": "/path/to/config.yaml"
-      }
-    }
-  }
-}
-```
+- `go.mod` 声明的 Go `1.24.5` 或兼容工具链
+- PostgreSQL 和 Redis
+- 已创建且可执行 `HeadBucket` / `PutObject` 的 S3 或 S3-compatible bucket
 
-配置文件位置：
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
-
-#### 2. 本地开发：作为 HTTP 服务使用
+`gateway` 会在监听端口前检查 PostgreSQL、Redis 和 S3 bucket；缺少可访问的 bucket 时会直接启动失败。
+实际创建和执行移动会话时，还需要 Appium 2 可执行文件，或一个可访问的 Appium server；仅执行协议发现和健康检查时不要求 Appium 已启动。
 
 ```bash
-# 启动 HTTP 服务器模式（默认，本地调试可使用明文 HTTP）
-./gateway --config config.yaml
+cp config.example.yaml config.yaml
+mkdir -p bin
+go build -o ./bin/gateway ./cmd/gateway
 
-# 标准 MCP Streamable HTTP initialize
-curl -X POST http://localhost:8080/mcp \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "initialize",
-    "params": {
-      "protocolVersion": "2025-06-18",
-      "capabilities": {},
-      "clientInfo": {"name": "local-test", "version": "1.0.0"}
-    },
-    "id": 1
-  }'
-
-# initialize 后的 MCP HTTP 请求需要协议版本 header
-curl -X POST http://localhost:8080/mcp \
-  -H "Accept: application/json, text/event-stream" \
-  -H "Content-Type: application/json" \
-  -H "MCP-Protocol-Version: 2025-06-18" \
-  -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":2}'
-
-# 兼容旧集成的 JSON-RPC endpoint 仍保留
-curl -X POST http://localhost:8080/jsonrpc \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}'
-```
-
-#### 3. 初始化 PostgreSQL Schema
-
-在首次启动 `gateway` 或 `orchestrator` 之前，先应用仓库自带的 schema migration：
-
-```bash
 export DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/mcp_mobile_worker?sslmode=disable'
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/001_init.sql
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/002_audit_logs.sql
@@ -114,9 +70,85 @@ psql "$DATABASE_URL" -f internal/storage/postgres/migrations/006_trace_execution
 psql "$DATABASE_URL" -f internal/storage/postgres/migrations/007_trace_session_ownership.sql
 ```
 
-迁移目录说明见：
+迁移说明见 [PostgreSQL Migrations](./internal/storage/postgres/migrations/README.md)。
 
-- [internal/storage/postgres/migrations/README.md](./internal/storage/postgres/migrations/README.md)
+#### 2. 本地开发：作为 MCP Server 使用（Claude Desktop 集成）
+
+在 Claude Desktop 配置文件中添加：
+
+```json
+{
+  "mcpServers": {
+    "appium-mobile-testing": {
+      "command": "/path/to/repo/bin/gateway",
+      "args": ["--stdio"],
+      "env": {
+        "CONFIG_PATH": "/path/to/repo/config.yaml"
+      }
+    }
+  }
+}
+```
+
+配置文件位置：
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+#### 3. 本地开发：作为 HTTP 服务使用
+
+```bash
+# 启动 HTTP 服务器模式（默认，本地调试可使用明文 HTTP）
+./bin/gateway --config config.yaml
+
+# MCP 2026-07-28 无状态发现（现代协议不再调用 initialize）
+curl -X POST http://localhost:8080/mcp \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Content-Type: application/json" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: server/discover" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "server/discover",
+    "params": {
+      "_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "local-test", "version": "1.0.0"}
+      }
+    },
+    "id": 1
+  }'
+
+# 每个现代请求都重复携带版本和客户端能力，不依赖此前连接状态
+curl -X POST http://localhost:8080/mcp \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Content-Type: application/json" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: tools/list" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/list",
+    "params": {
+      "_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {}
+      }
+    },
+    "id": 2
+  }'
+
+# 本项目当前支持的 tools/call 和 resources/read 还必须发送与 params.name/params.uri 一致的 Mcp-Name
+# legacy 客户端仍可先 initialize，并使用 2025-11-25 或 2025-06-18 的 MCP-Protocol-Version
+
+# 兼容旧集成的 JSON-RPC endpoint 仍保留
+curl -X POST http://localhost:8080/jsonrpc \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}'
+```
+
+本地示例默认关闭鉴权；启用 PAT、OIDC 或 HMAC 后，上述 HTTP 请求还需要携带对应凭据。
+
+#### 4. 验证
 
 如需做完整的 migration 回放验证，可以直接运行：
 
@@ -130,11 +162,12 @@ go run ./cmd/migration_replay_check
 go test ./internal/integration -count=1 -v
 ```
 
-这条集成测试会自动拉起：
+完整 integration package 会自动拉起：
 
 - embedded PostgreSQL
 - miniredis
 - fake Appium HTTP server
+- fake S3-compatible HTTP endpoint（artifact 场景）
 
 并真实覆盖：
 
@@ -146,7 +179,7 @@ go test ./internal/integration -count=1 -v
 如需运行 distributed 端到端链路验证，可以直接运行：
 
 ```bash
-go test ./internal/integration -run TestDistributedFlowEndToEnd -count=1 -v
+go test ./internal/integration -run TestDistributedStartExecuteTraceEndFlow -count=1 -v
 ```
 
 ### 生产部署默认建议
@@ -155,12 +188,13 @@ go test ./internal/integration -run TestDistributedFlowEndToEnd -count=1 -v
 - 内部 RPC 推荐至少使用 `tls`，不要把 `insecure` 当成生产默认
 - 浏览器 WebSocket 应走短时 subscription token，不应直接暴露长期 PAT / OIDC Bearer
 - 生产推荐配置请以 [config.production.example.yaml](./config.production.example.yaml) 为基线，本地联调用 [config.example.yaml](./config.example.yaml) 做显式降级
+- 生产示例仍包含占位域名、证书、token 和数据库 DSN；部署前必须替换 secret，并为 PostgreSQL、Redis 与 S3 配置符合环境要求的传输加密和访问控制
 
 ### MCP Tools 列表
 
 通过 MCP 协议可用的工具：
 
-- 共 **26** 个工具（截至 2026-03-23）
+- 内置注册表共 **26** 个工具，定义来自 `internal/gateway/mcp/tools/*.json`
 - 核心会话/执行工具：`startSession` `executePlan` `endSession` `cancelPlan` `getTrace`
 - 交互式元素工具：`findElement` `clickElement` `sendKeysToElement` `clearElement` `getElementText` `getElementAttribute` `isElementDisplayed`
 - 手势工具：`tap` `swipe` `longPress` `pressBack` `hideKeyboard`
@@ -171,8 +205,8 @@ go test ./internal/integration -run TestDistributedFlowEndToEnd -count=1 -v
 
 补充说明：
 
-- 上述 **26 个** 名称是当前实际可发现的 MCP tools
-- 运维可通过 `gateway.disable_adb_shell_tool=true` 完全移除 `adbShell` 的发现与调用入口
+- 本地示例默认可发现上述 **26 个** MCP tools
+- 运维可通过 `gateway.disable_adb_shell_tool=true` 完全移除 `adbShell`；生产示例默认启用该开关，因此暴露 **25 个**
 - JSON-RPC schema 中还保留了 `replay` `subscribe` `unsubscribe` 三个方法名，但它们当前 **未实现**，不计入可用 MCP tools 集
 
 ### Device Farm 参数缓存说明（run_api 模式）
@@ -204,6 +238,7 @@ go test ./internal/integration -run TestDistributedFlowEndToEnd -count=1 -v
 - [Release Notes v1.0.0 Draft](./RELEASE_NOTES_v1.0.0.md)
 - [v1.0.0 Release Checklist](./v1.0.0_release_checklist.md)
 - [Security Policy](./SECURITY.md)
+- [MCP 2026-07-28 升级说明](./MCP_2026_07_28_ALIGNMENT.md)
 - [MIT License](./LICENSE)
 
 ### 许可证
@@ -214,68 +249,40 @@ go test ./internal/integration -run TestDistributedFlowEndToEnd -count=1 -v
 
 ```mermaid
 flowchart TD
-  %% ========= Ingress =========
-  A[Client<br/>REST / JSON-RPC] --> B[Gateway]
-  A2[Client<br/>WebSocket] --> WS[WS Hub]
+  MCP["MCP client"] -->|"POST /mcp"| G["Gateway"]
+  STDIO["Local MCP client"] -->|"stdio"| G
+  COMPAT["Compatibility client"] -->|"POST /jsonrpc"| G
+  BROWSER["Browser client"] -->|"POST /api/ws/traces/{traceId}/subscription-token"| G
+  BROWSER -->|"WS /ws/plan-events"| WS["WebSocket Hub"]
 
-  subgraph G1[Gateway]
-    B --> B1[Auth 中间件<br/>HMAC / OIDC / PAT]
-    B1 --> B2[RateLimit / 配额探测]
-    B2 --> B3{Idempotency-Key 命中?}
-    B3 -- 是 --> B3r[返回缓存结果]
-    B3 -- 否 --> B4[Schema 校验<br/>JSON-RPC/REST]
-    B4 --> B5[路由: /sessions /plans:execute /cancel ...]
+  G -->|"protected HTTP routes"| AUTH["Optional PAT / OIDC / HMAC"]
+
+  subgraph MONO["GA candidate: monolith"]
+    AUTH --> O["Embedded Orchestrator"]
+    G -->|"stdio direct"| O
+    O --> Q["Redis Streams queue"]
+    Q --> D["Dispatcher"]
+    D --> E["Local plan executor"]
+    E --> A["Appium or Device Farm remote access"]
   end
 
-  %% ========= Orchestrator =========
-  B5 --> O[Orchestrator]
-  subgraph O1[Orchestrator]
-    O --> O0[DAO / Cache / S3 Client 就绪检查]
-    O0 --> O1a[CreateTrace / 事务]
-    O1a --> O2[EventsPublisher<br/>插入事件(PlanQueued)]
-    O2 --> O3[Dispatcher<br/>写入 Redis Streams 分片]
-    O3 --> O4[WorkerRegistry.Assign<br/>选择合适 Worker/ADF]
-    O4 --> O5{ADF 租赁超时?}
-    O5 -- 是 --> O5f[Fallback=本地执行<br/>事件 phase=fallback]
-    O5 -- 否 --> O6[派发作业给 Worker]
+  subgraph DIST["Experimental: standalone distributed stack"]
+    SO["Standalone Orchestrator"] --> DQ["Redis Streams dispatcher"]
+    DQ -->|"ExecutePlan gRPC"| W["Worker with capacity admission"]
+    W --> WA["Appium"]
+    W -->|"events, lease renewal, completion gRPC"| SO
   end
 
-  %% ========= Worker 执行 =========
-  O6 --> W[Worker]
-  subgraph W1[Worker]
-    W --> W0[并发控制器 Acquire]
-    W0 --> W1a[Appium Client<br/>会话建立/恢复]
-    W1a --> W2[执行计划步骤循环]
-    subgraph STEP[Step 执行]
-      direction TB
-      S1[定位策略矩阵<br/>and/near→视觉兜底] --> S2[动作执行]
-      S2 --> S3[可选验证/失败截图]
-      S3 --> S4[emit PlanEvent<br/>非阻塞/背压保护]
-    end
-    W2 --> STEP --> W3[心跳/指标上报]
-    W3 --> W4{取消/超时?}
-    W4 -- 是 --> W4c[停止≤1s；最终事件=PlanCanceled]
-    W4 -- 否 --> W5[完成/失败；最终事件=PlanFinished/Failed]
-    W5 --> W6[并发控制器 Release]
-  end
-
-  %% ========= 事件与制品 =========
-  W4c -->|事件流| EDB[(Postgres<br/>Traces/Events)]
-  W5 -->|事件流| EDB
-  W -->|Screenshot/Logs 大文件| S3[S3 对象存储]
-  S3 -.-> O7[CompleteArtifactUpload<br/>ETag/SHA256 校验]
-
-  %% ========= 发布与补偿 =========
-  EDB --> PUB[EventsPublisher<br/>广播触发]
-  PUB --> WS
-  WS -->|实时 at-most-once| A2[Client WS 订阅者]
-  EDB --> A3[GetEvents(sinceId)<br/>(A2A 补偿)]
-
-  %% ========= 观测与链路 =========
-  B & O & W --> M[Metrics / Prometheus]
-  B & O & W --> T[OTEL Tracing]
-  classDef faded fill:#f7f7f7,stroke:#bbb,color:#333;
-
-  %% notes
-  class S3,T,M faded
+  O --> PG[("PostgreSQL sessions, traces, events, audit")]
+  SO --> PG
+  O --> R[("Redis cache, leases, PubSub")]
+  SO --> R
+  O --> S3["S3 screenshot artifacts"]
+  O --> EP["EventsPublisher"]
+  SO --> EP
+  EP -->|"durable events"| PG
+  EP -->|"best-effort PubSub"| R
+  R --> WS
 ```
+
+当前 gateway 不会把 HTTP 或 stdio 请求转发给 standalone orchestrator，因此图中的 distributed stack 不是现有 gateway 的可选后端。事件先持久化到 PostgreSQL，再 best-effort 发布到 Redis PubSub；WebSocket 是实时 at-most-once 通道，历史事件通过 `getTrace` 读取，而不是旧 A2A REST 路由。`/metrics` 当前与 gateway 共用监听端口，`telemetry.metrics_port` 尚未创建独立 listener；gateway 和 orchestrator 初始化 OTEL tracing，worker 当前使用结构化日志。

@@ -10,10 +10,11 @@ var subjectKey = contextKey{}
 
 // Subject represents the authenticated entity.
 type Subject struct {
-	ID       string
-	Type     string // "pat", "oidc", "hmac"
-	TenantID string
-	Scopes   []string
+	ID           string
+	Type         string // "pat", "oidc", "hmac"
+	CredentialID string
+	TenantID     string
+	Scopes       []string
 }
 
 // WithSubject returns a new context with the subject.

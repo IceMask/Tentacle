@@ -4,9 +4,11 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"mcp_for_appium/internal/config"
+	internalerrors "mcp_for_appium/internal/errors"
 )
 
 // expectedToolCatalogSize stores the current embedded MCP tool count so catalog drift is detected immediately in unit tests.
@@ -29,7 +31,7 @@ func mustMCPError(t *testing.T, err error, expectedCode int) *MCPError {
 	return mcpErr // Return the typed MCP error so callers can assert message and data fields without repeating the type assertion.
 }
 
-// TestMCPHandlerInitializeReturnsServerCapabilities verifies that initialize returns the expected protocol version, capabilities, and server metadata.
+// TestMCPHandlerInitializeReturnsServerCapabilities verifies that an unknown legacy initialize version receives the historical fallback, capabilities, and server metadata.
 func TestMCPHandlerInitializeReturnsServerCapabilities(t *testing.T) {
 	handler := NewMCPHandler(nil)                                                                                                         // Construct one handler without an orchestrator because initialize is pure protocol metadata.
 	params := json.RawMessage(`{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0.0"}}`) // Build one representative initialize payload that matches the MCP handshake shape.
@@ -42,7 +44,7 @@ func TestMCPHandlerInitializeReturnsServerCapabilities(t *testing.T) {
 	if !ok {                                         // Reject non-map results because initialize must return a structured MCP response object.
 		t.Fatalf("expected initialize response map, got %T", result) // Surface the actual response type so protocol regressions are easy to diagnose.
 	}
-	if resultMap["protocolVersion"] != "2025-06-18" { // Assert the target MCP wire protocol version so clients can rely on the current alignment target.
+	if resultMap["protocolVersion"] != "2025-06-18" { // Assert the historical fallback used only for unknown initialization-era protocol versions.
 		t.Fatalf("expected protocolVersion 2025-06-18, got %#v", resultMap["protocolVersion"]) // Surface the actual version so handshake regressions are easy to diagnose.
 	}
 	capabilities, ok := resultMap["capabilities"].(map[string]interface{}) // Extract the capabilities map so tool and resource support can be asserted precisely.
@@ -69,6 +71,11 @@ func TestToolRegistryCatalogAndValidation(t *testing.T) {
 	tools := registry.List()                   // List every registered tool so the catalog size and key tool names can be asserted.
 	if len(tools) != expectedToolCatalogSize { // Assert the current embedded tool count so catalog drift is detected immediately.
 		t.Fatalf("expected %d tools, got %d", expectedToolCatalogSize, len(tools)) // Surface the actual count so catalog regressions are easy to diagnose.
+	}
+	for index := 1; index < len(tools); index++ { // Compare every adjacent pair to enforce deterministic lexicographic discovery order.
+		if tools[index-1].Name >= tools[index].Name { // Reject duplicates and unstable ordering because clients cache the serialized catalog.
+			t.Fatalf("expected tools sorted by name, found %q before %q", tools[index-1].Name, tools[index].Name) // Surface the first offending pair for catalog debugging.
+		}
 	}
 
 	requiredToolNames := map[string]bool{ // Define representative tools across the major capability areas so the registry assertion is broader than a raw count.
@@ -98,6 +105,9 @@ func TestToolRegistryCatalogAndValidation(t *testing.T) {
 	if tool.InputSchema == nil { // Reject nil schemas because MCP clients depend on per-tool input-schema metadata.
 		t.Fatal("expected startSession input schema") // Stop immediately because schema validation assertions depend on an actual schema.
 	}
+	if tool.InputSchema["$schema"] != JSONSchema202012 { // Require tools/list to declare the current MCP default JSON Schema dialect explicitly.
+		t.Fatalf("expected JSON Schema 2020-12 declaration, got %#v", tool.InputSchema["$schema"]) // Surface the advertised dialect when schema alignment regresses.
+	}
 
 	validArgs := json.RawMessage(`{"projectId":"test-project","w3cCapsJson":{"platformName":"iOS"}}`) // Build one minimal valid payload for the startSession schema.
 	if err := registry.Validate("startSession", validArgs); err != nil {                              // Validate the minimal payload through the production schema path.
@@ -108,6 +118,36 @@ func TestToolRegistryCatalogAndValidation(t *testing.T) {
 	mcpErr := mustMCPError(t, registry.Validate("startSession", invalidArgs), -32602) // Validate the invalid payload and assert the schema-failure MCP code.
 	if mcpErr.Message != "Schema validation failed" {                                 // Assert the stable validation message so clients can classify input failures consistently.
 		t.Fatalf("expected schema validation failure message, got %q", mcpErr.Message) // Surface the actual message so validation regressions are easy to diagnose.
+	}
+}
+
+// TestCompileToolInputSchemaSupportsDraft202012 verifies validation of a keyword whose cross-subschema behavior requires the MCP-mandated 2020-12 dialect.
+func TestCompileToolInputSchemaSupportsDraft202012(t *testing.T) {
+	tool := Tool{ // Build one isolated schema fixture that uses 2020-12 unevaluatedProperties semantics.
+		Name: "draft2020Test", // Assign a safe unique name used only to construct the local schema resource URI.
+		InputSchema: map[string]interface{}{ // Compose an object across allOf while disallowing properties left unevaluated afterward.
+			"$schema": JSONSchema202012, // Explicitly select the current MCP default dialect for this regression fixture.
+			"type":    "object",         // Require the validated tool arguments to use an object shape.
+			"allOf": []interface{}{ // Evaluate the declared property inside a composed subschema.
+				map[string]interface{}{ // Define the one permitted property within the allOf branch.
+					"properties": map[string]interface{}{ // Mark name as evaluated when it satisfies the nested declaration.
+						"name": map[string]interface{}{"type": "string"}, // Require the permitted name value to be a string.
+					},
+					"required": []interface{}{"name"}, // Require the permitted property so the accepted fixture is meaningful.
+				},
+			},
+			"unevaluatedProperties": false, // Reject properties not evaluated by the composed 2020-12 schema.
+		},
+	}
+	compiledSchema, err := compileToolInputSchema(tool) // Compile the fixture through the production dialect-pinned compiler.
+	if err != nil {                                     // Fail when the server cannot compile a valid 2020-12 tool schema.
+		t.Fatalf("expected JSON Schema 2020-12 compilation to succeed, got %v", err) // Surface the compiler diagnostic for dependency or dialect regressions.
+	}
+	if err := compiledSchema.Validate(map[string]interface{}{"name": "appium"}); err != nil { // Validate an object whose only property is evaluated inside allOf.
+		t.Fatalf("expected composed 2020-12 schema to accept evaluated property, got %v", err) // Surface unexpected rejection of valid arguments.
+	}
+	if err := compiledSchema.Validate(map[string]interface{}{"name": "appium", "extra": true}); err == nil { // Validate an object containing one property left unevaluated by allOf.
+		t.Fatal("expected 2020-12 unevaluatedProperties to reject extra property") // Prove the modern dialect keyword is enforced rather than silently ignored.
 	}
 }
 
@@ -145,17 +185,36 @@ func TestMCPHandlerToolsCallRejectsUnknownTool(t *testing.T) {
 	}
 }
 
-// TestMCPHandlerToolsCallRejectsInvalidArguments verifies that schema-invalid tool arguments fail before handler execution begins.
-func TestMCPHandlerToolsCallRejectsInvalidArguments(t *testing.T) {
+// TestMCPHandlerToolsCallReturnsInputErrorResult verifies that schema-invalid tool arguments use the MCP isError result contract instead of a JSON-RPC error.
+func TestMCPHandlerToolsCallReturnsInputErrorResult(t *testing.T) {
 	handler := NewMCPHandler(nil)                                                             // Construct one handler without an orchestrator because validation failures stop before business logic is reached.
 	params := json.RawMessage(`{"name":"findElement","arguments":{"sessionId":"session-1"}}`) // Build one invalid findElement payload that omits required strategy and selector fields.
 
-	mcpErr := mustMCPError(t, func() error { // Execute the real tools/call path and capture the validation failure for structured assertions.
-		_, err := handler.ToolsCall(context.Background(), params) // Invoke the production tools/call entry point with the invalid payload.
-		return err                                                // Return the error so the shared MCP assertion helper can inspect it.
-	}(), -32602)
-	if mcpErr.Message != "Schema validation failed" { // Assert the stable schema-validation message so clients can classify input failures consistently.
-		t.Fatalf("expected schema validation failure message, got %q", mcpErr.Message) // Surface the actual message so validation regressions are easy to diagnose.
+	result, err := handler.ToolsCall(context.Background(), params) // Invoke the production tools/call entry point with the invalid payload.
+	if err != nil {                                                // Reject protocol-level errors because schema failures must complete as tool results.
+		t.Fatalf("expected MCP tool error result, got protocol error: %v", err) // Surface accidental JSON-RPC error regressions directly.
+	}
+	resultMap, ok := result.(map[string]interface{}) // Assert the standard MCP tool-result object shape before inspecting its error marker.
+	if !ok {                                         // Reject non-object results because tools/call must return a structured result.
+		t.Fatalf("expected tool result map, got %T", result) // Surface the unexpected result type for quick protocol diagnosis.
+	}
+	if isError, ok := resultMap["isError"].(bool); !ok || !isError { // Require the explicit MCP application-error marker on schema failures.
+		t.Fatalf("expected isError=true, got %#v", resultMap["isError"]) // Surface the malformed marker so clients do not silently treat the call as successful.
+	}
+}
+
+// TestNewToolErrorResultDoesNotExposeRawCause verifies that tool-result failures preserve stable codes without returning sensitive wrapped diagnostics.
+func TestNewToolErrorResultDoesNotExposeRawCause(t *testing.T) {
+	result := newToolErrorResult("startSession", internalerrors.New(internalerrors.CodeStoreRead, "password=secret-value")) // Build one typed failure whose private message would be unsafe to return.
+	encodedResult, err := json.Marshal(result)                                                                              // Serialize the complete client-visible result so every nested field is checked together.
+	if err != nil {                                                                                                         // Fail when the generated tool result cannot be encoded as JSON.
+		t.Fatalf("expected tool error result to marshal, got %v", err) // Surface malformed result values introduced by future changes.
+	}
+	if strings.Contains(string(encodedResult), "secret-value") { // Reject any nested reflection of the private downstream diagnostic.
+		t.Fatalf("expected sensitive cause to be omitted, got %s", encodedResult) // Surface the unsafe response payload for immediate remediation.
+	}
+	if !strings.Contains(string(encodedResult), string(internalerrors.CodeStoreRead)) { // Require the stable machine-readable code to remain available after sanitization.
+		t.Fatalf("expected internal code %s, got %s", internalerrors.CodeStoreRead, encodedResult) // Surface loss of programmatic error classification.
 	}
 }
 
@@ -177,6 +236,12 @@ func TestMCPHandlerResourcesListReturnsExpectedCatalog(t *testing.T) {
 	}
 	if len(resources) != 3 { // Assert the documented resource count so catalog drift is detected immediately.
 		t.Fatalf("expected 3 resources, got %d", len(resources)) // Surface the actual count so catalog regressions are easy to diagnose.
+	}
+	if _, hasTTL := resultMap["ttlMs"]; hasTTL { // Keep the era-neutral handler result compatible with initialization-era resource clients.
+		t.Fatalf("expected base resources/list result without modern ttlMs, got %#v", resultMap) // Surface accidental current-protocol leakage into legacy output.
+	}
+	if _, hasScope := resultMap["cacheScope"]; hasScope { // Keep authorization-aware cache controls in modern result decoration only.
+		t.Fatalf("expected base resources/list result without modern cacheScope, got %#v", resultMap) // Surface accidental current-protocol leakage into legacy output.
 	}
 
 	expectedURIs := map[string]bool{ // Define the documented MCP resource templates so the catalog assertion is order-independent.
@@ -210,6 +275,39 @@ func TestMCPHandlerResourcesReadRejectsInvalidURI(t *testing.T) {
 	}(), -32602)
 	if mcpErr.Message != "Invalid resource URI" { // Assert the stable invalid-resource message so clients can classify URI errors consistently.
 		t.Fatalf("expected invalid resource URI message, got %q", mcpErr.Message) // Surface the actual message so protocol regressions are easy to diagnose.
+	}
+}
+
+// TestDecorateModernResourceReadResultUsesPrivateCache verifies that modern user-specific resource content cannot be shared across authorization contexts.
+func TestDecorateModernResourceReadResultUsesPrivateCache(t *testing.T) {
+	baseResult := newResourceReadResult("mcp://appium/traces/trace-1", `{"trace":"value"}`) // Build the era-neutral resource payload without requiring an orchestrator or database.
+	decorated, err := DecorateModernResult("resources/read", baseResult)                    // Apply the production current-protocol result policy for a resource read.
+	if err != nil {                                                                         // Fail when a valid resource object cannot be decorated.
+		t.Fatalf("expected modern resource decoration to succeed, got %v", err) // Surface unexpected normalization or result-shape failures.
+	}
+	result, ok := decorated.(map[string]interface{}) // Read the normalized modern result object for cache assertions.
+	if !ok {                                         // Reject non-object output because all modern MCP successful results must be objects.
+		t.Fatalf("expected decorated resource result object, got %#v", decorated) // Surface the malformed modern result.
+	}
+	if result["ttlMs"] != ResourceCacheTTLMS { // Require the short resource freshness window injected after JSON normalization.
+		t.Fatalf("expected resource ttlMs %d, got %#v", ResourceCacheTTLMS, result["ttlMs"]) // Surface the actual cache duration on regression.
+	}
+	if result["cacheScope"] != CacheScopePrivate { // Require caller-isolated caching for potentially authorized test data.
+		t.Fatalf("expected private resource cache scope, got %#v", result["cacheScope"]) // Surface unsafe public scope regressions immediately.
+	}
+}
+
+// TestNewResourceReadErrorUsesCurrentProtocolCodes verifies that unavailable resources and backend failures use the JSON-RPC codes required by current MCP.
+func TestNewResourceReadErrorUsesCurrentProtocolCodes(t *testing.T) {
+	notFoundCause := internalerrors.New(internalerrors.CodeTraceNotFound, "trace not found")    // Build one repository-standard missing resource error without a database dependency.
+	notFound := newResourceReadError("mcp://appium/traces/missing", "get trace", notFoundCause) // Map the missing trace through the production resource error helper.
+	if notFound.Code != -32602 || notFound.Message != "Resource not found" {                    // Require the current resource-not-found code and stable message.
+		t.Fatalf("expected resource not found -32602, got %#v", notFound) // Surface the complete malformed protocol error.
+	}
+	internalCause := internalerrors.New(internalerrors.CodeStoreRead, "database unavailable")          // Build one backend read failure that must not be reported as a missing URI.
+	internalFailure := newResourceReadError("mcp://appium/traces/trace-1", "get trace", internalCause) // Map the backend failure through the same production helper.
+	if internalFailure.Code != -32603 || internalFailure.Message != "Failed to read resource" {        // Require the standard JSON-RPC internal error rather than a legacy server code.
+		t.Fatalf("expected resource internal error -32603, got %#v", internalFailure) // Surface the complete malformed protocol error.
 	}
 }
 

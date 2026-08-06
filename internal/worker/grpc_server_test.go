@@ -118,7 +118,14 @@ func TestRunPlanAttachesSessionAndReportsCallbacks(t *testing.T) {
 		return appiumClient // Return the deterministic fake Appium client so the worker run stays fully in-process.
 	}
 
-	server.runPlan("trace-1", "appium-session-1", 7, json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`)) // Execute one tiny distributed plan synchronously so the test can assert its callback side effects immediately.
+	response, err := server.ExecutePlan(context.Background(), &rpc.ExecutePlanRequest{TraceID: "trace-1", SessionID: "appium-session-1", Attempt: 7, Plan: json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`)}) // Admit one tiny plan through the production synchronous worker admission boundary.
+	if err != nil {                                                                                                                                                                                                 // Fail when the in-process worker RPC unexpectedly returns a transport-level error.
+		t.Fatalf("expected worker plan admission to succeed, got error: %v", err) // Surface admission failures because callback assertions require an accepted run.
+	}
+	if response.Status != "accepted" { // Fail when the worker rejects a valid plan despite available capacity.
+		t.Fatalf("expected worker plan status accepted, got %q", response.Status) // Surface the unexpected admission outcome for diagnosis.
+	}
+	waitForWorkerCompletions(t, reporter, 1) // Wait until asynchronous execution emits its terminal callback and releases worker capacity.
 
 	if appiumClient.attachedSession != "appium-session-1" { // Fail the test when the worker did not attach to the orchestrator-created Appium session before execution.
 		t.Fatalf("expected attached session appium-session-1, got %q", appiumClient.attachedSession) // Surface the unexpected attached session because distributed execution must reuse the existing session.
@@ -158,7 +165,14 @@ func TestRunPlanFailsWhenAppiumReadyHookFails(t *testing.T) {
 		return nil                                                                           // Return nil only to satisfy the compiler because the fatal assertion above should abort the test first.
 	} // Close the panic client-factory override.
 
-	server.runPlan("trace-2", "appium-session-2", 8, json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`)) // Execute one tiny plan synchronously so the worker failure path can be asserted immediately.
+	response, err := server.ExecutePlan(context.Background(), &rpc.ExecutePlanRequest{TraceID: "trace-2", SessionID: "appium-session-2", Attempt: 8, Plan: json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`)}) // Admit one tiny plan through the production worker boundary so readiness failure runs asynchronously.
+	if err != nil {                                                                                                                                                                                                 // Fail when the in-process worker RPC unexpectedly returns a transport-level error.
+		t.Fatalf("expected worker plan admission to succeed, got error: %v", err) // Surface admission failures because readiness assertions require the run to start.
+	}
+	if response.Status != "accepted" { // Fail when the worker rejects a valid plan before invoking the readiness hook.
+		t.Fatalf("expected worker plan status accepted, got %q", response.Status) // Surface the unexpected admission outcome for diagnosis.
+	}
+	waitForWorkerCompletions(t, reporter, 1) // Wait until the asynchronous readiness failure emits its terminal callback.
 
 	if ensureReadyCalls != 1 { // Fail the test when the worker did not invoke the readiness hook exactly once before deciding the trace outcome.
 		t.Fatalf("expected readiness hook to be called once, got %d", ensureReadyCalls) // Surface the unexpected readiness-hook call count because local Appium auto-start depends on this hook firing reliably.
@@ -181,5 +195,83 @@ func TestRunPlanFailsWhenAppiumReadyHookFails(t *testing.T) {
 	}
 	if reporter.completions[0].Attempt != 8 { // Fail the test when the worker terminal callback does not preserve the reserved attempt number on readiness failure.
 		t.Fatalf("expected distributed completion attempt 8, got %d", reporter.completions[0].Attempt) // Surface the unexpected attempt because stale-result protection still applies on failure paths.
+	}
+}
+
+// TestExecutePlanEnforcesCapacityAndDeduplicatesAttempts verifies that admission rejects excess work and never starts an exact active or completed attempt twice.
+func TestExecutePlanEnforcesCapacityAndDeduplicatesAttempts(t *testing.T) {
+	reporter := &fakeDistributedReporter{}                                                                               // Record callbacks so the test can prove only one physical execution completed.
+	server := NewGRPCServer("http://unused-appium", time.Second, time.Second, "worker-capacity", reporter, time.Hour, 1) // Construct one worker with exactly one authoritative execution slot.
+	server.newClient = func(url string) sessionAwareAppiumClient {                                                       // Replace production Appium traffic with one deterministic in-process stub.
+		return &fakeSessionAwareAppiumClient{} // Return an isolated fake client for the single admitted wait plan.
+	}
+	request := &rpc.ExecutePlanRequest{TraceID: "trace-capacity-1", SessionID: "session-capacity-1", Attempt: 3, Plan: json.RawMessage(`[{"type":"wait","params":{"ms":100}}]`)} // Build one slow-enough valid plan so admission state remains active during duplicate and capacity checks.
+	firstResponse, err := server.ExecutePlan(context.Background(), request)                                                                                                      // Admit the first trace into the worker's only slot.
+	if err != nil {                                                                                                                                                              // Fail when in-process admission unexpectedly returns a transport error.
+		t.Fatalf("expected first worker admission to succeed, got error: %v", err) // Surface the admission failure because the rest of the capacity scenario depends on an active run.
+	}
+	if firstResponse.Status != "accepted" { // Fail when the available worker slot does not admit the first plan.
+		t.Fatalf("expected first admission status accepted, got %q", firstResponse.Status) // Surface the unexpected admission result.
+	}
+
+	duplicateResponse, err := server.ExecutePlan(context.Background(), request) // Replay the exact active trace attempt while its first goroutine still owns capacity.
+	if err != nil {                                                             // Fail when duplicate admission unexpectedly returns a transport error.
+		t.Fatalf("expected duplicate active admission to return cleanly, got error: %v", err) // Surface the duplicate handling failure.
+	}
+	if duplicateResponse.Status != "accepted" { // Require idempotent acknowledgement for exact response-loss replays.
+		t.Fatalf("expected duplicate active admission status accepted, got %q", duplicateResponse.Status) // Surface any rejection that could make the orchestrator retry dangerously.
+	}
+
+	busyResponse, err := server.ExecutePlan(context.Background(), &rpc.ExecutePlanRequest{TraceID: "trace-capacity-2", SessionID: "session-capacity-2", Attempt: 1, Plan: json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`)}) // Attempt a different trace while the only slot remains occupied.
+	if err != nil {                                                                                                                                                                                                                // Fail when capacity rejection unexpectedly uses a transport error.
+		t.Fatalf("expected busy admission to return cleanly, got error: %v", err) // Surface the capacity handling failure.
+	}
+	if busyResponse.Status != "busy" { // Require the stable transient status understood by dispatcher retry logic.
+		t.Fatalf("expected second trace admission status busy, got %q", busyResponse.Status) // Surface oversubscription or incorrect terminal rejection.
+	}
+	if activeLoad := server.ActiveLoad(); activeLoad != 1 { // Prove duplicate and busy calls did not create extra active goroutines.
+		t.Fatalf("expected authoritative active load 1, got %d", activeLoad) // Surface worker-side load-accounting drift.
+	}
+
+	waitForWorkerCompletions(t, reporter, 1)                                  // Wait for the single physically admitted plan to finish and create its deduplication tombstone.
+	completedReplay, err := server.ExecutePlan(context.Background(), request) // Replay the exact attempt after completion while its bounded history remains present.
+	if err != nil {                                                           // Fail when completed-attempt deduplication unexpectedly returns a transport error.
+		t.Fatalf("expected completed replay to return cleanly, got error: %v", err) // Surface the completed replay handling failure.
+	}
+	if completedReplay.Status != "accepted" { // Acknowledge the retained completed attempt without executing it again.
+		t.Fatalf("expected completed replay status accepted, got %q", completedReplay.Status) // Surface a response that could provoke unsafe retries.
+	}
+	time.Sleep(20 * time.Millisecond)            // Allow enough time for any accidental duplicate goroutine to emit an observable second completion.
+	reporter.mu.Lock()                           // Serialize the final completion-count assertion with callback writes.
+	completionCount := len(reporter.completions) // Snapshot how many physical terminal callbacks were emitted.
+	reporter.mu.Unlock()                         // Release the reporter lock before evaluating the assertion.
+	if completionCount != 1 {                    // Reject any duplicate physical execution across active and completed replays.
+		t.Fatalf("expected exactly one worker completion, got %d", completionCount) // Surface at-most-once admission regression explicitly.
+	}
+	if activeLoad := server.ActiveLoad(); activeLoad != 0 { // Confirm the completed tombstone does not consume execution capacity.
+		t.Fatalf("expected authoritative active load 0 after completion, got %d", activeLoad) // Surface a leaked worker slot.
+	}
+}
+
+// waitForWorkerCompletions waits for the fake reporter to observe the requested terminal callback count without introducing an unbounded test hang.
+func waitForWorkerCompletions(t *testing.T, reporter *fakeDistributedReporter, expected int) {
+	t.Helper()                                 // Attribute timeout failures to the scenario that requested completion.
+	deadline := time.NewTimer(2 * time.Second) // Bound asynchronous worker execution to one short deterministic test window.
+	defer deadline.Stop()                      // Release the timeout timer when the expected callback arrives early.
+	ticker := time.NewTicker(time.Millisecond) // Poll the mutex-protected fake reporter at a low-cost cadence.
+	defer ticker.Stop()                        // Release the polling ticker on success or timeout.
+	for {                                      // Continue until the expected terminal callback count appears or the deadline expires.
+		reporter.mu.Lock()                           // Serialize the completion count read with callback append operations.
+		completionCount := len(reporter.completions) // Snapshot the current terminal callback count.
+		reporter.mu.Unlock()                         // Release the reporter lock before blocking on timers.
+		if completionCount >= expected {             // Return once asynchronous execution has produced every expected terminal callback.
+			return // Allow the caller to assert stable callback and client state.
+		}
+		select {
+		case <-deadline.C:
+			t.Fatalf("timed out waiting for %d worker completions; got %d", expected, completionCount) // Surface the missing callback count for diagnosis.
+		case <-ticker.C:
+			// Retry after one millisecond so short wait-only plans finish quickly without a busy loop.
+		}
 	}
 }

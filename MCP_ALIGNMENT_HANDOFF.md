@@ -1,94 +1,68 @@
 # MCP Alignment Handoff
 
-This note captures the current MCP-alignment context so the next development session can continue on the `v1` worktree without rebuilding the analysis from scratch.
+Updated: 2026-08-06
 
-## Current Workspace State
+This handoff records the current MCP alignment state in `/Users/stellajen/Documents/workspace/mcp_for_appium_v1` on branch `v1-work`.
 
-- Worktree path: `/Users/stellajen/Documents/workspace/mcp_for_appium_v1`
-- Active branch: `v1-work`
-- Tracking branch: `origin/v1`
-- Main worktree remains at `/Users/stellajen/Documents/workspace/mcp_for_appium`
+## Current Status
 
-## Documents Added In This Worktree
+The original P0 legacy alignment is complete, including request/notification classification, silent notification responses, cancellation, legacy `ping`, and `/mcp` Streamable HTTP support.
 
-- `mcp_alignment_checklist.md`
-- `requirements.mcp_alignment.md`
-- `module_mcp_alignment_design.md`
+The follow-up implementation now targets the official Current MCP revision `2026-07-28` while preserving dual-era compatibility:
 
-These three documents define the agreed scope for bringing the MCP server closer to the latest official specification.
+- Modern `2026-07-28` requests use stateless per-request `_meta` and do not initialize.
+- Legacy `2025-11-25` and `2025-06-18` clients continue to use initialize semantics.
+- `server/discover` advertises all three supported versions and the implemented tools/resources capabilities.
+- Successful modern results receive `resultType: complete` and namespaced server identity metadata.
+- Modern Streamable HTTP validates `MCP-Protocol-Version`, `Mcp-Method`, and method-specific `Mcp-Name`, including Base64 sentinel decoding.
+- Modern HTTP removes GET streams and session IDs, maps header mismatch to `400/-32020`, unsupported versions to `400/-32022`, and unknown methods to `404/-32601`.
+- Modern HTTP rejects client notifications because cancellation is represented by closing the request response stream; stdio cancellation remains supported.
+- Modern tool and resource results receive method-specific cache metadata while legacy result shapes remain unchanged; tool ordering is deterministic.
+- Modern parameterized resources are exposed through `resources/templates/list`; `resources/list` reports the currently enumerable concrete set while legacy callers retain the historical catalog shape.
+- Resource reads map missing or caller-invisible URIs to `-32602` and backend failures to `-32603`, replacing the old generic `-32000` path.
+- Shared JSON-RPC decoding distinguishes omitted IDs from explicit JSON null and accepts only string or integer request IDs.
+- Tool schemas are explicitly advertised and validated as JSON Schema 2020-12.
+- Tool calls now expose native results through `structuredContent` in addition to text content.
 
-## Review Conclusions Already Reached
+The detailed protocol and compatibility summary is in `MCP_2026_07_28_ALIGNMENT.md`.
 
-The current implementation is behind the latest MCP spec in several core areas:
+## Primary Implementation Areas
 
-1. `notifications/initialized` is not handled and currently falls through to method-not-found.
-2. `ping` is not implemented.
-3. `notifications/cancelled` is not handled and no in-flight request registry exists yet.
-4. HTTP still uses a custom `/jsonrpc` request-response endpoint instead of standard Streamable HTTP.
-5. HTTP does not validate `MCP-Protocol-Version`.
-6. Tool metadata does not yet support `title` or `annotations`.
-7. Tool responses do not yet support `structuredContent`.
-8. The server still reports `protocolVersion: 2024-11-05`.
-
-Items already considered okay or explicitly out of scope for this batch:
-
-- `notifications/progress.message` is already implemented.
-- JSON-RPC batching removal is not a problem because batching is not implemented.
-- OAuth, Elicitation, Async Tasks, Tool icons, and sampling tool-calling are intentionally out of scope for this batch.
-
-## Priority Order
-
-### P0
-
-1. Fix notification semantics so notifications are accepted silently and never generate responses.
-2. Add `ping`.
-3. Upgrade the server protocol version handling.
-4. Implement Streamable HTTP.
-5. Validate `MCP-Protocol-Version` for MCP over HTTP.
-
-### P1
-
-1. Add tool `title`.
-2. Add tool `annotations`.
-3. Add baseline `structuredContent`.
-
-### P2
-
-1. Decide whether to keep `/jsonrpc` as a documented compatibility endpoint.
-2. Expand `structuredContent` coverage and later `outputSchema`.
-
-## Primary Code Areas To Change
-
-- `internal/gateway/jsonrpc/handler.go`
-- `internal/gateway/stdio/transport.go`
+- `internal/gateway/mcp/protocol.go`
 - `internal/gateway/mcp/handler.go`
 - `internal/gateway/mcp/tools.go`
-- `internal/gateway/mcp/tools/*.json`
-- `cmd/gateway/main.go`
+- `internal/gateway/jsonrpc/modern.go`
+- `internal/gateway/jsonrpc/handler.go`
+- `internal/gateway/mcphttp/handler.go`
+- `README.md`
 
-Expected new code area:
+## Test Coverage
 
-- `internal/gateway/mcphttp` for Streamable HTTP transport
+Targeted tests cover:
 
-## Suggested Next Implementation Slice
+- mandatory modern discovery over shared JSON-RPC and Streamable HTTP
+- required request metadata and unsupported-version retry data
+- result decoration and server identity
+- legacy initialize, ping, notifications, and client response compatibility
+- modern HTTP method/name/version header consistency
+- Base64 sentinel decoding
+- modern HTTP client response and notification rejection
+- modern method-not-found HTTP 404 behavior
+- modern concrete-resource and resource-template separation
+- current resource-not-found and internal error codes
+- explicit-null and non-integral request ID rejection
+- cache metadata and deterministic tool order
+- JSON Schema 2020-12 `unevaluatedProperties` behavior
 
-The recommended first coding batch is:
+## Remaining Optional Work
 
-1. Introduce request-vs-notification classification.
-2. Ensure notifications never write responses in `stdio`.
-3. Handle `notifications/initialized`.
-4. Handle `ping`.
-5. Add tests for the above before moving into HTTP transport work.
+The server does not declare optional Prompts, subscriptions/listen, sampling, elicitation, MCP Apps, or Tasks capabilities. Adding one later requires capability advertisement, request-local client capability checks where applicable, transport behavior, and conformance tests.
 
-## Validation Expectations
+Tool `title`, annotations, icons, and outputSchema remain optional metadata improvements. They are not required for the implemented tools/resources core server surface.
 
-Once coding starts, validation should include at minimum:
+## Validation Commands
 
-- targeted unit tests for handler + transport notification behavior
-- full `go test ./... -count=1`
-- no skipped tests counted as pass
-
-## Notes
-
-- No MCP alignment code changes have been made yet in this batch; only analysis and planning documents were produced.
-- The public `main` worktree was intentionally kept free of these internal planning documents.
+```bash
+GOCACHE=/tmp/mcp-for-appium-go-cache go test ./... -count=1
+GOCACHE=/tmp/mcp-for-appium-go-cache go vet ./...
+```

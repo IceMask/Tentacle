@@ -1,8 +1,11 @@
 package jsonrpc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"math"
+	"math/big"
 	"net/http"
 	"sync"
 	"time"
@@ -10,6 +13,7 @@ import (
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/errors"
 	"mcp_for_appium/internal/gateway/capabilities"
+	"mcp_for_appium/internal/gateway/httpinput"
 	"mcp_for_appium/internal/gateway/mcp"
 	"mcp_for_appium/internal/orchestrator"
 	"mcp_for_appium/internal/storage/postgres"
@@ -45,10 +49,11 @@ func NewHandler(orch *orchestrator.Service, capSvc *capabilities.Service) *Handl
 }
 
 type Request struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
-	ID      interface{}     `json:"id"`
+	JSONRPC   string          `json:"jsonrpc"`
+	Method    string          `json:"method"`
+	Params    json.RawMessage `json:"params"`
+	ID        interface{}     `json:"id"`
+	IDPresent bool            `json:"-"` // IDPresent distinguishes an omitted notification id from an explicitly invalid JSON null id.
 }
 
 type Response struct {
@@ -58,14 +63,56 @@ type Response struct {
 	ID      interface{}          `json:"id"`
 }
 
-// IsNotification reports whether one decoded JSON-RPC message is a notification that carries a method and omits an id.
-func IsNotification(req *Request) bool {
-	return req != nil && req.Method != "" && req.ID == nil // Treat method-bearing messages without ids as notifications so transports can suppress responses deterministically.
+// UnmarshalJSON decodes one JSON-RPC request while retaining whether the wire envelope explicitly included the id member.
+func (r *Request) UnmarshalJSON(data []byte) error {
+	type requestAlias Request                         // Disable recursive UnmarshalJSON calls while preserving the request field tags.
+	var decoded requestAlias                          // Hold the ordinarily decoded request fields before the id-presence marker is attached.
+	decoder := json.NewDecoder(bytes.NewReader(data)) // Decode from the exact custom-unmarshal input while controlling number representation.
+	decoder.UseNumber()                               // Preserve numeric request identifiers as their original JSON text instead of lossy float64 values.
+	if err := decoder.Decode(&decoded); err != nil {  // Decode the request envelope with precision-preserving numeric semantics.
+		return err // Preserve the syntax or field decoding failure for the transport's parse-error response.
+	}
+	var fields map[string]json.RawMessage                 // Decode top-level members separately so an omitted id can be distinguished from JSON null.
+	if err := json.Unmarshal(data, &fields); err != nil { // Reuse JSON object decoding rather than inferring presence from a nil interface value.
+		return err // Preserve the object decoding failure for the transport's parse-error response.
+	}
+	*r = Request(decoded)         // Copy the decoded JSON-RPC fields into the caller's request value.
+	_, r.IDPresent = fields["id"] // Record exact wire-level id presence so notification classification can reject explicit null.
+	return nil                    // Confirm that both request values and presence metadata were decoded successfully.
 }
 
-// IsRequest reports whether one decoded JSON-RPC message is a request that carries both a method and an id.
+// IsNotification reports whether one decoded JSON-RPC message is a notification that carries a method and completely omits the id member.
+func IsNotification(req *Request) bool {
+	return req != nil && req.Method != "" && req.ID == nil && !req.IDPresent // Treat only method-bearing messages with no wire id member as notifications so explicit null remains invalid.
+}
+
+// IsRequest reports whether one decoded JSON-RPC message carries a method and a valid string or integer request id.
 func IsRequest(req *Request) bool {
-	return req != nil && req.Method != "" && req.ID != nil // Treat method-bearing messages with ids as requests so transports can emit exactly one matching response.
+	return req != nil && req.Method != "" && validRequestID(req.ID) // Accept only MCP's string-or-integer id domain so malformed IDs cannot be dispatched as requests.
+}
+
+// validRequestID reports whether one decoded or programmatically constructed value is a JSON string or mathematically integral JSON number.
+func validRequestID(id interface{}) bool {
+	switch value := id.(type) { // Recognize decoder-produced numbers and common integer types used by internal tests and callers.
+	case string:
+		return true // Accept every JSON string, including an empty string, because MCP places no additional content restriction on string IDs.
+	case json.Number:
+		if !json.Valid([]byte(value.String())) { // Reject programmatically constructed json.Number values that are not valid standalone JSON numbers.
+			return false // Prevent malformed numeric text from entering response serialization or cancellation keys.
+		}
+		var integer big.Int                            // Allocate an arbitrary-precision integer so JSON-RPC ids are not limited to int64 or uint64.
+		_, ok := integer.SetString(value.String(), 10) // Require an exact base-10 integer literal with no fraction or exponent syntax.
+		return ok                                      // Accept every valid arbitrary-size integer literal while preserving its exact wire representation.
+	case float64:
+		return !math.IsNaN(value) && !math.IsInf(value, 0) && math.Trunc(value) == value // Accept programmatic finite floats only when they represent a mathematical integer.
+	case float32:
+		floatValue := float64(value)                                                                         // Promote the programmatic float for standard finite and truncation checks.
+		return !math.IsNaN(floatValue) && !math.IsInf(floatValue, 0) && math.Trunc(floatValue) == floatValue // Reject fractional or non-JSON float values.
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		return true // Accept native integer types used by programmatic callers before JSON serialization.
+	default:
+		return false // Reject nil, null, booleans, arrays, objects, and every non-integral or unsupported identifier type.
+	}
 }
 
 // RegisterInFlightRequest records one cancellable request id and returns a cleanup function that removes only that exact registry entry.
@@ -145,7 +192,9 @@ func (h *Handler) handleCancelledNotification(ctx context.Context, params json.R
 		Reason    string      `json:"reason"`
 	}
 
-	if err := json.Unmarshal(params, &p); err != nil { // Decode the MCP cancellation payload so the original request id can be matched against the registry.
+	decoder := json.NewDecoder(bytes.NewReader(params)) // Decode cancellation metadata from its exact raw JSON representation.
+	decoder.UseNumber()                                 // Preserve a large numeric requestId so it matches the original in-flight request key exactly.
+	if err := decoder.Decode(&p); err != nil {          // Decode the MCP cancellation payload so the original request id can be matched against the registry.
 		return nil, &mcp.MCPError{Code: -32602, Message: "Invalid params", Data: "failed to decode notifications/cancelled params"} // Return invalid-params for malformed cancellation payloads while transports suppress notification responses.
 	}
 	if p.RequestID == nil { // Reject cancellation payloads that omit requestId because no registry lookup can be performed.
@@ -173,6 +222,10 @@ func (h *Handler) ProcessRequest(ctx context.Context, req *Request) (interface{}
 	if !IsRequest(req) && !IsNotification(req) { // Reject messages that are neither requests nor notifications because the dispatcher only handles method-bearing calls.
 		return nil, &mcp.MCPError{Code: -32600, Message: "Invalid Request"} // Return the JSON-RPC invalid-request error so transports expose stable protocol semantics.
 	}
+	modern, eraErr := validateRequestEra(req) // Classify this message from its own params._meta instead of relying on transport or connection state.
+	if eraErr != nil {                        // Reject malformed metadata, unavailable versions, and methods removed from the modern protocol before dispatch.
+		return nil, eraErr // Preserve the exact modern MCP error code and retry metadata for the transport response.
+	}
 
 	if h.validator != nil {
 		if vErr := h.validator.Validate(req.Method, req.Params); vErr != nil {
@@ -182,6 +235,8 @@ func (h *Handler) ProcessRequest(ctx context.Context, req *Request) (interface{}
 
 	switch req.Method {
 	// ===== MCP Protocol Methods =====
+	case "server/discover":
+		result, err = h.mcpHandler.Discover(req.Params) // Return mandatory modern discovery metadata through the same MCP handler used by other server features.
 	case "initialize":
 		result, err = h.mcpHandler.Initialize(ctx, req.Params)
 	case "notifications/initialized":
@@ -195,7 +250,13 @@ func (h *Handler) ProcessRequest(ctx context.Context, req *Request) (interface{}
 	case "tools/call":
 		result, err = h.mcpHandler.ToolsCall(ctx, req.Params)
 	case "resources/list":
-		result, err = h.mcpHandler.ResourcesList(ctx, req.Params)
+		if modern { // Separate concrete modern resources from the URI templates historically returned to legacy clients.
+			result, err = h.mcpHandler.ModernResourcesList(ctx, req.Params) // Return the current caller's concrete resource set using the modern protocol shape.
+		} else {
+			result, err = h.mcpHandler.ResourcesList(ctx, req.Params) // Preserve the repository's historical template-like resources/list response for legacy clients.
+		}
+	case "resources/templates/list":
+		result, err = h.mcpHandler.ResourcesTemplatesList(ctx, req.Params) // Return parameterized Appium resources through the standard resource-template method.
 	case "resources/read":
 		result, err = h.mcpHandler.ResourcesRead(ctx, req.Params)
 
@@ -522,6 +583,13 @@ func (h *Handler) ProcessRequest(ctx context.Context, req *Request) (interface{}
 		logger.Error("jsonrpc process failed", "method", req.Method, "id", req.ID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log method failures with latency and root error.
 		return nil, err
 	}
+	if modern && IsRequest(req) { // Add current-protocol result fields only to successful modern requests, never legacy responses or notifications.
+		result, err = mcp.DecorateModernResult(req.Method, result) // Normalize the method result and attach method-specific current-protocol metadata.
+		if err != nil {                                            // Surface an internal protocol error when a handler produced a non-object modern result.
+			logger.Error("jsonrpc modern result decoration failed", "method", req.Method, "id", req.ID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Record the server-side result-shape defect with request context.
+			return nil, err                                                                                                                                                // Prevent a non-compliant success payload from reaching any transport.
+		}
+	}
 
 	logger.Info("jsonrpc process done", "method", req.Method, "id", req.ID, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful completion with total dispatch latency.
 	return result, nil
@@ -529,8 +597,17 @@ func (h *Handler) ProcessRequest(ctx context.Context, req *Request) (interface{}
 
 // ServeHTTP implements the compatibility HTTP JSON-RPC transport while suppressing responses for notifications.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var req Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if r.ContentLength > httpinput.MaxRequestBodyBytes { // Reject known oversized compatibility requests before reading or decoding their payload.
+		h.writeErrorStatus(w, http.StatusRequestEntityTooLarge, nil, -32600, "Invalid Request", "request body too large") // Return HTTP 413 with a sanitized JSON-RPC envelope.
+		return                                                                                                            // Stop request processing after the declared-size rejection.
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, httpinput.MaxRequestBodyBytes) // Enforce the compatibility transport's body ceiling even without the outer gateway middleware.
+	var req Request                                                        // Allocate the JSON-RPC request envelope before strict single-document decoding.
+	if err := httpinput.DecodeSingleJSON(r.Body, &req); err != nil {       // Decode exactly one bounded JSON value and reject concatenated request documents.
+		if httpinput.IsBodyTooLarge(err) { // Map the typed body-limit failure to its transport-level status before ordinary parse errors.
+			h.writeErrorStatus(w, http.StatusRequestEntityTooLarge, nil, -32600, "Invalid Request", "request body too large") // Return HTTP 413 with a sanitized JSON-RPC envelope.
+			return                                                                                                            // Stop request processing after the size rejection.
+		}
 		h.writeError(w, nil, -32700, "Parse error", nil)
 		return
 	}
@@ -593,7 +670,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // writeError executes this operation.
 func (h *Handler) writeError(w http.ResponseWriter, id interface{}, code int, msg string, data interface{}) {
-	h.writeResponse(w, Response{
+	h.writeResponse(w, Response{ // Preserve the historical HTTP 200 envelope for ordinary compatibility JSON-RPC errors.
 		JSONRPC: "2.0",
 		Error: &errors.JSONRPCError{
 			Code:    code,
@@ -604,8 +681,27 @@ func (h *Handler) writeError(w http.ResponseWriter, id interface{}, code int, ms
 	})
 }
 
+// writeErrorStatus writes one JSON-RPC error envelope using an explicit HTTP transport status for pre-dispatch limits such as oversized bodies.
+func (h *Handler) writeErrorStatus(w http.ResponseWriter, status int, id interface{}, code int, msg string, data interface{}) {
+	h.writeResponseStatus(w, status, Response{ // Serialize the supplied protocol error with the transport-level rejection status.
+		JSONRPC: "2.0", // Identify the response envelope as JSON-RPC 2.0.
+		Error: &errors.JSONRPCError{ // Attach the supplied stable error classification and sanitized data.
+			Code:    code, // Preserve the caller-selected JSON-RPC error code.
+			Message: msg,  // Preserve the caller-selected public error message.
+			Data:    data, // Preserve only the caller-selected safe diagnostic payload.
+		},
+		ID: id, // Echo the request identifier when decoding reached it, or null for pre-envelope failures.
+	})
+}
+
 // writeResponse executes this operation.
 func (h *Handler) writeResponse(w http.ResponseWriter, resp Response) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	h.writeResponseStatus(w, http.StatusOK, resp) // Preserve the compatibility transport's historical HTTP 200 response status.
+}
+
+// writeResponseStatus serializes one JSON-RPC response with an explicit HTTP status.
+func (h *Handler) writeResponseStatus(w http.ResponseWriter, status int, resp Response) {
+	w.Header().Set("Content-Type", "application/json") // Mark every compatibility response as JSON before writing its status.
+	w.WriteHeader(status)                              // Emit the explicit transport status before serializing the response envelope.
+	_ = json.NewEncoder(w).Encode(resp)                // Encode the response while ignoring late network write failures after headers are committed.
 }

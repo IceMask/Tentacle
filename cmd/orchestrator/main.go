@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,8 +20,11 @@ import (
 
 // main is the entry point for this binary.
 func main() {
-	// 加载配置
-	cfg, err := config.Load("config.yaml")
+	configPath := strings.TrimSpace(os.Getenv("CONFIG_PATH")) // Honor the same deployment-level config override used by the gateway process.
+	if configPath == "" {                                     // Preserve local startup behavior when no environment override is supplied.
+		configPath = "config.yaml" // Use the repository-default configuration file.
+	}
+	cfg, err := config.Load(configPath) // Load the resolved configuration path before startup validation or dependency creation.
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}

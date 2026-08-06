@@ -1,6 +1,6 @@
-# MCP 最新规范对齐设计说明
+# MCP 2025-06-18 对齐设计说明（历史基线）
 
-> 本文档描述当前项目对齐 MCP `2025-06-18` 规范的技术方案，仅覆盖 MCP lifecycle、transport、metadata 与 tool output 相关改造，不涉及产品业务能力扩展。
+> 本文档保留 legacy alignment 的设计记录。当前 `2026-07-28` 双时代实现说明请参阅 [MCP_2026_07_28_ALIGNMENT.md](./MCP_2026_07_28_ALIGNMENT.md)。
 
 ## 1. 设计目标
 

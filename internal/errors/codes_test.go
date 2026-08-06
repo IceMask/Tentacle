@@ -28,6 +28,9 @@ func TestMapToJSONRPCIncludesInternalCode(t *testing.T) {
 	if data["internalCode"] != string(CodePlanInvalid) { // Fail the test when the internal code is lost during JSON-RPC mapping.
 		t.Fatalf("expected internal code %q, got %#v", CodePlanInvalid, data["internalCode"]) // Surface the unexpected internal code so machine-handling regressions are obvious.
 	}
+	if _, exists := data["rawError"]; exists { // Reject reintroduction of wrapped backend diagnostics into externally visible JSON-RPC data.
+		t.Fatalf("expected rawError to be omitted, got %#v", data["rawError"]) // Surface the unsafe field immediately when sanitization regresses.
+	}
 }
 
 // TestIsCodeMatchesWrappedErrors verifies that the convenience helper recognizes wrapped repository errors by their standardized code.

@@ -63,6 +63,16 @@ func TestInitLoggerMasksSecrets(t *testing.T) {
 	}
 }
 
+// TestInitLoggerWithConsoleUsesExplicitDestination verifies that stdio callers can keep every structured log record off protocol stdout.
+func TestInitLoggerWithConsoleUsesExplicitDestination(t *testing.T) {
+	var console bytes.Buffer                                        // Capture the explicit console stream selected by a stdio-style caller.
+	InitLoggerWithConsole("info", "", &console)                     // Configure structured logging with no file sink and the isolated console destination.
+	Logger().Info("stdio-safe-log", "transport", "stdio")           // Emit one representative structured startup record through the global logger.
+	if !bytes.Contains(console.Bytes(), []byte("stdio-safe-log")) { // Require the record to reach the explicit destination instead of an implicit stdout writer.
+		t.Fatalf("expected structured log in explicit console, got %s", console.String()) // Surface the captured output when destination routing regresses.
+	}
+}
+
 // TestWithContextAttachesTraceIdentifiers verifies that loggers derived from a traced context emit trace and span identifiers.
 func TestWithContextAttachesTraceIdentifiers(t *testing.T) {
 	logPath := filepath.Join(t.TempDir(), "trace.log")                                            // Build one isolated log-file path so the production logger can write a deterministic traced record.

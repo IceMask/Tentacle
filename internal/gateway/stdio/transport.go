@@ -302,6 +302,6 @@ func (t *Transport) writeJSONLocked(v interface{}) error {
 		return err
 	}
 
-	log.Printf("Sent response: %s", string(data))
+	log.Printf("Sent JSON-RPC response (%d bytes)", len(data)) // Record transport completion without copying tool results, tokens, or backend details into logs.
 	return nil
 }

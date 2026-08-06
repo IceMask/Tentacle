@@ -68,6 +68,23 @@ func TestHMACValidatorRejectsDuplicateNonce(t *testing.T) {
 	}
 }
 
+// TestHMACValidatorInvalidSignatureDoesNotConsumeNonce verifies that unauthenticated traffic cannot exhaust replay-protection keys.
+func TestHMACValidatorInvalidSignatureDoesNotConsumeNonce(t *testing.T) {
+	nonceStore := &memoryNonceStore{}                                                               // Share one observable nonce store across the invalid and valid verification attempts.
+	validator := NewHMACValidator(func(_ context.Context, keyID string) (*HMACKeyMaterial, error) { // Build one validator over a deterministic active key.
+		return &HMACKeyMaterial{KeyID: keyID, SubjectID: "subject-1", Secret: "super-secret", Status: "active"}, nil // Return the authoritative key expected by the valid signature.
+	}, nonceStore, 5*time.Minute, 15*time.Minute) // Enable replay protection so nonce consumption order is exercised.
+
+	signatureTimestamp := fmt.Sprintf("%d", time.Now().UTC().Unix())                                                                                                                                 // Capture one current timestamp shared by both attempts.
+	if _, err := validator.Verify(context.Background(), "invalid-signature", "POST", "/mcp", "", `{}`, signatureTimestamp, "nonce-safe", "key-1"); !errors.IsCode(err, errors.CodeUnauthenticated) { // Submit one invalid signature using the target nonce.
+		t.Fatalf("expected invalid signature rejection, got %v", err) // Surface unexpected validation or replay classifications.
+	}
+	validSignature := mustComputeTestSignature(t, "super-secret", "POST", "/mcp", "", `{}`, signatureTimestamp, "nonce-safe", "key-1")                     // Compute the valid signature over the same nonce and request fields.
+	if _, err := validator.Verify(context.Background(), validSignature, "POST", "/mcp", "", `{}`, signatureTimestamp, "nonce-safe", "key-1"); err != nil { // Retry with proof of key possession.
+		t.Fatalf("expected valid signature to consume unused nonce, got %v", err) // Prove the invalid request did not reserve the replay marker.
+	}
+}
+
 // mustComputeTestSignature computes the canonical HMAC signature used by the tests and fails the test immediately when canonicalization fails.
 func mustComputeTestSignature(t *testing.T, secret string, method string, path string, rawQuery string, body string, timestamp string, nonce string, keyID string) string {
 	t.Helper()                                         // Mark this helper so any failure points at the calling test rather than the helper body.

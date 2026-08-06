@@ -6,12 +6,18 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	stdErrors "errors"
+	"log/slog"
 	"strings"
 	"time"
 
+	"mcp_for_appium/internal/audit"
 	"mcp_for_appium/internal/auth"
 	"mcp_for_appium/internal/errors"
 	"mcp_for_appium/internal/storage/redis"
+	"mcp_for_appium/internal/telemetry"
+
+	goredis "github.com/redis/go-redis/v9"
 )
 
 const defaultSubscriptionTokenTTL = 60 * time.Second // defaultSubscriptionTokenTTL bounds browser subscription-token lifetime when the caller does not configure a custom TTL.
@@ -36,8 +42,10 @@ type IssuedSubscriptionToken struct {
 
 // SubscriptionTokenStore issues and resolves short-lived opaque WebSocket subscription tokens backed by Redis.
 type SubscriptionTokenStore struct {
-	cache *redis.Cache
-	ttl   time.Duration
+	cache         *redis.Cache
+	ttl           time.Duration
+	auditRecorder audit.Recorder
+	logger        *slog.Logger
 }
 
 // NewSubscriptionTokenStore constructs one Redis-backed subscription-token store.
@@ -46,7 +54,15 @@ func NewSubscriptionTokenStore(cache *redis.Cache, ttl time.Duration) *Subscript
 		ttl = defaultSubscriptionTokenTTL // Preserve the repository default browser subscription-token lifetime for callers that do not configure a custom value.
 	}
 
-	return &SubscriptionTokenStore{cache: cache, ttl: ttl} // Store the cache dependency and TTL once so every issue or lookup operation follows the same runtime contract.
+	return &SubscriptionTokenStore{cache: cache, ttl: ttl, logger: telemetry.Logger()} // Store cache, TTL, and logger once so token operations and audit failures share one runtime contract.
+}
+
+// SetAuditRecorder installs the append-only recorder used for subscription-token lifecycle and WebSocket authorization events.
+func (s *SubscriptionTokenStore) SetAuditRecorder(recorder audit.Recorder) {
+	if s == nil { // Ignore optional wiring when no token store was constructed.
+		return // Avoid dereferencing nil during gateway startup or protocol-only tests.
+	}
+	s.auditRecorder = recorder // Share the gateway's PostgreSQL audit sink with token issuance and handshake handling.
 }
 
 // Issue creates one short-lived opaque token bound to the supplied authenticated subject and trace identifier.
@@ -82,10 +98,47 @@ func (s *SubscriptionTokenStore) Issue(ctx context.Context, subject *auth.Subjec
 		return nil, errors.Wrap(errors.CodeInternal, "failed to serialize websocket subscription token", err) // Surface JSON serialization failures as internal server errors.
 	}
 	if err := s.cache.Set(ctx, subscriptionTokenKey(token), string(serializedClaims), s.ttl); err != nil { // Persist the opaque token claims with the configured TTL so every gateway instance that shares Redis can validate the token during the handshake.
+		s.recordTokenAudit(ctx, subject, claims, "failure", string(errors.CodeStoreWrite))                  // Record the failed creation without persisting the opaque token or wrapped Redis diagnostic.
 		return nil, errors.Wrap(errors.CodeStoreWrite, "failed to store websocket subscription token", err) // Surface Redis persistence failures as storage write errors because the authoritative token store is unavailable.
 	}
 
+	s.recordTokenAudit(ctx, subject, claims, "success", "")                                                                   // Record successful token creation using only the safe JTI, trace binding, scope, and expiry.
 	return &IssuedSubscriptionToken{Token: token, TraceID: normalizedTraceID, ExpiresAt: expiresAt, Scope: claims.Scope}, nil // Return the opaque token payload so the caller can establish the WebSocket subscription before it expires.
+}
+
+// recordTokenAudit appends one sanitized subscription-token creation event without changing issuance when audit persistence is unavailable.
+func (s *SubscriptionTokenStore) recordTokenAudit(ctx context.Context, subject *auth.Subject, claims SubscriptionTokenClaims, result string, reason string) {
+	if s == nil || s.auditRecorder == nil { // Skip optional audit work when the gateway has no recorder wiring.
+		return // Preserve token behavior in isolated tests and deployments without PostgreSQL audit persistence.
+	}
+	requestContext, _ := audit.RequestContextFrom(ctx) // Reuse source IP and request ID attached by authentication middleware when available.
+	event := audit.Event{                              // Build one sanitized append-only token lifecycle record.
+		ActorID:      strings.TrimSpace(subject.ID),               // Attribute token creation to the authenticated subject.
+		ActorType:    "subject",                                   // Classify the actor as an authenticated gateway principal.
+		AuthScheme:   strings.TrimSpace(subject.Type),             // Preserve PAT, OIDC, or HMAC authentication provenance.
+		CredentialID: strings.TrimSpace(subject.CredentialID),     // Record only the safe parent credential identifier.
+		TenantID:     strings.TrimSpace(subject.TenantID),         // Preserve tenant scope for audit filtering.
+		TraceID:      strings.TrimSpace(claims.TraceID),           // Link the record to the authorized trace foreign key.
+		Action:       "ws.subscription_token.issue",               // Use the stable WebSocket token creation action.
+		ResourceType: "trace",                                     // Identify the trace as the resource receiving subscription authority.
+		ResourceID:   strings.TrimSpace(claims.TraceID),           // Preserve the exact authorized trace identifier.
+		Result:       strings.TrimSpace(result),                   // Record success or failure without backend details.
+		Reason:       strings.TrimSpace(reason),                   // Record a stable error code only on failure.
+		SourceIP:     strings.TrimSpace(requestContext.SourceIP),  // Correlate the creation with the directly observed gateway peer.
+		RequestID:    strings.TrimSpace(requestContext.RequestID), // Correlate the creation with the authenticated HTTP request.
+		Metadata: map[string]interface{}{ // Preserve safe token metadata without storing the opaque credential itself.
+			"jti":       strings.TrimSpace(claims.JTI),   // Record the independent token identifier for investigations and revocation analysis.
+			"scope":     strings.TrimSpace(claims.Scope), // Record the granted WebSocket subscription scope.
+			"expiresAt": claims.ExpiresAt.UTC(),          // Record the short-lived credential expiry.
+		},
+	}
+	if err := s.auditRecorder.Record(ctx, event); err != nil { // Append best-effort without turning an audit sink outage into token behavior changes.
+		logger := s.logger // Reuse the store logger initialized by the production constructor.
+		if logger == nil { // Fall back for zero-value test stores that inject only a recorder.
+			logger = telemetry.Logger() // Preserve audit failure observability without panicking.
+		}
+		logger.WarnContext(ctx, "failed to record websocket token audit event", "trace_id", claims.TraceID, "result", result, "error", err) // Log no opaque token or request secret.
+	}
 }
 
 // Lookup resolves one opaque subscription token to its authoritative claims and rejects expired or malformed entries.
@@ -101,15 +154,18 @@ func (s *SubscriptionTokenStore) Lookup(ctx context.Context, rawToken string) (*
 
 	serializedClaims, err := s.cache.Get(ctx, subscriptionTokenKey(normalizedToken)) // Resolve the opaque token against the authoritative Redis-backed token store.
 	if err != nil {                                                                  // Stop immediately when the token cannot be found or the token store is unavailable.
-		return nil, errors.Wrap(errors.CodeUnauthenticated, "subscription token not found", err) // Surface unknown tokens as authentication failures without revealing whether a trace exists.
+		if stdErrors.Is(err, goredis.Nil) { // Distinguish an unknown credential from an unavailable authoritative token store.
+			return nil, errors.New(errors.CodeUnauthenticated, "subscription token not found") // Reject unknown tokens without reflecting Redis sentinel text.
+		}
+		return nil, errors.Wrap(errors.CodeStoreRead, "failed to read websocket subscription token", err) // Preserve infrastructure failures for HTTP 5xx mapping and operator diagnosis.
 	}
 
 	var claims SubscriptionTokenClaims                                        // Allocate the destination claims struct once so the stored JSON can be decoded deterministically.
 	if err := json.Unmarshal([]byte(serializedClaims), &claims); err != nil { // Reject malformed stored claims because the token store entry is unreadable or corrupted.
-		return nil, errors.Wrap(errors.CodeUnauthenticated, "subscription token is invalid", err) // Surface malformed token-store entries as authentication failures.
+		return nil, errors.Wrap(errors.CodeStoreRead, "stored websocket subscription token is invalid", err) // Classify corrupted authoritative state as a server storage failure rather than a caller authentication mistake.
 	}
 	if time.Now().UTC().After(claims.ExpiresAt.UTC()) { // Reject expired subscription tokens even if Redis has not yet evicted the record.
-		return nil, errors.New(errors.CodeTokenExpired, "subscription token expired") // Surface token expiry distinctly so callers can request a fresh token.
+		return &claims, errors.New(errors.CodeTokenExpired, "subscription token expired") // Return safe stored claims for audit attribution while still rejecting the expired credential.
 	}
 
 	return &claims, nil // Return the authoritative claims so the handshake can bind the WebSocket connection to the authorized trace subscription.
