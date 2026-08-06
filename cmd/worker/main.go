@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -21,7 +22,11 @@ import (
 
 // main is the entry point for this binary.
 func main() {
-	cfg, err := config.Load("config.yaml")
+	configPath := strings.TrimSpace(os.Getenv("CONFIG_PATH")) // Honor the shared deployment-level configuration override.
+	if configPath == "" {                                     // Preserve local startup behavior when no environment override is supplied.
+		configPath = "config.yaml" // Use the repository-default configuration file.
+	}
+	cfg, err := config.Load(configPath) // Load the resolved configuration path before worker startup validation.
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
@@ -54,11 +59,16 @@ func main() {
 	}
 	defer orchClient.Close()
 
+	concurrency := cfg.Worker.Concurrency // Resolve worker admission capacity before constructing or advertising the gRPC service.
+	if concurrency <= 0 {                 // Preserve the documented default when configuration omits or supplies an invalid capacity.
+		concurrency = 4 // Use four authoritative worker execution slots by default.
+	}
+
 	// --- gRPC server (receives ExecutePlan / CancelPlan from orchestrator) ---
-	workerSvc := worker.NewGRPCServer(cfg.Worker.AppiumURL, cfg.Orchestrator.StepTimeout, cfg.Orchestrator.AutoWaitMax, workerID, orchClient, leaseRenewEvery(cfg.Worker.HeartbeatInterval)) // Construct the distributed worker handler with orchestrator callbacks, stable identity, and a lease-renewal cadence derived from worker heartbeats.
-	workerSvc.SetAppiumReadyFunc(appiumSupervisor.EnsureReady)                                                                                                                               // Reuse the same worker-owned Appium supervisor before every plan so local Appium is auto-started again if it goes away after startup.
-	grpcServerOptions, err := rpc.NewServerOptions(cfg.RPC.Security)                                                                                                                         // Build the worker gRPC server options that match the configured internal RPC transport mode and shared-token enforcement.
-	if err != nil {                                                                                                                                                                          // Stop immediately when the configured internal RPC security settings cannot be turned into a gRPC server safely.
+	workerSvc := worker.NewGRPCServer(cfg.Worker.AppiumURL, cfg.Orchestrator.StepTimeout, cfg.Orchestrator.AutoWaitMax, workerID, orchClient, leaseRenewEvery(cfg.Worker.HeartbeatInterval), concurrency) // Construct the distributed worker with the same authoritative capacity advertised during registration.
+	workerSvc.SetAppiumReadyFunc(appiumSupervisor.EnsureReady)                                                                                                                                            // Reuse the same worker-owned Appium supervisor before every plan so local Appium is auto-started again if it goes away after startup.
+	grpcServerOptions, err := rpc.NewServerOptions(cfg.RPC.Security)                                                                                                                                      // Build the worker gRPC server options that match the configured internal RPC transport mode and shared-token enforcement.
+	if err != nil {                                                                                                                                                                                       // Stop immediately when the configured internal RPC security settings cannot be turned into a gRPC server safely.
 		log.Fatalf("failed to initialize worker gRPC security: %v", err) // Surface the gRPC security wiring failure before the listener starts.
 	}
 	grpcSrv := grpc.NewServer(grpcServerOptions...) // Construct the worker gRPC server with the configured transport credentials and shared-token interceptor.
@@ -74,11 +84,6 @@ func main() {
 		}
 	}()
 	logger.Info("worker gRPC server started", "port", cfg.Worker.GRPCPort)
-
-	concurrency := cfg.Worker.Concurrency
-	if concurrency == 0 {
-		concurrency = 4
-	}
 
 	regCtx, regCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer regCancel()
@@ -123,10 +128,13 @@ func heartbeatLoop(ctx context.Context, client *rpc.OrchestratorClient, workerID
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := client.Heartbeat(ctx, &rpc.HeartbeatRequest{
+			heartbeatCtx, heartbeatCancel := context.WithTimeout(ctx, 5*time.Second) // Bound each heartbeat independently so one stalled RPC cannot halt future liveness reports forever.
+			_, err := client.Heartbeat(heartbeatCtx, &rpc.HeartbeatRequest{          // Report authoritative admitted-run load through the bounded RPC context.
 				WorkerID:   workerID,
 				ActiveLoad: svc.ActiveLoad(),
-			}); err != nil {
+			})
+			heartbeatCancel() // Release the per-heartbeat timer immediately after the RPC returns.
+			if err != nil {   // Log this heartbeat failure and allow the next ticker iteration to retry.
 				logger.Error("heartbeat failed", "worker_id", workerID, "error", err)
 			}
 		}

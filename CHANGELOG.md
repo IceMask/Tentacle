@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- MCP `2026-07-28` stateless request metadata, mandatory `server/discover`, modern result decoration, and dual-era protocol tests.
+- JSON Schema 2020-12 tool validation with deterministic tool discovery and modern-only cache metadata.
+- Standard `resources/templates/list` discovery with modern concrete-resource separation and legacy catalog compatibility.
+- Wire-level request ID presence and type validation across stdio and HTTP transports.
 - Distributed worker-to-orchestrator callbacks for step events, lease renewals, and terminal results.
 - Redis-backed distributed ownership leases with persisted `traces.current_attempt` and `traces.terminal_reason` state.
 - Worker-side session attachment and stable distributed callback propagation for existing Appium sessions.
@@ -22,6 +26,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Streamable HTTP now validates modern `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers while retaining `2025-11-25` and `2025-06-18` initialize compatibility.
+- Tool call results now include native `structuredContent`, and modern HTTP no longer exposes GET streams or accepts client response envelopes.
+- Modern Streamable HTTP rejects client notifications and uses request connection closure for cancellation.
+- Resource reads now use current MCP `-32602` not-found and `-32603` internal error semantics instead of generic legacy server errors.
 - Distributed dispatch now reserves an execution attempt before RPC dispatch and promotes that reserved attempt to `running` only after worker acceptance.
 - Watchdog handling now distinguishes plan timeout from ownership-lease expiry and prevents stale callbacks from overwriting active or terminal traces.
 - Worker registration now uses a routable advertise address instead of hard-coded `localhost`.

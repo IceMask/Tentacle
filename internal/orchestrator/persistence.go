@@ -10,9 +10,11 @@ import (
 	"mcp_for_appium/internal/storage/postgres"
 )
 
-// markSessionEnded serializes concurrent end-session requests with a row lock and reports whether this call changed the stored session state.
-func (s *Service) markSessionEnded(ctx context.Context, sessionID string, endedAt time.Time) (bool, error) {
-	changed := false                                          // Track whether this call performed the state transition so callers can keep end-session idempotent.
+const detachedFinalizationTimeout = 5 * time.Second // detachedFinalizationTimeout bounds durable terminal writes after request or execution cancellation.
+
+// prepareSessionEnd locks one session row, moves active state into ending, and reports whether external cleanup still needs to run.
+func (s *Service) prepareSessionEnd(ctx context.Context, sessionID string, updatedAt time.Time) (bool, error) {
+	cleanupRequired := false                                  // Track whether the caller should run or retry external automation cleanup after the transaction commits.
 	err := s.dao.WithTx(ctx, func(tx *postgres.TxDAO) error { // Run the lock-and-update sequence in one transaction so the row lock stays valid for the write.
 		session, err := tx.GetSessionForUpdate(ctx, sessionID) // Lock the session row before inspecting its current lifecycle state.
 		if err != nil {                                        // Stop immediately when the target session does not exist or cannot be locked.
@@ -22,20 +24,48 @@ func (s *Service) markSessionEnded(ctx context.Context, sessionID string, endedA
 		if session.Status == "ended" { // Treat repeated end calls as a no-op once the session is already terminal.
 			return nil // Return success so higher layers can keep the API idempotent.
 		}
-
-		updated, err := tx.EndSessionIfActive(ctx, sessionID, endedAt) // Persist the terminal session state while the row lock is still held.
-		if err != nil {                                                // Surface storage write failures from the transactional update helper.
-			return err // Preserve the wrapped write error so callers can map it consistently.
+		if session.Status == "ending" { // Allow a later EndSession call to retry cleanup after an earlier external cleanup failure.
+			cleanupRequired = true // Tell the caller to retry the still-incomplete external cleanup phase.
+			return nil             // Leave the existing ending row unchanged while committing the read transaction safely.
 		}
 
-		changed = updated // Remember whether this transaction performed the transition.
-		return nil        // Finish the callback so DAO.WithTx can commit the locked write.
+		updated, err := tx.MarkSessionEnding(ctx, sessionID, updatedAt) // Persist cleanup-in-progress while the row lock is still held.
+		if err != nil {                                                 // Surface storage write failures from the transactional update helper.
+			return err // Preserve the wrapped write error so callers can map it consistently.
+		}
+		cleanupRequired = updated // Require cleanup only when this transaction successfully prepared the ending state.
+		return nil                // Finish the callback so DAO.WithTx can commit the locked write.
 	})
 	if err != nil { // Return any lookup, locking, or write failure to the caller.
 		return false, err // Keep the original repository error chain intact.
 	}
 
-	return changed, nil // Tell the caller whether this request actually ended the session row.
+	return cleanupRequired, nil // Tell the caller whether external cleanup must run before terminal finalization.
+}
+
+// completeSessionEnd locks one prepared session row and commits ended only after the caller reports successful external cleanup.
+func (s *Service) completeSessionEnd(ctx context.Context, sessionID string, endedAt time.Time) error {
+	err := s.dao.WithTx(ctx, func(tx *postgres.TxDAO) error { // Serialize finalization with any concurrent lifecycle writer on the same session row.
+		session, err := tx.GetSessionForUpdate(ctx, sessionID) // Lock and reload the authoritative lifecycle state before terminalizing it.
+		if err != nil {                                        // Stop when the row cannot be loaded or locked.
+			return err // Preserve the repository lookup failure for transport mapping.
+		}
+		if session.Status == "ended" { // Keep finalization idempotent when an earlier call committed the terminal state.
+			return nil // Report success without changing the original ended timestamp.
+		}
+		if session.Status != "ending" { // Reject terminalization that skipped the explicit cleanup-in-progress phase.
+			return errors.New(errors.CodeStateConflict, "session is not ending") // Preserve state-machine integrity under unexpected lifecycle mutations.
+		}
+		updated, err := tx.EndSessionIfEnding(ctx, sessionID, endedAt) // Commit ended only while the row still carries the prepared ending state.
+		if err != nil {                                                // Surface write failures so callers can retry finalization.
+			return err // Preserve the stable storage write classification from the TxDAO helper.
+		}
+		if !updated { // Detect a lost lifecycle race even though the row was locked defensively.
+			return errors.New(errors.CodeStateConflict, "session end transition lost") // Refuse to report success without a durable terminal row.
+		}
+		return nil // Let DAO.WithTx commit the terminal lifecycle update.
+	})
+	return err // Return nil after commit or preserve the exact lookup, conflict, or write failure.
 }
 
 // transitionTraceStatus performs an optimistic compare-and-swap on the trace lifecycle state.
@@ -62,10 +92,11 @@ func (s *Service) finalizeTrace(ctx context.Context, traceID string, currentStat
 	if terminalReason != "" { // Persist the structured terminal reason whenever the caller supplies one so trace readers can distinguish timeout, orphaned, cancelled, and normal completion outcomes.
 		payloadMap["terminalReason"] = terminalReason // Duplicate the terminal reason inside the event payload for replay consumers that inspect only event data.
 	}
-	if cause != nil { // Attach the underlying error details only when the terminal transition was triggered by a failure path.
-		payloadMap["error"] = cause.Error()       // Preserve the original error string so operators can diagnose terminal failures from event replay alone.
-		if code, ok := errors.CodeOf(cause); ok { // Attach the structured error code when the failure path used the repository error type.
+	if cause != nil { // Attach only a stable machine-readable classification when the terminal transition was triggered by a failure path.
+		if code, ok := errors.CodeOf(cause); ok { // Resolve the repository code without exposing backend or worker error text in replay payloads.
 			payloadMap["errorCode"] = string(code) // Preserve the stable machine-readable error code for downstream diagnostics and metrics correlation.
+		} else {
+			payloadMap["errorCode"] = string(errors.CodeInternal) // Classify untyped failures generically while retaining full diagnostics only in server logs.
 		}
 	}
 	if retryCount > 0 { // Record retry exhaustion counts only for terminal dispatch failures that actually consumed retries.
@@ -95,6 +126,14 @@ func (s *Service) finalizeTrace(ctx context.Context, traceID string, currentStat
 	}
 
 	return changed, nil // Report whether this caller actually won the terminal transition and appended the final event.
+}
+
+// finalizeTraceDetached persists one terminal trace transition with a bounded context that survives cancellation of the initiating request or execution timeout.
+func (s *Service) finalizeTraceDetached(parent context.Context, traceID string, currentStatuses []string, nextStatus string, terminalReason string, message string, cause error, retryCount int64) (bool, error) {
+	detachedContext := context.WithoutCancel(parent)                                                                              // Preserve context values while removing the cancellation that triggered this terminalization path.
+	finalizationContext, cancel := context.WithTimeout(detachedContext, detachedFinalizationTimeout)                              // Bound the detached database write so cleanup cannot hang indefinitely.
+	defer cancel()                                                                                                                // Release the finalization timer promptly after the transaction finishes.
+	return s.finalizeTrace(finalizationContext, traceID, currentStatuses, nextStatus, terminalReason, message, cause, retryCount) // Commit the terminal row and event atomically under the bounded detached context.
 }
 
 // FinalizeQueuedTrace records a dispatcher-owned terminal outcome for a queued trace without overwriting a terminal state that has already been committed elsewhere.

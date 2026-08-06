@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,6 +39,7 @@ type traceTerminalHarness struct {
 	dao          *postgres.DAO
 	cache        *redisstore.Cache
 	service      *Service
+	redisServer  *miniredis.Miniredis
 	stopPostgres func()
 	stopRedis    func()
 }
@@ -96,7 +99,7 @@ func newTraceTerminalHarness(t *testing.T) *traceTerminalHarness {
 		AppiumURL: "http://127.0.0.1:4723", // Provide a syntactically valid Appium URL even though these tests avoid real Appium calls.
 	}, config.AWSConfig{}, config.DeviceFarmConfig{Mode: "disabled"}, dao, cache, nil) // Disable Device Farm and S3 because the terminalization tests do not touch those integrations.
 
-	return &traceTerminalHarness{dao: dao, cache: cache, service: service, stopPostgres: stopPostgres, stopRedis: stopRedis} // Return the fully wired harness so individual tests can seed traces and assert final states.
+	return &traceTerminalHarness{dao: dao, cache: cache, service: service, redisServer: redisServer, stopPostgres: stopPostgres, stopRedis: stopRedis} // Return the fully wired harness so individual tests can seed traces, control Redis availability, and assert final states.
 }
 
 // reserveLoopbackPort reserves one IPv4 loopback TCP port and returns it so embedded PostgreSQL can bind deterministically during tests.
@@ -265,6 +268,9 @@ func TestExecuteDispatchedPlanFinalizesParseFailure(t *testing.T) {
 	if payload["errorCode"] != "E.PLAN.INVALID" { // Fail the test when the final event payload does not preserve the structured plan-validation error code.
 		t.Fatalf("expected terminal payload error code E.PLAN.INVALID, got %#v", payload["errorCode"]) // Surface the unexpected error code because operators rely on it for diagnosis.
 	}
+	if _, exists := payload["error"]; exists { // Reject raw parser or backend diagnostics in replayable terminal payloads.
+		t.Fatalf("expected terminal payload to omit raw error text, got %#v", payload["error"]) // Surface any regression that could disclose sensitive server details to trace readers.
+	}
 }
 
 // TestHandleDispatchErrorFinalizesAfterRetriesExhausted verifies that retry exhaustion closes a queued trace with one failed terminal state and one final replayable event before ACK.
@@ -325,5 +331,120 @@ func TestGetTraceRejectsDifferentSubject(t *testing.T) {
 		t.Fatal("expected trace ownership check to reject getTrace") // Surface the missing authorization failure because cross-subject trace reads must not be allowed.
 	} else if !errors.IsCode(err, errors.CodePermissionDenied) { // Fail when the returned error does not preserve the stable permission-denied code expected by transports.
 		t.Fatalf("expected permission denied, got %v", err) // Surface the unexpected error because transport mapping depends on the stable authorization code.
+	}
+}
+
+// TestExecutePlanQueueFailureCanRearmSameTrace verifies that Redis enqueue failure terminalizes the trace and permits one safe retry with the same owned trace id.
+func TestExecutePlanQueueFailureCanRearmSameTrace(t *testing.T) {
+	harness := newTraceTerminalHarness(t)                                                                                                                                                               // Start isolated PostgreSQL and Redis dependencies for the queue-failure lifecycle test.
+	ctx := context.Background()                                                                                                                                                                         // Use one non-cancelled context so the only scheduling failure comes from Redis availability.
+	now := time.Now().UTC()                                                                                                                                                                             // Capture one stable creation timestamp for the session and trace retry payload.
+	sessionID := uuid.NewString()                                                                                                                                                                       // Generate one unique active session that the failed plan submission can target.
+	traceID := uuid.NewString()                                                                                                                                                                         // Generate the caller-supplied trace id that will be reused after failure.
+	if err := harness.dao.CreateSession(ctx, &postgres.Session{ID: sessionID, ProjectID: "queue-project", Status: "created", Capabilities: []byte(`{}`), CreatedAt: now, UpdatedAt: now}); err != nil { // Seed the active session before scheduling.
+		t.Fatalf("failed to seed queue-failure session: %v", err) // Surface the setup failure because no trace can reference a missing session.
+	}
+	harness.redisServer.Close()                                                                                                                      // Make XADD fail after the trace row is prepared while leaving PostgreSQL available for detached terminalization.
+	if _, err := harness.service.ExecutePlanWithTrace(ctx, sessionID, traceID, json.RawMessage(`[{"type":"wait","params":{"ms":1}}]`)); err == nil { // Submit one valid plan through the production trace-first enqueue path.
+		t.Fatal("expected queue enqueue failure") // Require the unavailable Redis dependency to reach the caller.
+	}
+	failedTrace, err := harness.dao.GetTrace(ctx, traceID) // Load the trace directly because Redis is intentionally unavailable.
+	if err != nil {                                        // Stop when the trace row was not retained for retry.
+		t.Fatalf("failed to load queue-failed trace: %v", err) // Surface missing durable failure state.
+	}
+	if failedTrace.Status != "failed" || failedTrace.TerminalReason == nil || *failedTrace.TerminalReason != "queue_enqueue_failed" { // Require the retry-gating terminal classification.
+		t.Fatalf("expected failed queue trace, got status=%s reason=%v", failedTrace.Status, failedTrace.TerminalReason) // Surface orphaned or misclassified trace state.
+	}
+	if err := harness.dao.CreateOrRearmQueuedTrace(ctx, &postgres.Trace{ID: traceID, SessionID: sessionID, ProjectID: "queue-project", Status: "pending", CreatedAt: now, UpdatedAt: time.Now().UTC()}); err != nil { // Retry the exact owned trace through the atomic DAO contract.
+		t.Fatalf("expected queue-failed trace to rearm, got %v", err) // Surface unsafe idempotency conflicts after a confirmed enqueue failure.
+	}
+	rearmedTrace, err := harness.dao.GetTrace(ctx, traceID) // Reload the trace after the retry preparation transaction.
+	if err != nil {                                         // Stop when the rearmed trace cannot be read.
+		t.Fatalf("failed to load rearmed trace: %v", err) // Surface storage regressions in the retry path.
+	}
+	if rearmedTrace.Status != "pending" || rearmedTrace.TerminalReason != nil { // Require a clean pending lifecycle with no stale failure reason.
+		t.Fatalf("expected clean pending trace, got status=%s reason=%v", rearmedTrace.Status, rearmedTrace.TerminalReason) // Surface stale terminal state after rearm.
+	}
+	events, err := harness.dao.ListEvents(ctx, traceID, 0, 100) // Verify the old queue-failure terminal event was removed atomically with rearm.
+	if err != nil {                                             // Stop when event history cannot be read.
+		t.Fatalf("failed to load rearmed trace events: %v", err) // Surface storage regressions in event cleanup.
+	}
+	if len(events) != 0 { // Reject stale terminal events because a retried trace must begin a fresh monotonic execution history.
+		t.Fatalf("expected no stale events after rearm, got %d", len(events)) // Surface sequence-conflict risk directly.
+	}
+}
+
+// TestEndSessionRetriesFailedAutomationCleanup verifies that ended is committed only after a later Appium cleanup retry succeeds.
+func TestEndSessionRetriesFailedAutomationCleanup(t *testing.T) {
+	harness := newTraceTerminalHarness(t)                                                              // Start isolated persistence dependencies for the two-phase session lifecycle test.
+	deleteAttempts := 0                                                                                // Count Appium DELETE requests across the failed and successful EndSession calls.
+	appiumServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { // Simulate one ambiguous cleanup failure followed by success.
+		if r.Method != http.MethodDelete { // Reject unexpected Appium commands because this test exercises cleanup only.
+			w.WriteHeader(http.StatusMethodNotAllowed) // Return a deterministic failure for any accidental non-delete request.
+			return                                     // Stop before mutating the delete attempt count.
+		}
+		deleteAttempts++         // Record the concrete cleanup request sent by each EndSession attempt.
+		if deleteAttempts == 1 { // Fail the first cleanup so the session must remain retryable in ending.
+			w.WriteHeader(http.StatusInternalServerError)                                                                                                       // Return an ambiguous server failure that DELETE must not retry automatically.
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": map[string]interface{}{"error": "internal error", "message": "cleanup unavailable"}}) // Return a valid Appium error envelope.
+			return                                                                                                                                              // Stop before writing the later success response.
+		}
+		w.WriteHeader(http.StatusOK)                                        // Confirm cleanup on the second explicit EndSession call.
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"value": nil}) // Return a valid Appium delete-session success envelope.
+	}))
+	defer appiumServer.Close() // Release the loopback Appium server after lifecycle assertions complete.
+
+	ctx := context.Background()                                                                                                                                                                           // Use one stable context for both explicit cleanup attempts.
+	now := time.Now().UTC()                                                                                                                                                                               // Capture one stable session creation timestamp.
+	sessionID := uuid.NewString()                                                                                                                                                                         // Generate one unique platform session id for this lifecycle test.
+	if err := harness.dao.CreateSession(ctx, &postgres.Session{ID: sessionID, ProjectID: "cleanup-project", Status: "created", Capabilities: []byte(`{}`), CreatedAt: now, UpdatedAt: now}); err != nil { // Seed one active platform session.
+		t.Fatalf("failed to seed cleanup session: %v", err) // Surface setup failure before Redis handle creation.
+	}
+	if err := harness.cache.Set(ctx, appiumSessionKeyPrefix+sessionID, "appium-cleanup-session", appiumSessionKeyTTL); err != nil { // Persist the Appium session id used by restart-safe cleanup.
+		t.Fatalf("failed to seed appium session mapping: %v", err) // Surface missing cleanup handle setup.
+	}
+	if err := harness.cache.Set(ctx, appiumSessionURLKeyPrefix+sessionID, appiumServer.URL, appiumSessionKeyTTL); err != nil { // Persist the exact fake endpoint used by restored cleanup clients.
+		t.Fatalf("failed to seed appium url mapping: %v", err) // Surface missing endpoint handle setup.
+	}
+	if err := harness.service.EndSession(ctx, sessionID); err == nil { // Run the first cleanup attempt against the failing Appium response.
+		t.Fatal("expected first EndSession cleanup to fail") // Require external cleanup failure to reach the caller.
+	}
+	endingSession, err := harness.dao.GetSession(ctx, sessionID) // Reload lifecycle state after the failed cleanup attempt.
+	if err != nil {                                              // Stop when the session cannot be inspected.
+		t.Fatalf("failed to load ending session: %v", err) // Surface storage regressions in the two-phase flow.
+	}
+	if endingSession.Status != "ending" { // Require cleanup-in-progress rather than premature terminal state.
+		t.Fatalf("expected session status ending, got %s", endingSession.Status) // Surface resource-leaking terminalization directly.
+	}
+	if _, err := harness.cache.Get(ctx, appiumSessionKeyPrefix+sessionID); err != nil { // Require the Appium handle to remain available for retry.
+		t.Fatalf("expected cleanup handle to remain after failure: %v", err) // Surface unsafe handle deletion after ambiguous cleanup.
+	}
+	if err := harness.service.EndSession(ctx, sessionID); err != nil { // Retry cleanup explicitly after the fake dependency recovers.
+		t.Fatalf("expected second EndSession to succeed, got %v", err) // Surface failures in retrying the ending state.
+	}
+	endedSession, err := harness.dao.GetSession(ctx, sessionID) // Reload the durable terminal state after successful cleanup.
+	if err != nil {                                             // Stop when the ended session cannot be inspected.
+		t.Fatalf("failed to load ended session: %v", err) // Surface storage regressions after cleanup success.
+	}
+	if endedSession.Status != "ended" || !endedSession.EndedAt.Valid { // Require the final state and terminal timestamp only after cleanup confirmation.
+		t.Fatalf("expected ended session with timestamp, got status=%s endedAt=%v", endedSession.Status, endedSession.EndedAt) // Surface incomplete terminalization.
+	}
+	if deleteAttempts != 2 { // Require one request per explicit EndSession call and no hidden DELETE retries.
+		t.Fatalf("expected two explicit delete attempts, got %d", deleteAttempts) // Surface unsafe transport retries or missing cleanup retry.
+	}
+}
+
+// TestTakeScreenshotRejectsTraceFromDifferentSession verifies that artifact capture cannot attach one session's screenshot to another session's trace.
+func TestTakeScreenshotRejectsTraceFromDifferentSession(t *testing.T) {
+	harness := newTraceTerminalHarness(t)                                                                                                                                                                   // Start isolated persistence dependencies for the ownership-binding check.
+	_, traceID := harness.seedPendingTrace(t)                                                                                                                                                               // Seed one trace bound to the first active session.
+	ctx := context.Background()                                                                                                                                                                             // Use the legacy unauthenticated context so both empty-owner sessions remain accessible.
+	now := time.Now().UTC()                                                                                                                                                                                 // Capture one stable timestamp for the second active session.
+	otherSessionID := uuid.NewString()                                                                                                                                                                      // Generate a distinct session that must not write artifacts under the first trace.
+	if err := harness.dao.CreateSession(ctx, &postgres.Session{ID: otherSessionID, ProjectID: "test-project", Status: "created", Capabilities: []byte(`{}`), CreatedAt: now, UpdatedAt: now}); err != nil { // Seed the second active session.
+		t.Fatalf("failed to seed second screenshot session: %v", err) // Surface setup failure before the binding assertion.
+	}
+	if _, err := harness.service.TakeScreenshot(ctx, otherSessionID, traceID, false); !errors.IsCode(err, errors.CodePlanInvalid) { // Attempt cross-session capture and require rejection before Appium or S3 access.
+		t.Fatalf("expected cross-session screenshot rejection, got %v", err) // Surface missing trace-to-session consistency enforcement.
 	}
 }

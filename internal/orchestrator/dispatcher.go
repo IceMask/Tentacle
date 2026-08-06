@@ -11,33 +11,40 @@ import (
 	"sync"
 	"time"
 
+	"mcp_for_appium/internal/audit"
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/errors"
 	"mcp_for_appium/internal/rpc"
 	"mcp_for_appium/internal/storage/redis"
 	"mcp_for_appium/internal/telemetry"
+
+	"github.com/google/uuid"
 )
 
 const (
-	numShards            = 8
-	consumerGroup        = "orchestrator-group"
-	consumerName         = "orchestrator-consumer"
-	batchSize            = 10
-	blockTime            = 5 * time.Second
-	claimMinIdleTime     = 30 * time.Second
-	maxRetries           = 3
-	retryBackoffBase     = 200 * time.Millisecond
-	retryBackoffJitter   = 1000 * time.Millisecond
-	streamTrimMaxLen     = 10000
-	streamTrimApprox     = true
-	cancelledTracePrefix = "cancelled:trace:"
-	cancelledTraceTTL    = time.Hour
-	retryKeyPrefix       = "retries:trace:"
-	retryKeyTTL          = 10 * time.Minute
-	inflightTracePrefix  = "inflight:trace:"
-	inflightTraceTTL     = 2 * time.Hour
-	inflightMonitorTick  = 5 * time.Second
-	executionLeaseGrace  = 15 * time.Second
+	numShards             = 8
+	consumerGroup         = "orchestrator-group"
+	consumerName          = "orchestrator-consumer"
+	batchSize             = 10
+	blockTime             = 5 * time.Second
+	claimMinIdleTime      = 30 * time.Second
+	maxRetries            = 3
+	retryBackoffBase      = 200 * time.Millisecond
+	retryBackoffJitter    = 1000 * time.Millisecond
+	streamTrimMaxLen      = 10000
+	streamTrimApprox      = true
+	cancelledTracePrefix  = "cancelled:trace:"
+	cancelledTraceTTL     = time.Hour
+	retryKeyPrefix        = "retries:trace:"
+	retryKeyTTL           = 10 * time.Minute
+	inflightTracePrefix   = "inflight:trace:"
+	inflightTraceTTL      = 2 * time.Hour
+	dispatchLockPrefix    = "dispatch:trace:"
+	dispatchLockTTL       = 45 * time.Second
+	dispatchUnlockTimeout = 2 * time.Second
+	inflightMonitorTick   = 5 * time.Second
+	executionLeaseGrace   = 15 * time.Second
+	workerRPCTimeout      = 10 * time.Second
 )
 
 type Dispatcher struct {
@@ -52,6 +59,12 @@ type Dispatcher struct {
 	planTimeout       time.Duration
 	heartbeatInterval time.Duration
 	rpcSecurity       config.RPCSecurityConfig
+	auditRecorder     audit.Recorder
+}
+
+// SetAuditRecorder installs the optional append-only sink used for distributed lease and timeout audit events.
+func (d *Dispatcher) SetAuditRecorder(recorder audit.Recorder) {
+	d.auditRecorder = recorder // Store the process-wired recorder before dispatch loops begin serving queue messages.
 }
 
 // TraceFinalizer records dispatcher-owned terminal outcomes for queued traces before the queue message is ACKed.
@@ -269,25 +282,29 @@ func (d *Dispatcher) dispatchMessage(ctx context.Context, stream string, msg red
 
 // dispatchToWorker assigns a worker and sends the plan via gRPC.
 func (d *Dispatcher) dispatchToWorker(ctx context.Context, traceID, projectID, sessionID, planStr string) error {
-	w := d.registry.AssignWorker(ctx, projectID, map[string]string{})
-	if w == nil {
-		d.logger.WarnContext(ctx, "no available worker",
-			"trace_id", traceID,
-			"project_id", projectID)
-		// Return a transient scheduling error so upstream retry logic keeps
-		// the message pending for later auto-claim re-dispatch.
-		return errors.New(errors.CodeSchedNoWorker, "no available worker")
-	}
-
-	client, err := d.getWorkerClient(w.Address)
-	if err != nil {
-		return errors.Wrap(errors.CodeSchedNoWorker, "failed to connect to worker", err)
-	}
-
 	owner, ok := d.finalizer.(distributedAttemptOwner) // Detect whether the wired finalizer can reserve and promote distributed attempts around worker acceptance.
 	if !ok {                                           // Reject distributed dispatch when no attempt owner is wired because stale-result protection would be impossible.
 		return errors.New(errors.CodeInternal, "distributed attempt owner is not configured") // Surface the missing attempt owner as an internal wiring failure.
 	}
+	dispatchLockKey := dispatchLockPrefix + traceID                                        // Namespace the per-trace lock separately from the longer-lived execution lease.
+	dispatchLockToken := uuid.NewString()                                                  // Generate one unguessable ownership value so an expired lock holder cannot delete a successor's lock.
+	locked, err := d.cache.SetNX(ctx, dispatchLockKey, dispatchLockToken, dispatchLockTTL) // Acquire distributed serialization before incrementing the trace attempt or selecting a worker.
+	if err != nil {                                                                        // Fail closed when Redis cannot establish unique dispatch ownership.
+		return errors.Wrap(errors.CodeStoreWrite, "failed to acquire distributed dispatch lock", err) // Keep the queue message retryable without sending any worker RPC.
+	}
+	if !locked { // Treat a concurrent dispatcher for the same trace as transient scheduling pressure.
+		return errors.New(errors.CodeSchedNoWorker, "trace dispatch is already in progress") // Preserve the duplicate queue delivery for a later benign retry.
+	}
+	defer func() { // Release only this exact lock token after every dispatch outcome.
+		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), dispatchUnlockTimeout)    // Detach lock cleanup from a cancelled request while keeping Redis I/O bounded.
+		defer releaseCancel()                                                                            // Release the detached cleanup timer after the ownership-guarded delete returns.
+		released, releaseErr := d.cache.CompareAndDelete(releaseCtx, dispatchLockKey, dispatchLockToken) // Prevent an expired owner from deleting a newer dispatch lock.
+		if releaseErr != nil {                                                                           // Log infrastructure failure while allowing the short lock TTL to recover automatically.
+			d.logger.WarnContext(ctx, "failed to release distributed dispatch lock", "trace_id", traceID, "error", releaseErr) // Surface cleanup failure without changing the completed dispatch outcome.
+		} else if !released { // Record when the lock already expired or changed ownership before cleanup.
+			d.logger.InfoContext(ctx, "distributed dispatch lock no longer owned at release", "trace_id", traceID) // Keep ownership drift observable for timing diagnosis.
+		}
+	}()
 	attempt, err := owner.ReserveDispatchedTraceAttempt(ctx, traceID) // Reserve the next distributed attempt before the worker RPC so the worker can receive a stable ownership token.
 	if err != nil {                                                   // Surface attempt-reservation failures before any worker RPC is sent.
 		return err // Preserve the wrapped storage error so retry logic can decide whether to requeue or fail.
@@ -296,13 +313,30 @@ func (d *Dispatcher) dispatchToWorker(ctx context.Context, traceID, projectID, s
 		d.logger.InfoContext(ctx, "skipping distributed dispatch because trace is no longer pending", "trace_id", traceID, "project_id", projectID) // Record the benign race so operators can correlate skipped dispatches with concurrent cancels or terminal transitions.
 		return nil                                                                                                                                  // Report success so the queue message can be ACKed after another lifecycle transition already won.
 	}
+	reservationID := distributedReservationID(traceID, attempt)                      // Derive one exact capacity token from the durably reserved trace attempt.
+	w := d.registry.AssignWorker(ctx, projectID, map[string]string{}, reservationID) // Atomically select a worker and reserve one local slot for this exact attempt.
+	if w == nil {                                                                    // Return a transient scheduling result while preserving the monotonic attempt number for a later retry.
+		d.logger.WarnContext(ctx, "no available worker", "trace_id", traceID, "project_id", projectID, "attempt", attempt) // Surface fleet capacity exhaustion for operator diagnosis.
+		return errors.New(errors.CodeSchedNoWorker, "no available worker")                                                 // Leave the queue message pending so auto-claim can retry after capacity returns.
+	}
+	releaseReservation := true // Roll back this exact local slot on every path that does not produce a durable running attempt.
+	defer func() {             // Centralize capacity rollback so new error returns cannot accidentally leak a worker slot.
+		if releaseReservation { // Keep the reservation only after durable running-state promotion succeeds.
+			d.registry.ReleaseWorkerReservation(reservationID) // Release this exact trace attempt idempotently after dispatch failure or a fast terminal callback.
+		}
+	}()
+
+	client, err := d.getWorkerClient(w.Address) // Reuse or dial the selected worker's internal gRPC client after capacity is reserved.
+	if err != nil {                             // Treat worker dial failures as transient fleet availability problems.
+		return errors.Wrap(errors.CodeSchedNoWorker, "failed to connect to worker", err) // Preserve the dial cause for server logs while allowing queue retry.
+	}
 
 	workerSessionID, err := d.resolveWorkerSessionID(ctx, sessionID) // Resolve the worker-facing Appium session identifier before dispatch so the worker can attach to the real Appium session instead of the platform session id.
 	if err != nil {                                                  // Surface session-resolution failures before any worker RPC is sent because distributed execution cannot proceed safely without the Appium session id.
 		return err // Preserve the wrapped cache lookup failure so upstream retry and terminalization logic can react consistently.
 	}
-	dispatchedAt := time.Now()                                         // Capture one dispatch timestamp before the worker RPC so any immediate callback already has a persisted lease baseline to renew against.
-	d.persistInflightAssignment(ctx, traceID, inflightTraceAssignment{ // Persist the provisional distributed assignment before the worker RPC so fast step callbacks cannot race ahead of lease creation.
+	dispatchedAt := time.Now().UTC()       // Capture one dispatch timestamp before lease persistence and the worker RPC.
+	assignment := inflightTraceAssignment{ // Build the provisional ownership lease before any remote execution can begin.
 		Address:            w.Address,                                 // Record the worker address so later cancel RPCs can reach the same worker instance.
 		WorkerID:           w.ID,                                      // Record the worker identifier so callback renewals and timeout logs can pinpoint the same assignment.
 		Attempt:            attempt,                                   // Record the reserved execution attempt so callback ownership checks can reject stale results deterministically.
@@ -310,50 +344,75 @@ func (d *Dispatcher) dispatchToWorker(ctx context.Context, traceID, projectID, s
 		LastRenewedAtUnix:  dispatchedAt.UnixMilli(),                  // Seed the lease-renewal timestamp immediately so the first worker callback can refresh the same lease instead of racing a missing key.
 		LeaseExpiresAtUnix: d.inflightLeaseDeadlineUnix(dispatchedAt), // Capture the ownership-lease expiry derived from the worker heartbeat cadence and grace window.
 		DeadlineAtUnix:     d.inflightDeadlineUnix(dispatchedAt),      // Capture the absolute timeout deadline derived from the configured plan timeout for later watchdog sweeps.
-	}) // Persist the accepted-attempt lease metadata early so immediate worker callbacks see a valid ownership record.
-
-	resp, err := client.ExecutePlan(ctx, &rpc.ExecutePlanRequest{
-		TraceID:   traceID,
-		SessionID: workerSessionID,
-		Attempt:   attempt,
-		Plan:      json.RawMessage(planStr),
-	})
-	if err != nil {
-		d.cleanupInflightTrace(ctx, traceID) // Remove the provisional lease immediately because the worker RPC never accepted the attempt successfully.
-		return errors.Wrap(errors.CodeInternal, "worker ExecutePlan RPC failed", err)
+	} // Complete the ownership metadata that every fast callback must validate against.
+	rawAssignment, err := d.persistInflightAssignment(ctx, traceID, assignment) // Require durable Redis ownership before allowing the worker to accept execution.
+	if err != nil {                                                             // Stop before the worker RPC whenever ownership creation fails or conflicts.
+		d.recordAudit(ctx, "execution.lease_create", traceID, "failure", "store_write", assignment) // Audit the fail-closed lease outcome without recording backend error text.
+		return err                                                                                  // Leave the queued trace pending for retry because no worker RPC was sent.
 	}
-	if resp.Status != "accepted" {
-		d.cleanupInflightTrace(ctx, traceID) // Remove the provisional lease immediately because the worker rejected the reserved attempt.
-		return errors.New(errors.CodePlanInvalid, "worker rejected plan: "+resp.Message)
+
+	rpcCtx, rpcCancel := context.WithTimeout(ctx, workerRPCTimeout)  // Bound worker acceptance so a stalled peer cannot pin queue dispatch indefinitely.
+	resp, err := client.ExecutePlan(rpcCtx, &rpc.ExecutePlanRequest{ // Ask the worker to admit this exact leased execution attempt.
+		TraceID:   traceID,                  // Identify the persisted trace whose callback state the worker will own.
+		SessionID: workerSessionID,          // Attach execution to the resolved live Appium session.
+		Attempt:   attempt,                  // Carry the monotonic ownership token used by every callback guard.
+		Plan:      json.RawMessage(planStr), // Forward the already accepted plan JSON without reparsing it in the dispatcher.
+	})
+	rpcCancel()     // Release the per-acceptance timer immediately after the worker RPC returns.
+	if err != nil { // Roll back the provisional lease when the worker never acknowledged admission.
+		d.cleanupInflightTraceIfOwned(ctx, traceID, rawAssignment)                         // Remove only the unchanged provisional lease because a fast renewal can prove remote acceptance.
+		return errors.Wrap(errors.CodeSchedNoWorker, "worker ExecutePlan RPC failed", err) // Keep transport and timeout failures retryable through the scheduler path.
+	}
+	if resp == nil { // Reject malformed gRPC success responses that omit the admission result entirely.
+		d.cleanupInflightTraceIfOwned(ctx, traceID, rawAssignment)                                   // Remove only the unchanged provisional lease because no valid acceptance decision exists.
+		return errors.New(errors.CodeSchedNoWorker, "worker returned an empty ExecutePlan response") // Retry on another dispatch instead of assuming remote execution began.
+	}
+	if resp.Status == "busy" { // Treat authoritative worker-side capacity rejection as transient scheduling pressure.
+		d.cleanupInflightTraceIfOwned(ctx, traceID, rawAssignment)           // Remove the exact unused ownership lease before the queue message is retried.
+		return errors.New(errors.CodeSchedNoWorker, "worker is at capacity") // Preserve the queue message for later scheduling without marking the plan invalid.
+	}
+	if resp.Status != "accepted" { // Treat all explicit non-capacity rejections as terminal request validation failures.
+		d.cleanupInflightTraceIfOwned(ctx, traceID, rawAssignment)        // Remove the exact provisional lease because the worker rejected the reserved attempt.
+		return errors.New(errors.CodePlanInvalid, "worker rejected plan") // Avoid propagating arbitrary worker response text into external terminal events.
 	}
 
 	attemptRecorded, err := owner.MarkDispatchedTraceRunning(ctx, traceID, attempt) // Promote the reserved trace attempt to running only after the worker has acknowledged acceptance.
 	if err != nil {                                                                 // Best-effort cancel the accepted worker trace when durable running-state promotion fails after acceptance.
-		cancelResponse, cancelErr := client.CancelPlan(ctx, &rpc.CancelPlanRequest{TraceID: traceID}) // Try to stop the accepted worker trace because retrying after a lost running-state promotion would risk duplicate execution.
-		if cancelErr != nil {                                                                         // Log cancellation failures because the worker may continue executing a trace the orchestrator could not mark as running.
-			d.logger.WarnContext(ctx, "failed to cancel accepted trace after running-state persistence error", "trace_id", traceID, "worker_id", w.ID, "attempt", attempt, "error", cancelErr) // Surface the failed cleanup attempt for operator diagnosis.
-		} else {
-			d.logger.InfoContext(ctx, "cancelled accepted trace after running-state persistence error", "trace_id", traceID, "worker_id", w.ID, "attempt", attempt, "cancel_status", cancelResponse.Status) // Record the best-effort cleanup outcome for operator visibility.
-		}
-		d.cleanupInflightTrace(ctx, traceID) // Remove the provisional lease because the accepted worker attempt could not be promoted to the durable running state.
-		return err                           // Preserve the wrapped storage error so upstream handling can surface the failed acceptance bookkeeping.
+		d.cancelAcceptedWorker(ctx, client, traceID, w.ID, attempt, "running-state persistence error") // Stop remote work before this failed acceptance bookkeeping can be retried as a duplicate execution.
+		d.cleanupInflightTraceIfOwned(ctx, traceID, rawAssignment)                                     // Remove the lease only if no fast callback renewed or released it during promotion failure.
+		return err                                                                                     // Preserve the wrapped storage error so upstream handling can surface the failed acceptance bookkeeping.
 	}
 	if !attemptRecorded { // Cancel stale worker acceptance when another lifecycle transition already moved the reserved trace out of pending before running-state promotion committed.
-		cancelResponse, cancelErr := client.CancelPlan(ctx, &rpc.CancelPlanRequest{TraceID: traceID}) // Best-effort cancel the stale worker acceptance so the worker stops a trace the orchestrator no longer owns.
-		if cancelErr != nil {                                                                         // Log cancellation failures because the worker may continue executing a trace the orchestrator has already terminalized.
-			d.logger.WarnContext(ctx, "failed to cancel stale distributed acceptance", "trace_id", traceID, "worker_id", w.ID, "error", cancelErr) // Surface the failed stale-acceptance cancel without retrying dispatch.
-		} else {
-			d.logger.InfoContext(ctx, "cancelled stale distributed acceptance", "trace_id", traceID, "worker_id", w.ID, "cancel_status", cancelResponse.Status) // Record the best-effort worker-side cancel result for operator visibility.
-		}
-		d.cleanupInflightTrace(ctx, traceID) // Remove the provisional lease because another lifecycle transition already won before the accepted attempt could become running.
-		return nil                           // Treat the stale acceptance as a successful no-op because the trace has already moved to another lifecycle state elsewhere.
+		d.cancelAcceptedWorker(ctx, client, traceID, w.ID, attempt, "stale distributed acceptance") // Stop any run that did not already finish through a fast pending-state callback.
+		d.cleanupInflightTraceIfOwned(ctx, traceID, rawAssignment)                                  // Remove only the unchanged lease because a fast callback may already have released it.
+		return nil                                                                                  // Treat the stale acceptance as a successful no-op because the trace has already moved to another lifecycle state elsewhere.
 	}
+	releaseReservation = false // Keep capacity charged to this exact attempt until completion, cancellation, timeout, or orphan cleanup releases it.
 
-	d.logger.InfoContext(ctx, "dispatched to worker",
-		"trace_id", traceID,
-		"worker_id", w.ID,
-		"attempt", attempt)
-	return nil
+	d.logger.InfoContext(ctx, "dispatched to worker", "trace_id", traceID, "worker_id", w.ID, "attempt", attempt) // Record the accepted and durably promoted distributed assignment.
+	d.recordAudit(ctx, "execution.dispatched", traceID, "success", "", assignment)                                // Append safe routing, attempt, and deadline metadata for execution audit.
+	return nil                                                                                                    // Allow the queue message to be acknowledged after durable running-state promotion.
+}
+
+// cancelAcceptedWorker best-effort cancels one remotely accepted plan through a bounded RPC during dispatcher rollback.
+func (d *Dispatcher) cancelAcceptedWorker(ctx context.Context, client *rpc.WorkerClient, traceID string, workerID string, attempt int64, reason string) {
+	cancelCtx, cancel := context.WithTimeout(ctx, workerRPCTimeout)                         // Bound cleanup so an unreachable worker cannot stall queue ownership indefinitely.
+	response, err := client.CancelPlan(cancelCtx, &rpc.CancelPlanRequest{TraceID: traceID}) // Ask the selected worker to stop the remotely accepted trace.
+	cancel()                                                                                // Release the rollback RPC timer immediately after the call returns.
+	if err != nil {                                                                         // Keep cancellation best-effort because the original persistence or lifecycle result remains authoritative.
+		d.logger.WarnContext(ctx, "failed to cancel accepted distributed trace", "trace_id", traceID, "worker_id", workerID, "attempt", attempt, "reason", reason, "error", err) // Surface cleanup failure for operator diagnosis.
+		return                                                                                                                                                                   // Leave watchdog and worker lease loss as the fallback remote stop mechanisms.
+	}
+	status := ""         // Normalize nil responses into an empty status for safe structured logging.
+	if response != nil { // Read the worker response only when the gRPC client returned one.
+		status = response.Status // Preserve the stable cancellation outcome without logging arbitrary response messages.
+	}
+	d.logger.InfoContext(ctx, "cancelled accepted distributed trace", "trace_id", traceID, "worker_id", workerID, "attempt", attempt, "reason", reason, "cancel_status", status) // Record the best-effort rollback result.
+}
+
+// distributedReservationID derives the exact local capacity token shared by dispatch, callback, cancellation, and watchdog cleanup paths.
+func distributedReservationID(traceID string, attempt int64) string {
+	return fmt.Sprintf("%s:%d", traceID, attempt) // Combine the immutable trace id and monotonic attempt without relying on worker load counters alone.
 }
 
 // resolveWorkerSessionID maps one platform session identifier to the underlying Appium session identifier required by distributed workers.
@@ -430,21 +489,37 @@ func (d *Dispatcher) inflightLeaseDuration() time.Duration {
 	return (interval * 3) + executionLeaseGrace // Give each worker three missed heartbeats plus one grace window before ownership is considered orphaned.
 }
 
-// persistInflightAssignment stores one accepted distributed worker assignment and logs any failure without triggering a dangerous queue retry.
-func (d *Dispatcher) persistInflightAssignment(ctx context.Context, traceID string, assignment inflightTraceAssignment) {
+// persistInflightAssignment stores one distributed worker ownership lease and fails closed when Redis cannot durably accept it.
+func (d *Dispatcher) persistInflightAssignment(ctx context.Context, traceID string, assignment inflightTraceAssignment) (string, error) {
 	payload, err := json.Marshal(assignment) // Encode the accepted worker assignment into one Redis-storable JSON payload for cancel and timeout lookups.
-	if err != nil {                          // Surface impossible-but-real serialization failures without changing control flow after the worker already accepted the plan.
-		d.logger.ErrorContext(ctx, "failed to marshal inflight trace assignment", // Emit the failure loudly because timeout and cancellation bookkeeping will be incomplete for this accepted trace.
-			"trace_id", traceID,
-			"worker_id", assignment.WorkerID,
-			"error", err)
-		return // Preserve the accepted dispatch outcome because retrying after worker acceptance could duplicate execution.
+	if err != nil {                          // Reject malformed metadata before any worker RPC can begin remote execution.
+		return "", errors.Wrap(errors.CodeInternal, "failed to marshal inflight trace assignment", err) // Preserve the serialization cause under a stable internal code.
 	}
-	if err := d.cache.Set(ctx, inflightTracePrefix+traceID, string(payload), inflightTraceTTL); err != nil { // Persist the worker assignment with a bounded TTL so stale distributed traces do not remain forever after watchdog failure.
-		d.logger.WarnContext(ctx, "failed to persist inflight trace assignment", // Surface the Redis failure because later cancel and timeout sweeps may not be able to find the accepted trace.
-			"trace_id", traceID,
-			"worker_id", assignment.WorkerID,
-			"error", err)
+	created, err := d.cache.SetNX(ctx, inflightTracePrefix+traceID, string(payload), inflightTraceTTL) // Create ownership only when no earlier accepted or provisional lease already exists for this trace.
+	if err != nil {                                                                                    // Fail closed when Redis cannot persist the initial distributed ownership lease.
+		return "", errors.Wrap(errors.CodeStoreWrite, "failed to persist inflight trace assignment", err) // Fail closed because unleased remote execution cannot be cancelled or ownership-validated safely.
+	}
+	if !created { // Reject dispatch when another ownership lease already protects this trace.
+		return "", errors.New(errors.CodeStateConflict, "inflight trace assignment already exists") // Keep the queue message retryable without overwriting the existing owner.
+	}
+	return string(payload), nil // Return the exact stored value so rollback can atomically delete only this owner.
+}
+
+// recordAudit appends one best-effort sanitized distributed execution event without changing queue or lease control flow.
+func (d *Dispatcher) recordAudit(ctx context.Context, action string, traceID string, result string, reason string, assignment inflightTraceAssignment) {
+	if d.auditRecorder == nil { // Skip audit work when process wiring did not install an append-only sink.
+		return // Preserve dispatcher behavior in protocol-only tests and minimal deployments.
+	}
+	metadata := map[string]interface{}{ // Build a safe metadata set that excludes plan JSON, Appium identifiers, credentials, and backend errors.
+		"workerId":           assignment.WorkerID,           // Identify the assigned worker for fleet and incident correlation.
+		"attempt":            assignment.Attempt,            // Preserve the monotonic distributed ownership token.
+		"dispatchedAtUnix":   assignment.DispatchedAtUnix,   // Preserve when the current assignment began.
+		"leaseExpiresAtUnix": assignment.LeaseExpiresAtUnix, // Preserve the ownership deadline used by orphan detection.
+		"deadlineAtUnix":     assignment.DeadlineAtUnix,     // Preserve the absolute plan timeout deadline when configured.
+	}
+	event := audit.Event{TraceID: traceID, ActorID: assignment.WorkerID, ActorType: "worker", Action: action, ResourceType: "trace", ResourceID: traceID, Result: result, Reason: reason, Metadata: metadata, CreatedAt: time.Now().UTC()} // Normalize the distributed operation into the repository audit contract.
+	if err := d.auditRecorder.Record(ctx, event); err != nil {                                                                                                                                                                             // Keep audit persistence best-effort after the authoritative scheduling state has already been decided.
+		d.logger.WarnContext(ctx, "failed to record distributed execution audit event", "action", action, "trace_id", traceID, "worker_id", assignment.WorkerID, "error", err) // Surface sink failure without logging plan or credential data.
 	}
 }
 
@@ -482,9 +557,11 @@ func (d *Dispatcher) checkInflightTimeouts(ctx context.Context) {
 			if finalizerErr := d.finalizeQueuedTrace(ctx, traceID, "failed", "orphaned", "trace failed because distributed execution ownership lease expired", leaseErr, 0); finalizerErr != nil { // Persist the orphaned terminal outcome before dropping lease metadata.
 				continue // Leave the assignment key in place so the next sweep can retry orphan terminalization after transient storage failures.
 			}
-			d.cleanupInflightTrace(ctx, traceID)                    // Remove the expired ownership lease once the orphaned terminal outcome has been durably recorded.
-			d.cleanupRetryState(ctx, traceID)                       // Drop any stale retry counter so later traces with the same identifier never inherit orphaned dispatch state.
-			d.logger.WarnContext(ctx, "distributed trace orphaned", // Emit the orphan closure so operators can correlate it with the worker assignment that stopped renewing its lease.
+			d.cleanupInflightTraceIfOwned(ctx, traceID, rawAssignment)                                 // Remove only the exact expired ownership lease read by this watchdog sweep.
+			d.registry.ReleaseWorkerReservation(distributedReservationID(traceID, assignment.Attempt)) // Release the exact local capacity token after durable orphan terminalization.
+			d.cleanupRetryState(ctx, traceID)                                                          // Drop any stale retry counter so later traces with the same identifier never inherit orphaned dispatch state.
+			d.recordAudit(ctx, "execution.orphaned", traceID, "failure", "lease_expired", assignment)  // Append a sanitized ownership-loss audit event for investigation.
+			d.logger.WarnContext(ctx, "distributed trace orphaned",                                    // Emit the orphan closure so operators can correlate it with the worker assignment that stopped renewing its lease.
 				"trace_id", traceID,
 				"worker_id", assignment.WorkerID,
 				"address", assignment.Address,
@@ -499,9 +576,11 @@ func (d *Dispatcher) checkInflightTimeouts(ctx context.Context) {
 		if finalizerErr := d.finalizeQueuedTrace(ctx, traceID, "failed", "timeout", "trace failed because distributed execution exceeded plan timeout", timeoutErr, 0); finalizerErr != nil { // Persist the timeout terminal outcome before dropping watchdog metadata.
 			continue // Leave the assignment key in place so the next sweep can retry terminalization after transient storage failures.
 		}
-		d.cleanupInflightTrace(ctx, traceID)                     // Remove the accepted-assignment bookkeeping once the trace has reached a durable terminal timeout state.
-		d.cleanupRetryState(ctx, traceID)                        // Drop any stale retry counter so later traces with the same identifier never inherit this timed-out dispatch state.
-		d.logger.WarnContext(ctx, "distributed trace timed out", // Emit the timeout closure so operators can correlate the terminal event with the stalled worker assignment.
+		d.cleanupInflightTraceIfOwned(ctx, traceID, rawAssignment)                                 // Remove only the exact timed-out ownership lease read by this watchdog sweep.
+		d.registry.ReleaseWorkerReservation(distributedReservationID(traceID, assignment.Attempt)) // Release the exact local capacity token after durable timeout terminalization.
+		d.cleanupRetryState(ctx, traceID)                                                          // Drop any stale retry counter so later traces with the same identifier never inherit this timed-out dispatch state.
+		d.recordAudit(ctx, "execution.timed_out", traceID, "failure", "plan_timeout", assignment)  // Append a sanitized distributed timeout audit event.
+		d.logger.WarnContext(ctx, "distributed trace timed out",                                   // Emit the timeout closure so operators can correlate the terminal event with the stalled worker assignment.
 			"trace_id", traceID,
 			"worker_id", assignment.WorkerID,
 			"address", assignment.Address,
@@ -529,31 +608,34 @@ func parseInflightTraceAssignment(raw string) (inflightTraceAssignment, error) {
 	return assignment, nil // Return the normalized assignment metadata for timeout or cancellation handling.
 }
 
-// cleanupInflightTrace removes one accepted distributed assignment after cancellation, completion, or timeout terminalization.
-func (d *Dispatcher) cleanupInflightTrace(ctx context.Context, traceID string) {
-	if err := d.cache.Del(ctx, inflightTracePrefix+traceID); err != nil { // Delete the Redis assignment key so future cancel or timeout sweeps do not see a stale in-flight trace.
-		d.logger.WarnContext(ctx, "failed to delete inflight trace assignment", // Surface cleanup failures without changing control flow because the trace already reached a stable outcome.
-			"trace_id", traceID,
-			"error", err)
+// cleanupInflightTraceIfOwned removes one provisional assignment only when its exact original Redis value still owns the trace.
+func (d *Dispatcher) cleanupInflightTraceIfOwned(ctx context.Context, traceID string, rawAssignment string) {
+	removed, err := d.cache.CompareAndDelete(ctx, inflightTracePrefix+traceID, rawAssignment) // Prevent rollback after a lost RPC response from deleting a lease already renewed by the worker.
+	if err != nil {                                                                           // Log Redis failures while allowing lease expiry and watchdog cleanup to recover later.
+		d.logger.WarnContext(ctx, "failed to delete owned inflight trace assignment", "trace_id", traceID, "error", err) // Surface ownership-cleanup failure without changing the dispatch error classification.
+		return                                                                                                           // Leave the lease intact because safe ownership deletion could not be established.
+	}
+	if !removed { // Record benign ownership loss when a callback already renewed or released the provisional value.
+		d.logger.InfoContext(ctx, "inflight trace assignment changed before rollback", "trace_id", traceID) // Keep fast callback and response-loss races observable.
 	}
 }
 
 // loadInflightTraceAssignment loads one persisted distributed execution lease for callback validation, renewal, or cancellation routing.
-func (d *Dispatcher) loadInflightTraceAssignment(ctx context.Context, traceID string) (inflightTraceAssignment, bool, error) {
+func (d *Dispatcher) loadInflightTraceAssignment(ctx context.Context, traceID string) (inflightTraceAssignment, string, bool, error) {
 	rawAssignment, err := d.cache.Get(ctx, inflightTracePrefix+traceID) // Load the persisted distributed assignment so callback ownership can be validated against Redis lease state.
 	if err != nil {                                                     // Treat missing keys as a clean "not found" signal while surfacing real cache failures to the caller.
 		if err.Error() == "redis: nil" { // Translate the Redis nil sentinel into a stable absent-assignment result for higher-layer stale-result handling.
-			return inflightTraceAssignment{}, false, nil // Report that no active distributed lease exists for the requested trace.
+			return inflightTraceAssignment{}, "", false, nil // Report that no active distributed lease exists for the requested trace.
 		}
-		return inflightTraceAssignment{}, false, errors.Wrap(errors.CodeStoreRead, "failed to load inflight trace assignment", err) // Surface Redis read failures through the standard storage-read contract.
+		return inflightTraceAssignment{}, "", false, errors.Wrap(errors.CodeStoreRead, "failed to load inflight trace assignment", err) // Surface Redis read failures through the standard storage-read contract.
 	}
 
 	assignment, parseErr := parseInflightTraceAssignment(rawAssignment) // Decode the stored distributed assignment payload into the normalized in-memory lease model.
 	if parseErr != nil {                                                // Surface malformed Redis payloads because distributed ownership cannot be validated safely without them.
-		return inflightTraceAssignment{}, false, parseErr // Preserve the wrapped decode failure so callers can log or surface the broken lease state.
+		return inflightTraceAssignment{}, "", false, parseErr // Preserve the wrapped decode failure so callers can log or surface the broken lease state.
 	}
 
-	return assignment, true, nil // Return the decoded distributed lease metadata for callback validation or renewal.
+	return assignment, rawAssignment, true, nil // Return decoded metadata plus the exact Redis value required by atomic ownership updates.
 }
 
 // assignmentMatches returns true when one persisted distributed lease still belongs to the supplied worker and execution attempt.
@@ -563,8 +645,8 @@ func assignmentMatches(assignment inflightTraceAssignment, workerID string, atte
 
 // RenewExecutionLease refreshes one distributed execution lease when the supplied worker and attempt still own the trace.
 func (d *Dispatcher) RenewExecutionLease(ctx context.Context, traceID string, workerID string, attempt int64) (bool, error) {
-	assignment, found, err := d.loadInflightTraceAssignment(ctx, traceID) // Load the current distributed lease metadata before validating ownership or refreshing expiry.
-	if err != nil {                                                       // Surface Redis or payload failures because lease renewal cannot proceed safely without current assignment state.
+	assignment, rawAssignment, found, err := d.loadInflightTraceAssignment(ctx, traceID) // Load current metadata and its exact Redis value before validating ownership or refreshing expiry.
+	if err != nil {                                                                      // Surface Redis or payload failures because lease renewal cannot proceed safely without current assignment state.
 		return false, err // Preserve the wrapped storage error for the caller.
 	}
 	if !found || !assignmentMatches(assignment, workerID, attempt) { // Reject renewal when the trace no longer has an active lease for this worker attempt.
@@ -577,24 +659,42 @@ func (d *Dispatcher) RenewExecutionLease(ctx context.Context, traceID string, wo
 	}
 
 	assignment.LastRenewedAtUnix = now.UnixMilli()                   // Record the successful renewal time so operators can see recent distributed ownership activity.
-	assignment.LeaseExpiresAtUnix = d.inflightLeaseDeadlineUnix(now) // Extend the ownership expiry from the current renewal moment using the configured heartbeat-derived lease duration.
-	d.persistInflightAssignment(ctx, traceID, assignment)            // Persist the refreshed lease metadata so watchdog and callback validation observe the new expiry.
+	assignment.LeaseExpiresAtUnix = d.inflightLeaseDeadlineUnix(now) // Extend ownership expiry from the current renewal moment.
+	nextPayload, err := json.Marshal(assignment)                     // Encode the refreshed lease before the atomic ownership comparison.
+	if err != nil {                                                  // Surface unexpected assignment serialization failures without touching the current lease.
+		return false, errors.Wrap(errors.CodeInternal, "failed to marshal renewed inflight trace assignment", err) // Preserve the encoding cause under a stable internal code.
+	}
+	replaced, err := d.cache.CompareAndSet(ctx, inflightTracePrefix+traceID, rawAssignment, string(nextPayload), inflightTraceTTL) // Refresh only when the exact lease read above still owns the key.
+	if err != nil {                                                                                                                // Require durable renewal so workers never receive a false ownership confirmation during Redis failure.
+		d.recordAudit(ctx, "execution.lease_renew", traceID, "failure", "store_write", assignment)         // Append a stable fail-closed lease-renewal audit record.
+		return false, errors.Wrap(errors.CodeStoreWrite, "failed to renew inflight trace assignment", err) // Surface Redis script failure for transport handling.
+	}
+	if !replaced { // Reject a renewal that lost ownership after its initial read.
+		return false, nil // Tell the worker to stop because a newer lease or cleanup won the race.
+	}
 
 	return true, nil // Report that the distributed lease still belongs to this worker attempt and was refreshed successfully.
 }
 
 // ReleaseExecutionLease removes one distributed execution lease only when the supplied worker and attempt still own the trace.
 func (d *Dispatcher) ReleaseExecutionLease(ctx context.Context, traceID string, workerID string, attempt int64) (bool, error) {
-	assignment, found, err := d.loadInflightTraceAssignment(ctx, traceID) // Load the current distributed lease metadata before deciding whether cleanup should proceed.
-	if err != nil {                                                       // Surface Redis or payload failures because lease cleanup cannot be validated safely without the current assignment state.
+	assignment, rawAssignment, found, err := d.loadInflightTraceAssignment(ctx, traceID) // Load current metadata and its exact Redis value before deciding whether cleanup should proceed.
+	if err != nil {                                                                      // Surface Redis or payload failures because lease cleanup cannot be validated safely without the current assignment state.
 		return false, err // Preserve the wrapped storage error for the caller.
 	}
 	if !found || !assignmentMatches(assignment, workerID, attempt) { // Reject cleanup when the trace no longer has an active lease for this worker attempt.
 		return false, nil // Report a stale or already-cleaned lease without treating it as an infrastructure failure.
 	}
 
-	d.cleanupInflightTrace(ctx, traceID) // Remove the persisted distributed lease once the owning worker attempt has reported a terminal result successfully.
-	return true, nil                     // Report that the distributed lease belonged to this worker attempt and has now been removed.
+	released, err := d.cache.CompareAndDelete(ctx, inflightTracePrefix+traceID, rawAssignment) // Delete only the exact lease validated for this worker attempt.
+	if err != nil {                                                                            // Require successful Redis deletion before declaring the ownership lease released.
+		return false, errors.Wrap(errors.CodeStoreWrite, "failed to release inflight trace assignment", err) // Preserve retryable cleanup state when Redis rejects deletion.
+	}
+	if !released { // Treat a value change after the initial read as lost ownership rather than deleting a successor.
+		return false, nil // Report stale cleanup so the caller leaves the newer lease untouched.
+	}
+	d.registry.ReleaseWorkerReservation(distributedReservationID(traceID, attempt)) // Release the exact local capacity token only after durable lease cleanup succeeds.
+	return true, nil                                                                // Report that the distributed lease and matching local reservation were removed successfully.
 }
 
 // handleDispatchError decides whether to ACK (terminal or retries exhausted) or
@@ -736,21 +836,39 @@ func (d *Dispatcher) CancelDispatchedPlan(ctx context.Context, traceID string) (
 		return false, errors.Wrap(errors.CodeSchedNoWorker, "failed to connect to assigned worker", err)
 	}
 
-	resp, err := client.CancelPlan(ctx, &rpc.CancelPlanRequest{TraceID: traceID})
-	if err != nil {
-		return false, errors.Wrap(errors.CodeInternal, "worker CancelPlan RPC failed", err)
+	rpcCtx, rpcCancel := context.WithTimeout(ctx, workerRPCTimeout)                  // Bound cancellation so an unreachable worker cannot stall the caller indefinitely.
+	resp, err := client.CancelPlan(rpcCtx, &rpc.CancelPlanRequest{TraceID: traceID}) // Forward cancellation to the worker that owns the persisted assignment.
+	rpcCancel()                                                                      // Release the per-cancellation timer immediately after the worker RPC returns.
+	if err != nil {                                                                  // Surface transport and deadline failures without deleting ownership metadata prematurely.
+		return false, errors.Wrap(errors.CodeSchedNoWorker, "worker CancelPlan RPC failed", err) // Keep the lease available for retry or watchdog cleanup.
+	}
+	if resp == nil { // Reject malformed successful RPC responses that omit a cancellation status.
+		return false, errors.New(errors.CodeInternal, "worker returned an empty CancelPlan response") // Preserve lease state because cancellation outcome is unknown.
 	}
 
-	switch resp.Status {
+	switch resp.Status { // Normalize the worker's stable cancellation result into lease and capacity cleanup.
 	case "cancelled":
-		d.cleanupInflightTrace(ctx, traceID) // Remove the in-flight assignment because the worker has acknowledged cancellation for this trace.
-		return true, nil
+		cleanupErr := d.cleanupCancelledAssignment(ctx, traceID, rawAssignment, assignment.Attempt) // Remove only the cancelled owner's lease and exact local reservation.
+		return true, cleanupErr                                                                     // Report that a live worker execution was cancelled while preserving any Redis cleanup failure.
 	case "not_found":
-		d.cleanupInflightTrace(ctx, traceID) // Remove the stale assignment because the worker no longer knows about this supposedly in-flight trace.
-		return false, nil
+		cleanupErr := d.cleanupCancelledAssignment(ctx, traceID, rawAssignment, assignment.Attempt) // Remove only the stale owner's lease and exact local reservation.
+		return false, cleanupErr                                                                    // Report no live remote cancellation while preserving any Redis cleanup failure.
 	default:
-		return false, errors.New(errors.CodeInternal, "worker returned unexpected cancel status: "+resp.Status)
+		return false, errors.New(errors.CodeInternal, "worker returned unexpected cancel status") // Avoid propagating arbitrary worker-controlled status text into higher-layer errors.
 	}
+}
+
+// cleanupCancelledAssignment atomically removes the lease value routed to the cancelled worker and releases its exact local capacity token.
+func (d *Dispatcher) cleanupCancelledAssignment(ctx context.Context, traceID string, rawAssignment string, attempt int64) error {
+	removed, err := d.cache.CompareAndDelete(ctx, inflightTracePrefix+traceID, rawAssignment) // Prevent a stale cancellation response from deleting a newer trace owner.
+	d.registry.ReleaseWorkerReservation(distributedReservationID(traceID, attempt))           // Release the cancelled attempt's exact local token regardless of later lease replacement.
+	if err != nil {                                                                           // Surface Redis cleanup failures after local capacity has been reconciled.
+		return errors.Wrap(errors.CodeStoreWrite, "failed to remove cancelled inflight trace assignment", err) // Preserve retryable stale Redis state for operator handling.
+	}
+	if !removed { // Record benign ownership change without deleting the successor lease.
+		d.logger.InfoContext(ctx, "cancelled inflight assignment no longer owned at cleanup", "trace_id", traceID, "attempt", attempt) // Keep cross-attempt cancellation races observable.
+	}
+	return nil // Confirm that cleanup either removed this exact lease or safely left a successor untouched.
 }
 
 // finalizeQueuedTrace records one dispatcher-owned terminal outcome before the queue message is ACKed.

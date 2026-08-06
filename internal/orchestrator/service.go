@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	stdErrors "errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -57,6 +58,7 @@ type Service struct {
 	appiumMu       sync.Mutex
 	appiumMap      map[string]*appium.Client
 	appiumLastUsed map[string]time.Time
+	sessionEndMu   sync.Mutex
 	planMu         sync.Mutex
 	planCancel     map[string]context.CancelFunc
 	snapshotMu     sync.Mutex
@@ -75,6 +77,8 @@ func NewService(cfg config.OrchestratorConfig, rpcCfg config.RPCSecurityConfig, 
 	mode := normalizeExecutionMode(cfg.ExecutionMode)
 	cfg.ExecutionMode = mode
 	registry := NewWorkerRegistry(cache)
+	auditRecorder := postgres.NewAuditRecorder(dao) // Reuse the authoritative append-only PostgreSQL sink for worker and lease lifecycle events.
+	registry.SetAuditRecorder(auditRecorder)        // Wire worker registration, recovery, degradation, offline, and removal audit events before service startup.
 	publisher := NewEventsPublisher(dao, cache)
 
 	svc := &Service{
@@ -113,6 +117,7 @@ func NewService(cfg config.OrchestratorConfig, rpcCfg config.RPCSecurityConfig, 
 	}
 	dispatcher := NewDispatcher(cache, registry, executor, cfg.PlanTimeout, workerCfg.HeartbeatInterval, rpcCfg) // Pass the configured plan timeout, worker heartbeat cadence, and RPC security into dispatcher so distributed leases and worker calls follow the selected runtime model.
 	dispatcher.finalizer = svc                                                                                   // Wire the service's durable terminalization helper into dispatcher-owned terminal paths before the service starts processing queue messages.
+	dispatcher.SetAuditRecorder(auditRecorder)                                                                   // Wire fail-closed lease, dispatch, orphan, and timeout audit events before queue processing begins.
 	svc.dispatcher = dispatcher
 
 	return svc
@@ -253,9 +258,9 @@ func (s *Service) ExecutePlanWithTrace(ctx context.Context, sessionID string, tr
 		s.logger.ErrorContext(ctx, "orchestrator ExecutePlan failed", "session_id", sessionID, "trace_id", traceID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log session lookup failure.
 		return "", err
 	}
-	if sess.Status == "ended" {
-		s.logger.ErrorContext(ctx, "orchestrator ExecutePlan failed", "session_id", sessionID, "trace_id", traceID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", "session ended") // Log invalid session state before returning.
-		return "", errors.New(errors.CodeSessionDead, "session ended")
+	if sess.Status != "created" && sess.Status != "active" { // Reject ending and ended sessions before creating a trace or queue message.
+		s.logger.ErrorContext(ctx, "orchestrator ExecutePlan failed", "session_id", sessionID, "trace_id", traceID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", "session is not active") // Log invalid session state before returning.
+		return "", errors.New(errors.CodeSessionDead, "session is not active")                                                                                                                             // Preserve the stable dead-session classification for every unusable lifecycle state.
 	}
 
 	// 2. Create Trace
@@ -272,15 +277,19 @@ func (s *Service) ExecutePlanWithTrace(ctx context.Context, sessionID string, tr
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
-	if err := s.dao.CreateTrace(ctx, trace); err != nil {
+	if err := s.dao.CreateOrRearmQueuedTrace(ctx, trace); err != nil { // Insert the new trace or safely rearm only a matching trace whose previous queue enqueue failed.
 		s.logger.ErrorContext(ctx, "orchestrator ExecutePlan failed", "session_id", sessionID, "trace_id", traceID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log trace creation failures.
-		return "", errors.Wrap(errors.CodeInternal, "failed to create trace", err)
+		return "", errors.WrapPreservingCode("failed to prepare trace", err)                                                                                                           // Preserve state-conflict and storage classifications from the atomic trace preparation helper.
 	}
 
 	// 3. Enqueue Plan
 	if err := s.dispatcher.EnqueuePlan(ctx, sess.ProjectID, sessionID, traceID, plan); err != nil {
 		s.logger.ErrorContext(ctx, "orchestrator ExecutePlan failed", "session_id", sessionID, "trace_id", traceID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log enqueue failures for queue-level troubleshooting.
-		return "", errors.Wrap(errors.CodeInternal, "failed to enqueue plan", err)
+		_, finalizationErr := s.finalizeTraceDetached(ctx, traceID, []string{"pending"}, "failed", "queue_enqueue_failed", "trace failed before queue acceptance", err, 0)             // Close the prepared trace even when the request context was cancelled by the enqueue failure.
+		if finalizationErr != nil {                                                                                                                                                    // Surface both failures when PostgreSQL cannot record the queue rejection durably.
+			return "", errors.Wrap(errors.CodeStoreWrite, "failed to enqueue plan and finalize trace", stdErrors.Join(err, finalizationErr)) // Preserve both root causes for server logs under a stable storage-write code.
+		}
+		return "", errors.Wrap(errors.CodeInternal, "failed to enqueue plan", err) // Return the enqueue failure after the trace has reached a retryable terminal state.
 	}
 
 	s.logger.InfoContext(ctx, "orchestrator ExecutePlan done", "session_id", sessionID, "trace_id", traceID, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful method completion.
@@ -310,7 +319,7 @@ func (s *Service) GetSession(ctx context.Context, sessionID string) (*postgres.S
 	return s.authorizeSessionAccess(ctx, sessionID) // Reuse the shared session-authorization helper so every authenticated session read enforces persisted ownership.
 }
 
-// EndSession marks the persisted session as ended exactly once, then releases the cached Appium session and Redis mapping.
+// EndSession moves one session through ending, retries external cleanup safely, and commits ended only after every cleanup handle is released.
 func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 	ctx, span := otel.Tracer("orchestrator").Start(ctx, "EndSession")
 	defer span.End()
@@ -320,23 +329,36 @@ func (s *Service) EndSession(ctx context.Context, sessionID string) error {
 		s.logger.ErrorContext(ctx, "orchestrator EndSession failed", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log authorization failures before returning.
 		return err                                                                                                                                               // Preserve the authorization failure so transports keep the correct status mapping.
 	}
+	s.sessionEndMu.Lock()         // Serialize cleanup attempts so concurrent EndSession calls cannot delete the same Appium or Device Farm resource twice.
+	defer s.sessionEndMu.Unlock() // Release the lifecycle lock after cleanup and durable finalization complete or fail.
 
-	ended, err := s.markSessionEnded(ctx, sessionID, time.Now()) // Persist the terminal session state first so concurrent callers observe idempotent completion from the database record.
-	if err != nil {                                              // Stop before touching the in-memory Appium session map when the persisted session transition fails.
+	cleanupRequired, err := s.prepareSessionEnd(ctx, sessionID, time.Now()) // Persist cleanup-in-progress before any external resource operation begins.
+	if err != nil {                                                         // Stop before touching the in-memory Appium session map when the persisted session transition fails.
 		s.logger.ErrorContext(ctx, "orchestrator EndSession failed", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Log lookup failures before returning.
 		return err
 	}
-	if !ended { // Treat repeated end-session requests as successful no-ops once another caller has already completed the transition.
+	if !cleanupRequired { // Treat repeated end-session requests as successful no-ops only after the persisted row is already ended.
 		s.logger.InfoContext(ctx, "orchestrator EndSession done", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds(), "already_ended", true) // Log idempotent completion path.
 		return nil
 	}
 
-	s.appiumMu.Lock()
-	delete(s.appiumMap, sessionID)
-	delete(s.appiumLastUsed, sessionID)
-	s.appiumMu.Unlock()
-
-	s.releaseSessionAutomation(ctx, sessionID) // Release the Appium session, cached endpoint mappings, and any Device Farm remote-access reservation backing this platform session.
+	s.appiumMu.Lock()                                                       // Read the cached client under the same mutex used by interactive operations and cleanup eviction.
+	app := s.appiumMap[sessionID]                                           // Preserve the live client so cleanup does not depend exclusively on Redis restoration.
+	s.appiumMu.Unlock()                                                     // Release the cache mutex before performing network cleanup.
+	if err := s.releaseSessionAutomation(ctx, sessionID, app); err != nil { // Release Appium, Device Farm, and persisted handles while retaining them on any external failure.
+		s.logger.ErrorContext(ctx, "orchestrator EndSession cleanup failed", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Record the retryable cleanup failure while the row remains ending.
+		return err                                                                                                                                                       // Preserve the cleanup error so the caller knows to retry the ending session.
+	}
+	finalizationContext, finalizationCancel := context.WithTimeout(context.WithoutCancel(ctx), detachedFinalizationTimeout) // Give the terminal database write a bounded chance to succeed after request cancellation.
+	defer finalizationCancel()                                                                                              // Release the detached finalization timer when the method returns.
+	if err := s.completeSessionEnd(finalizationContext, sessionID, time.Now()); err != nil {                                // Commit ended only after every external cleanup operation succeeded.
+		s.logger.ErrorContext(ctx, "orchestrator EndSession finalization failed", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds(), "error", err) // Record the retryable database finalization failure.
+		return err                                                                                                                                                            // Leave the row in ending so a later call can retry idempotent cleanup and finalization.
+	}
+	s.appiumMu.Lock()                   // Evict the now-closed client only after durable terminal finalization succeeds.
+	delete(s.appiumMap, sessionID)      // Remove the closed Appium client from the in-memory session map.
+	delete(s.appiumLastUsed, sessionID) // Remove its idle-cleanup timestamp alongside the client.
+	s.appiumMu.Unlock()                 // Release the cache mutex after terminal eviction completes.
 
 	s.logger.InfoContext(ctx, "orchestrator EndSession done", "session_id", sessionID, "duration_ms", time.Since(startedAt).Milliseconds()) // Log successful session termination.
 	return nil
@@ -446,8 +468,12 @@ func (s *Service) TakeScreenshot(ctx context.Context, sessionID string, traceID 
 	if traceID == "" {
 		return nil, errors.New(errors.CodePlanInvalid, "traceId is required for takeScreenshot")
 	}
-	if _, err := s.authorizeTraceAccess(ctx, traceID); err != nil { // Validate persisted trace ownership before storing new screenshot artifacts under the supplied trace identifier.
+	trace, err := s.authorizeTraceAccess(ctx, traceID) // Validate persisted trace ownership and load its authoritative session binding before storing artifacts.
+	if err != nil {                                    // Stop before touching Appium when the trace is missing or not owned by the caller.
 		return nil, err // Preserve the trace-not-found or permission-denied error so transports keep stable status mapping.
+	}
+	if trace.SessionID != sessionID { // Reject cross-session artifact attachment even when the caller owns both resources.
+		return nil, errors.New(errors.CodePlanInvalid, "trace does not belong to session") // Prevent screenshots from one automation session being stored under another trace.
 	}
 
 	app, err := s.getAppiumClient(ctx, sessionID)
@@ -485,8 +511,12 @@ func (s *Service) TakeScreenshot(ctx context.Context, sessionID string, traceID 
 
 // getAppiumClient executes this operation.
 func (s *Service) getAppiumClient(ctx context.Context, sessionID string) (*appium.Client, error) {
-	if _, err := s.authorizeSessionAccess(ctx, sessionID); err != nil { // Validate persisted session ownership before exposing the cached or restored Appium session to authenticated callers.
+	session, err := s.authorizeSessionAccess(ctx, sessionID) // Validate persisted session ownership and load the authoritative lifecycle state before exposing automation handles.
+	if err != nil {                                          // Reject missing or unauthorized sessions before inspecting in-memory state.
 		return nil, err // Preserve the session-not-found or permission-denied error so transports keep stable status mapping.
+	}
+	if session.Status != "created" && session.Status != "active" { // Reject ending and ended sessions before any cached or restored Appium command can run.
+		return nil, errors.New(errors.CodeSessionDead, "session is not active") // Preserve the stable dead-session classification throughout interactive and plan operations.
 	}
 
 	s.appiumMu.Lock()
@@ -576,31 +606,49 @@ func (s *Service) ExecuteDispatchedPlan(ctx context.Context, traceID string, ses
 		return err // Preserve the wrapped storage error from the optimistic transition helper.
 	}
 	if !transitioned { // Reject execution when the trace is no longer in the expected pending state.
-		return errors.New(errors.CodeStateConflict, "trace is not pending") // Return a stable state-conflict error instead of overwriting another terminal state.
+		trace, lookupErr := s.dao.GetTrace(ctx, traceID) // Inspect the durable state so duplicate queue deliveries can be acknowledged without re-executing the plan.
+		if lookupErr != nil {                            // Preserve storage and not-found failures because the dispatcher cannot classify the duplicate safely without the trace row.
+			return lookupErr // Return the authoritative lookup failure so queue retry policy remains consistent.
+		}
+		switch trace.Status { // Treat an already accepted or terminal trace as a benign duplicate delivery.
+		case "running", "completed", "failed", "cancelled":
+			s.logger.InfoContext(ctx, "duplicate queued plan ignored", "trace_id", traceID, "status", trace.Status) // Record duplicate suppression without replaying device actions.
+			return nil                                                                                              // Let the dispatcher ACK the duplicate message because another delivery already owns or completed the trace.
+		default:
+			return errors.New(errors.CodeStateConflict, "trace is not pending") // Preserve a stable conflict for unknown lifecycle states that require operator attention.
+		}
 	}
 
 	steps, err := worker.ParsePlan(plan)
 	if err != nil {
-		_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "parse_error", "trace failed before execution started", err, 0) // Persist the failed terminal state and matching final event before returning the plan-parse error.
-		return err
+		_, finalizationErr := s.finalizeTraceDetached(ctx, traceID, []string{"running"}, "failed", "parse_error", "trace failed before execution started", err, 0) // Persist the failed terminal state even if the execution context already expired.
+		return stdErrors.Join(err, finalizationErr)                                                                                                                // Return both parsing and persistence failures while preserving the original plan error when finalization succeeds.
 	}
 
-	app, err := s.getAppiumClient(ctx, sessionID)
+	app, err := s.getAppiumClient(runCtx, sessionID) // Bind session restoration and validation to the plan execution timeout.
 	if err != nil {
-		_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "session_unavailable", "trace failed before acquiring the session client", err, 0) // Persist the failed terminal state and final event without overwriting a concurrent cancellation result.
-		return err
+		_, finalizationErr := s.finalizeTraceDetached(ctx, traceID, []string{"running"}, "failed", "session_unavailable", "trace failed before acquiring the session client", err, 0) // Persist the failed terminal state without relying on the possibly expired execution context.
+		return stdErrors.Join(err, finalizationErr)                                                                                                                                   // Return both session and persistence failures when needed.
 	}
 
-	seq := int64(0)
+	seq := int64(0)      // Allocate step-event sequence numbers monotonically within this newly accepted trace execution.
+	var publishErr error // Capture the first durable event failure because executor callbacks cannot return errors directly.
 	exec := worker.NewExecutor(app, s.cfg.StepTimeout, s.cfg.AutoWaitMax, func(ev worker.StepEvent) {
-		seq++
-		payload, _ := json.Marshal(map[string]interface{}{
+		if publishErr != nil { // Stop attempting later event writes after the first durable persistence failure.
+			return // Preserve the first failure as the root cause that will terminalize the trace.
+		}
+		seq++                                                       // Reserve the next ordered event sequence before serializing this executor callback.
+		payload, marshalErr := json.Marshal(map[string]interface{}{ // Serialize the complete step event payload before attempting persistence.
 			"message":      ev.Message,
 			"metrics":      ev.Metrics,
 			"artifactRefs": ev.ArtifactRefs,
 			"phase":        ev.Phase,
 		})
-		_ = s.publisher.Publish(runCtx, &postgres.PlanEvent{
+		if marshalErr != nil { // Stop when one event payload cannot be represented as JSON.
+			publishErr = errors.Wrap(errors.CodeInternal, "failed to marshal plan event", marshalErr) // Preserve the serialization cause for terminal diagnostics.
+			return                                                                                    // Skip persistence because no valid event payload exists.
+		}
+		publishErr = s.publisher.Publish(runCtx, &postgres.PlanEvent{ // Persist every step event and retain the first failure for execution outcome handling.
 			TraceID:   traceID,
 			Seq:       seq,
 			StepIndex: ev.StepIndex,
@@ -612,29 +660,32 @@ func (s *Service) ExecuteDispatchedPlan(ctx context.Context, traceID string, ses
 
 	start := time.Now()
 	err = exec.Execute(runCtx, steps)
+	if publishErr != nil { // Treat a missing durable step event as a trace execution failure even when device actions completed.
+		err = stdErrors.Join(err, publishErr) // Preserve any executor failure together with the first event persistence failure.
+	}
 	elapsed := time.Since(start).Seconds()
 	if err != nil {
 		if code, ok := errors.CodeOf(err); ok {
 			telemetry.ErrorCodeTotal.WithLabelValues(string(code), "orchestrator").Inc()
 		}
 		if errors.IsCode(err, errors.CodeSessionDead) || errors.IsCode(err, errors.CodeSessionBroken) {
-			_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "session_broken", "trace failed because the session became unusable", err, 0) // Persist the failed terminal state and final event without clobbering a concurrent cancellation or other terminal transition.
+			_, finalizationErr := s.finalizeTraceDetached(ctx, traceID, []string{"running"}, "failed", "session_broken", "trace failed because the session became unusable", err, 0) // Persist the failed terminal state without relying on the failed execution context.
 			telemetry.ExecuteLatency.WithLabelValues("", "", "failed").Observe(elapsed)
-			return err
+			return stdErrors.Join(err, finalizationErr) // Preserve execution and terminal persistence failures for dispatcher retry decisions.
 		}
 		if runCtx.Err() == context.Canceled || runCtx.Err() == context.DeadlineExceeded {
-			_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "cancelled", "cancelled", "trace cancelled during execution", err, 0) // Persist cancellation as the winning terminal state together with one final trace event.
+			_, finalizationErr := s.finalizeTraceDetached(ctx, traceID, []string{"running"}, "cancelled", "cancelled", "trace cancelled during execution", err, 0) // Persist cancellation after the execution context has already been cancelled.
 			telemetry.ExecuteLatency.WithLabelValues("", "", "failed").Observe(elapsed)
-			return err
+			return stdErrors.Join(err, finalizationErr) // Preserve execution and terminal persistence failures for dispatcher retry decisions.
 		}
 		telemetry.ExecuteLatency.WithLabelValues("", "", "failed").Observe(elapsed)
-		_, _ = s.finalizeTrace(runCtx, traceID, []string{"running"}, "failed", "execution_failed", "trace failed during execution", err, 0) // Persist the failed terminal state and final event without clobbering a concurrent terminal state update.
-		return err
+		_, finalizationErr := s.finalizeTraceDetached(ctx, traceID, []string{"running"}, "failed", "execution_failed", "trace failed during execution", err, 0) // Persist the failed terminal state independently from the request context.
+		return stdErrors.Join(err, finalizationErr)                                                                                                             // Preserve execution and terminal persistence failures for dispatcher retry decisions.
 	}
 
 	telemetry.ExecuteLatency.WithLabelValues("", "", "passed").Observe(elapsed)
-	_, err = s.finalizeTrace(runCtx, traceID, []string{"running"}, "completed", "completed", "trace completed", nil, 0) // Persist the completed terminal state together with one final trace event when this executor still owns the running state.
-	return err                                                                                                          // Return any storage-layer failure while treating a lost race to another terminal state as a successful no-op.
+	_, err = s.finalizeTraceDetached(ctx, traceID, []string{"running"}, "completed", "completed", "trace completed", nil, 0) // Persist completion with a fresh bounded context so a just-expired request cannot strand the trace in running.
+	return err                                                                                                               // Return any storage-layer failure while treating a lost race to another terminal state as a successful no-op.
 }
 
 // Interactive element operations

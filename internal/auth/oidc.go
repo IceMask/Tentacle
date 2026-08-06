@@ -1,3 +1,4 @@
+// oidc.go validates OIDC ID tokens through issuer discovery or an explicitly configured JWKS endpoint.
 package auth
 
 import (
@@ -14,15 +15,20 @@ type OIDCValidator struct {
 	verifier *oidc.IDTokenVerifier
 }
 
-// NewOIDCValidator executes this operation.
-func NewOIDCValidator(ctx context.Context, issuerURL string, audience string) (*OIDCValidator, error) {
+// NewOIDCValidator constructs an issuer- and audience-validating token verifier, optionally bypassing discovery with one explicit JWKS URL.
+func NewOIDCValidator(ctx context.Context, issuerURL string, audience string, jwksURLOverride ...string) (*OIDCValidator, error) {
+	config := &oidc.Config{ // Build the verifier policy once so discovery and explicit-JWKS paths enforce the same audience.
+		ClientID: strings.TrimSpace(audience), // Require every accepted token to target the configured gateway audience.
+	}
+	if len(jwksURLOverride) > 0 && strings.TrimSpace(jwksURLOverride[0]) != "" { // Select the explicit JWKS source only when the caller configured a non-empty override.
+		keySet := oidc.NewRemoteKeySet(ctx, strings.TrimSpace(jwksURLOverride[0])) // Build the caching remote key set against the operator-selected JWKS endpoint.
+		verifier := oidc.NewVerifier(strings.TrimSpace(issuerURL), keySet, config) // Continue enforcing the configured issuer even when discovery is bypassed.
+		return &OIDCValidator{verifier: verifier}, nil                             // Return the explicit-JWKS validator without contacting the issuer discovery endpoint during startup.
+	}
+
 	provider, err := oidc.NewProvider(ctx, issuerURL)
 	if err != nil {
 		return nil, err
-	}
-
-	config := &oidc.Config{
-		ClientID: audience,
 	}
 	verifier := provider.Verifier(config)
 
@@ -34,6 +40,9 @@ func NewOIDCValidator(ctx context.Context, issuerURL string, audience string) (*
 
 // Validate executes this operation.
 func (v *OIDCValidator) Validate(ctx context.Context, rawToken string) (*Subject, error) {
+	if v == nil || v.verifier == nil { // Reject validation through an uninitialized OIDC verifier instead of panicking.
+		return nil, errors.New(errors.CodeUnauthenticated, "oidc validator is not configured") // Surface the startup wiring defect through the stable auth contract.
+	}
 	// Remove Bearer prefix if present
 	if strings.HasPrefix(rawToken, "Bearer ") {
 		rawToken = strings.TrimPrefix(rawToken, "Bearer ")
@@ -53,11 +62,15 @@ func (v *OIDCValidator) Validate(ctx context.Context, rawToken string) (*Subject
 	if err := idToken.Claims(&claims); err != nil {
 		return nil, errors.Wrap(errors.CodeUnauthenticated, "failed to parse claims", err)
 	}
+	if strings.TrimSpace(claims.Sub) == "" { // Require the standard subject claim because downstream ownership cannot authorize an anonymous token.
+		return nil, errors.New(errors.CodeUnauthenticated, "oidc token subject is missing") // Reject otherwise valid tokens that cannot identify one principal.
+	}
 
 	return &Subject{
-		ID:       claims.Sub,
-		Type:     "oidc",
-		TenantID: claims.Tenant,
-		Scopes:   claims.Scopes,
+		ID:           strings.TrimSpace(claims.Sub),    // Preserve the validated OIDC subject as the application principal.
+		Type:         "oidc",                           // Identify the authentication scheme for authorization and audit consumers.
+		CredentialID: strings.TrimSpace(claims.Sub),    // Use the subject as the safe credential identifier because no token secret or raw JWT is persisted.
+		TenantID:     strings.TrimSpace(claims.Tenant), // Preserve the optional tenant claim for ownership checks.
+		Scopes:       claims.Scopes,                    // Preserve validated token scopes for downstream authorization.
 	}, nil
 }

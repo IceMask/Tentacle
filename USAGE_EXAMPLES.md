@@ -258,12 +258,12 @@ curl -X POST http://localhost:8080/jsonrpc \
 ./gateway --stdio --config config.yaml
 ```
 
-### 发送 JSON-RPC 请求
+### 发送 MCP 2026-07-28 JSON-RPC 请求
 
 在 stdin 中输入（一行）：
 
 ```json
-{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0.0"}},"id":1}
+{"jsonrpc":"2.0","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"test-client","version":"1.0.0"}}},"id":1}
 ```
 
 按回车发送。
@@ -273,8 +273,10 @@ curl -X POST http://localhost:8080/jsonrpc \
 从 stdout 读取响应：
 
 ```json
-{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{"listChanged":false},"resources":{"subscribe":true,"listChanged":false}},"serverInfo":{"name":"MCP Mobile Worker","version":"1.0.0"}},"id":1}
+{"jsonrpc":"2.0","result":{"resultType":"complete","supportedVersions":["2026-07-28","2025-11-25","2025-06-18"],"capabilities":{"tools":{"listChanged":false},"resources":{"subscribe":false,"listChanged":false}},"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"MCP Mobile Worker","version":"1.0.0"}},"instructions":"Use tools/list to discover Appium operations and resources/templates/list to discover trace URI patterns.","ttlMs":3600000,"cacheScope":"public"},"id":1}
 ```
+
+Legacy 客户端仍可发送 `initialize`，并协商 `2025-11-25` 或 `2025-06-18`。
 
 ### 完整测试脚本
 
@@ -290,8 +292,8 @@ GATEWAY_PID=$!
 # 等待启动
 sleep 2
 
-# 发送 initialize 请求
-echo '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}},"id":1}' | \
+# 发送现代 server/discover 请求
+echo '{"jsonrpc":"2.0","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"test","version":"1.0"}}},"id":1}' | \
   ./gateway --stdio --config config.yaml
 
 # 清理

@@ -35,7 +35,11 @@ func buildGatewayAuthMiddleware(ctx context.Context, cfg *config.Config, pgDAO *
 		return nil, err // Preserve the PAT construction failure so startup can stop with the precise root cause.
 	}
 
-	return gatewaymiddleware.NewAuthMiddleware(hmacValidator, oidcValidator, patValidator), nil // Build the combined gateway auth middleware, or nil when no validator is active.
+	authMiddleware := gatewaymiddleware.NewAuthMiddleware(hmacValidator, oidcValidator, patValidator) // Build the combined gateway auth middleware, or nil when no validator is active.
+	if authMiddleware != nil {                                                                        // Attach audit persistence only when protected-route authentication is active.
+		authMiddleware.SetAuditRecorder(postgres.NewAuditRecorder(pgDAO)) // Record every authentication success and failure through the shared append-only PostgreSQL sink.
+	}
+	return authMiddleware, nil // Return the fully wired middleware after validator and optional audit construction succeeds.
 }
 
 // buildGatewayHMACValidator constructs the optional HMAC validator from the configured static or PostgreSQL-backed key source.
@@ -107,7 +111,7 @@ func buildGatewayOIDCValidator(ctx context.Context, cfg *config.Config) (*auth.O
 		return nil, nil // Return nil so the caller knows OIDC auth is inactive rather than partially initialized.
 	}
 
-	return auth.NewOIDCValidator(ctx, issuerURL, audience) // Build the OIDC validator with the canonical v4.4 issuer and audience fields.
+	return auth.NewOIDCValidator(ctx, issuerURL, audience, strings.TrimSpace(cfg.Auth.OIDC.JWKSURLOverride)) // Build the OIDC validator with discovery or the configured explicit JWKS endpoint.
 }
 
 // buildGatewayPATValidator constructs the optional PAT validator from the configured static or PostgreSQL-backed token source.
@@ -152,8 +156,16 @@ func buildGatewayPATValidator(cfg *config.Config, pgDAO *postgres.DAO) (*auth.PA
 
 // newGatewayHTTPServer constructs the runtime HTTP server with TLS defaults aligned to the gateway config.
 func newGatewayHTTPServer(cfg *config.Config, handler http.Handler) *http.Server {
-	server := &http.Server{Addr: ":" + strconv.Itoa(cfg.Gateway.Port), Handler: handler} // Construct the server once so the caller can decide whether to run it in TLS or plaintext mode.
-	if cfg.Gateway.EnableTLS {                                                           // Apply an explicit TLS floor only when HTTPS is enabled for the gateway listener.
+	server := &http.Server{ // Construct the bounded server once so the caller can decide whether to run it in TLS or plaintext mode.
+		Addr:              ":" + strconv.Itoa(cfg.Gateway.Port), // Bind the configured gateway port on every available interface as before.
+		Handler:           handler,                              // Route accepted requests through tracing and the gateway mux supplied by the caller.
+		ReadHeaderTimeout: 5 * time.Second,                      // Bound slow or incomplete request headers before any application handler runs.
+		ReadTimeout:       30 * time.Second,                     // Bound request-body reads so slow clients cannot retain connections indefinitely.
+		WriteTimeout:      10 * time.Minute,                     // Bound complete response handling while leaving room for the documented synchronous plan wait.
+		IdleTimeout:       2 * time.Minute,                      // Reclaim inactive keep-alive connections after a predictable idle window.
+		MaxHeaderBytes:    1 << 20,                              // Cap aggregate request headers at one mebibyte to constrain parsing memory.
+	}
+	if cfg.Gateway.EnableTLS { // Apply an explicit TLS floor only when HTTPS is enabled for the gateway listener.
 		server.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12} // Enforce TLS 1.2+ so the gateway does not negotiate deprecated protocol versions.
 	}
 

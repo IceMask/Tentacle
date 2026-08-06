@@ -4,16 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"mcp_for_appium/internal/config"
 	"mcp_for_appium/internal/gateway/capabilities"
+	"mcp_for_appium/internal/gateway/httpinput"
 	"mcp_for_appium/internal/gateway/jsonrpc"
+	"mcp_for_appium/internal/gateway/mcphttp"
 	"mcp_for_appium/internal/gateway/rest"
 	"mcp_for_appium/internal/gateway/stdio"
 	"mcp_for_appium/internal/gateway/websocket"
@@ -31,7 +35,11 @@ import (
 func main() {
 	// Parse command line flags
 	stdioMode := flag.Bool("stdio", false, "Run in stdio mode for MCP protocol")
-	configPath := flag.String("config", "config.yaml", "Path to config file")
+	defaultConfigPath := strings.TrimSpace(os.Getenv("CONFIG_PATH")) // Honor the documented environment variable while still allowing the command-line flag to override it.
+	if defaultConfigPath == "" {                                     // Fall back to the repository-default path only when the environment does not select one.
+		defaultConfigPath = "config.yaml" // Preserve existing local startup behavior for deployments that do not set CONFIG_PATH.
+	}
+	configPath := flag.String("config", defaultConfigPath, "Path to config file") // Use the environment-derived default while retaining explicit --config precedence.
 	flag.Parse()
 
 	// 加载配置文件
@@ -44,8 +52,12 @@ func main() {
 	}
 
 	// 初始化日志与遥测
-	telemetry.InitLogger(cfg.Telemetry.LogLevel, cfg.Telemetry.LogFile) // Initialize structured logging with optional file sink.
-	log.SetOutput(telemetry.StdLogWriter())                             // Mirror standard-library logs into the configured log destinations.
+	consoleWriter := io.Writer(os.Stdout) // Keep HTTP-mode structured logs on the ordinary process console by default.
+	if *stdioMode {                       // Reserve stdout exclusively for JSON-RPC frames whenever the stdio transport is selected.
+		consoleWriter = os.Stderr // Route every structured startup and service log to stderr before dependencies initialize.
+	}
+	telemetry.InitLoggerWithConsole(cfg.Telemetry.LogLevel, cfg.Telemetry.LogFile, consoleWriter) // Initialize structured logging on a transport-safe console with the optional file sink.
+	log.SetOutput(telemetry.StdLogWriter())                                                       // Mirror standard-library logs into the configured log destinations.
 	shutdownTracer := telemetry.InitTracer("gateway", cfg.Telemetry.OTLPEndpoint)
 	defer func() {
 		_ = shutdownTracer(context.Background())
@@ -163,6 +175,7 @@ func runHTTPMode(cfg *config.Config) {
 	jsonrpcHandler := jsonrpc.NewHandler(orchSvc, capSvc)
 	restRouter := rest.NewRouter(orchSvc)
 	subscriptionTokenStore := websocket.NewSubscriptionTokenStore(redisCache, cfg.WebSocket.SubscriptionTokenTTL) // Construct the shared Redis-backed subscription-token store so the browser helper endpoint and WebSocket handshake validation use the same authority.
+	subscriptionTokenStore.SetAuditRecorder(postgres.NewAuditRecorder(pgDAO))                                     // Record token creation and WebSocket authorization through the append-only PostgreSQL audit sink.
 	restRouter.SetSubscriptionTokenStore(subscriptionTokenStore)                                                  // Inject the shared token store into the trimmed HTTP helper router so browser clients can mint short-lived subscription tokens.
 	authMiddleware, err := buildGatewayAuthMiddleware(ctx, cfg, pgDAO, redisCache)                                // Construct the optional gateway auth middleware once so JSON-RPC and REST can share the same auth pipeline.
 	if err != nil {                                                                                               // Stop startup when a configured auth source cannot be initialized safely.
@@ -171,13 +184,15 @@ func runHTTPMode(cfg *config.Config) {
 	wsHub := websocket.NewHub(redisCache)
 	go wsHub.Run(ctx)
 
-	protectedMux := http.NewServeMux()              // Isolate auth-protected routes so health, metrics, and WebSocket can keep their dedicated exposure rules.
-	protectedMux.Handle("/jsonrpc", jsonrpcHandler) // Register the JSON-RPC endpoint inside the protected route subtree.
-	restRouter.RegisterRoutes(protectedMux)         // Register the remaining browser helper endpoint that issues short-lived WebSocket subscription tokens.
-	protectedHandler := http.Handler(protectedMux)  // Seed the protected subtree handler with the raw mux before optional auth wrapping.
-	if authMiddleware != nil {                      // Wrap the protected subtree only when at least one auth validator is active.
+	protectedMux := http.NewServeMux()                                                          // Isolate auth-protected routes so health, metrics, and WebSocket can keep their dedicated exposure rules.
+	protectedMux.Handle("/jsonrpc", jsonrpcHandler)                                             // Register the JSON-RPC compatibility endpoint inside the protected route subtree.
+	protectedMux.Handle("/mcp", mcphttp.NewHandler(jsonrpcHandler, cfg.Gateway.AllowedOrigins)) // Register the standard MCP Streamable HTTP endpoint beside the compatibility endpoint.
+	restRouter.RegisterRoutes(protectedMux)                                                     // Register the remaining browser helper endpoint that issues short-lived WebSocket subscription tokens.
+	protectedHandler := http.Handler(protectedMux)                                              // Seed the protected subtree handler with the raw mux before optional auth wrapping.
+	if authMiddleware != nil {                                                                  // Wrap the protected subtree only when at least one auth validator is active.
 		protectedHandler = authMiddleware.Handle(protectedHandler) // Enforce HMAC/OIDC/PAT auth for JSON-RPC and REST requests.
 	}
+	protectedHandler = httpinput.LimitBody(protectedHandler, httpinput.MaxRequestBodyBytes) // Enforce the request-size ceiling before authentication reads or hashes any protected body.
 
 	mux := http.NewServeMux()                                                                                                                     // Build the public root mux that combines protected APIs with public operational endpoints.
 	mux.Handle("/", protectedHandler)                                                                                                             // Mount the protected subtree under "/" so JSON-RPC and REST remain reachable through their existing paths.
