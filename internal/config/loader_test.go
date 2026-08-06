@@ -61,3 +61,22 @@ func TestLoadAppliesDefaultsAndEnvOverrides(t *testing.T) {
 		t.Fatal("expected gateway disable_adb_shell_tool override to be true") // Surface the unexpected flag value so operator feature-gate regressions are obvious.
 	}
 }
+
+// TestLoadPreservesExplicitFalse verifies that YAML false overrides a tagged true default instead of being replaced after decoding.
+func TestLoadPreservesExplicitFalse(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")                                                                                                                                                                                            // Allocate one isolated file path for the explicit-false configuration fixture.
+	configYAML := "gateway:\n  port: 18080\nstorage:\n  postgres:\n    dsn: postgres://postgres:postgres@127.0.0.1:5432/mcp_mobile_worker?sslmode=disable\nauth:\n  enable_pat: false\n  pat_static_tokens:\n    legacy-token: hash|tenant-1|active\n" // Supply a legacy static source while explicitly disabling its legacy activation flag.
+	if err := os.WriteFile(configPath, []byte(configYAML), 0o644); err != nil {                                                                                                                                                                        // Persist the fixture for the production YAML loader.
+		t.Fatalf("failed to write explicit-false config: %v", err) // Surface setup failure before configuration assertions run.
+	}
+	cfg, err := Load(configPath) // Load defaults, then the explicit YAML value, then compatibility normalization.
+	if err != nil {              // Fail when the otherwise valid configuration cannot be loaded.
+		t.Fatalf("expected explicit-false config to load, got %v", err) // Surface unexpected validation or precedence failures.
+	}
+	if cfg.Auth.EnablePAT { // Require the explicit YAML false to remain authoritative over the default true tag.
+		t.Fatal("expected auth.enable_pat to remain false") // Surface the security-sensitive defaulting regression directly.
+	}
+	if cfg.Auth.PAT.Mode != "disabled" { // Require compatibility normalization to respect the preserved false flag.
+		t.Fatalf("expected legacy PAT mode disabled, got %q", cfg.Auth.PAT.Mode) // Surface accidental authentication activation.
+	}
+}

@@ -7,7 +7,8 @@ This document describes the supported public integration paths for Tentacle.
 | Interface | Typical Use Case | Transport |
 | --- | --- | --- |
 | MCP `stdio` | AI tools, desktop clients, local automation shells | stdio |
-| HTTP JSON-RPC | backend services, API clients, CI systems | HTTP |
+| MCP Streamable HTTP | standards-based remote MCP clients and gateways | HTTP `POST /mcp` |
+| HTTP JSON-RPC compatibility | existing backend services, API clients, CI systems | HTTP `POST /jsonrpc` |
 | WebSocket events | browser dashboards and live trace viewers | HTTP + WebSocket |
 
 The repository also contains internal gRPC services for orchestrator-to-worker communication. Those services are runtime internals and are not part of the public third-party contract.
@@ -55,17 +56,53 @@ class MCPClient:
 client = MCPClient("/absolute/path/to/gateway", "/absolute/path/to/config.yaml")
 
 try:
-    print(client.call("initialize", {
-        "protocolVersion": "2024-11-05",
-        "capabilities": {},
-        "clientInfo": {"name": "example-client", "version": "1.0.0"},
+    metadata = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "example-client",
+            "version": "1.0.0",
+        },
+    }
+    print(client.call("server/discover", {
+        "_meta": metadata,
     }))
-    print(client.call("tools/list", {}))
+    print(client.call("tools/list", {
+        "_meta": metadata,
+    }))
 finally:
     client.close()
 ```
 
-## 2. HTTP JSON-RPC
+Legacy clients can still initialize with protocol version `2025-11-25` or `2025-06-18`.
+
+## 2. MCP Streamable HTTP
+
+Modern MCP `2026-07-28` requests are stateless and self-describing. Each request carries namespaced `_meta`, and the transport mirrors routing information through HTTP headers.
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Content-Type: application/json" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: tools/list" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "tools/list",
+    "params": {
+      "_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "remote-client", "version": "1.0.0"}
+      }
+    },
+    "id": 1
+  }'
+```
+
+`tools/call` and `resources/read` requests additionally send a matching `Mcp-Name` header. See [MCP 2026-07-28 Alignment](./MCP_2026_07_28_ALIGNMENT.md) for the complete compatibility and error matrix.
+
+## 3. HTTP JSON-RPC Compatibility
 
 Start the gateway:
 
@@ -134,7 +171,7 @@ curl -X POST http://localhost:8080/jsonrpc \
   }'
 ```
 
-## 3. Browser Event Streaming
+## 4. Browser Event Streaming
 
 Browser clients should mint a short-lived WebSocket token first:
 
@@ -158,7 +195,7 @@ ws.onmessage = (event) => {
 };
 ```
 
-## 4. AWS Device Farm
+## 5. AWS Device Farm
 
 ### Scheduled Runs
 

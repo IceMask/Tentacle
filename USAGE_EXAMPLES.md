@@ -1,6 +1,6 @@
 # Tentacle Usage Examples
 
-This document shows common ways to use Tentacle through MCP `stdio` and HTTP JSON-RPC.
+This document shows common ways to use Tentacle through MCP `stdio`, MCP Streamable HTTP, and the HTTP JSON-RPC compatibility endpoint.
 
 ## Claude Desktop Configuration
 
@@ -29,7 +29,31 @@ This document shows common ways to use Tentacle through MCP `stdio` and HTTP JSO
 ./gateway --config config.yaml
 ```
 
-## List Tools
+## Discover MCP 2026-07-28 Over HTTP
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Accept: application/json, text/event-stream" \
+  -H "Content-Type: application/json" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: server/discover" \
+  -d '{
+    "jsonrpc": "2.0",
+    "method": "server/discover",
+    "params": {
+      "_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "example-client", "version": "1.0.0"}
+      }
+    },
+    "id": 1
+  }'
+```
+
+Modern requests repeat `_meta` and mirror the JSON-RPC method in `Mcp-Method`. Calls to `tools/call` and `resources/read` also include the selected tool name or URI in `Mcp-Name`.
+
+## List Tools Through JSON-RPC Compatibility
 
 ```bash
 curl -X POST http://localhost:8080/jsonrpc \

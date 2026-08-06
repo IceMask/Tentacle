@@ -101,16 +101,24 @@ func (e *Executor) Execute(ctx context.Context, plan []PlanStep) error {
 					return err
 				}
 			case "wait":
-				waitMs := 1000
+				waitMs := int64(1000) // Use a signed 64-bit millisecond value so JSON decoding and duration validation remain explicit.
 				if len(step.Params) > 0 {
 					var params struct {
-						Ms int `json:"ms"`
+						Ms int64 `json:"ms"`
 					}
 					if err := json.Unmarshal(step.Params, &params); err == nil && params.Ms > 0 {
 						waitMs = params.Ms
 					}
 				}
-				time.Sleep(time.Duration(waitMs) * time.Millisecond)
+				if waitMs > int64(time.Duration(1<<63-1)/time.Millisecond) { // Reject millisecond values that would overflow time.Duration during conversion.
+					err := errors.New(errors.CodePlanInvalid, "wait params.ms is too large") // Return a stable validation error instead of wrapping into a negative duration.
+					e.emitFailure(stepCtx, i, err, start)                                    // Emit the same terminal step event produced by other invalid step payloads.
+					return err                                                               // Stop this step before creating an invalid timer.
+				}
+				if err := waitForContext(stepCtx, time.Duration(waitMs)*time.Millisecond); err != nil { // Wait only until the duration, step timeout, or caller cancellation wins.
+					e.emitFailure(stepCtx, i, err, start) // Emit a failed step event so trace replay records the interrupted wait.
+					return err                            // Propagate cancellation or deadline expiration to stop the remaining plan.
+				}
 				e.emitSuccess(i, "wait completed", start, StepMetrics{Attempt: 1})
 			case "sendKeys":
 				if err := e.executeSendKeys(stepCtx, i, step, start); err != nil {
@@ -175,7 +183,9 @@ func (e *Executor) executeClick(ctx context.Context, stepIndex int, step PlanSte
 			if !e.isTransient(err) {
 				return err
 			}
-			e.backoff(attempt)
+			if err := e.backoff(ctx, attempt); err != nil { // Abort retry delay immediately when the step context is cancelled or expires.
+				return err // Preserve the context cancellation so the plan stops instead of starting another Appium attempt.
+			}
 			continue
 		}
 
@@ -184,7 +194,9 @@ func (e *Executor) executeClick(ctx context.Context, stepIndex int, step PlanSte
 			if !e.isTransient(err) {
 				return err
 			}
-			e.backoff(attempt)
+			if err := e.backoff(ctx, attempt); err != nil { // Abort retry delay immediately when the step context is cancelled or expires.
+				return err // Preserve the context cancellation so the plan stops instead of starting another Appium attempt.
+			}
 			continue
 		}
 
@@ -207,7 +219,9 @@ func (e *Executor) executeClear(ctx context.Context, stepIndex int, step PlanSte
 			if !e.isTransient(err) {
 				return err
 			}
-			e.backoff(attempt)
+			if err := e.backoff(ctx, attempt); err != nil { // Abort retry delay immediately when the step context is cancelled or expires.
+				return err // Preserve the context cancellation so the plan stops instead of starting another Appium attempt.
+			}
 			continue
 		}
 
@@ -216,7 +230,9 @@ func (e *Executor) executeClear(ctx context.Context, stepIndex int, step PlanSte
 			if !e.isTransient(err) {
 				return err
 			}
-			e.backoff(attempt)
+			if err := e.backoff(ctx, attempt); err != nil { // Abort retry delay immediately when the step context is cancelled or expires.
+				return err // Preserve the context cancellation so the plan stops instead of starting another Appium attempt.
+			}
 			continue
 		}
 
@@ -246,7 +262,9 @@ func (e *Executor) executeSendKeys(ctx context.Context, stepIndex int, step Plan
 			if !e.isTransient(err) {
 				return err
 			}
-			e.backoff(attempt)
+			if err := e.backoff(ctx, attempt); err != nil { // Abort retry delay immediately when the step context is cancelled or expires.
+				return err // Preserve the context cancellation so the plan stops instead of starting another Appium attempt.
+			}
 			continue
 		}
 
@@ -255,7 +273,9 @@ func (e *Executor) executeSendKeys(ctx context.Context, stepIndex int, step Plan
 			if !e.isTransient(err) {
 				return err
 			}
-			e.backoff(attempt)
+			if err := e.backoff(ctx, attempt); err != nil { // Abort retry delay immediately when the step context is cancelled or expires.
+				return err // Preserve the context cancellation so the plan stops instead of starting another Appium attempt.
+			}
 			continue
 		}
 
@@ -328,7 +348,9 @@ func (e *Executor) executeLongPress(ctx context.Context, stepIndex int, step Pla
 			if !e.isTransient(err) {
 				return err
 			}
-			e.backoff(attempt)
+			if err := e.backoff(ctx, attempt); err != nil { // Abort retry delay immediately when the step context is cancelled or expires.
+				return err // Preserve the context cancellation so the plan stops instead of starting another Appium attempt.
+			}
 			continue
 		}
 
@@ -337,7 +359,9 @@ func (e *Executor) executeLongPress(ctx context.Context, stepIndex int, step Pla
 			if !e.isTransient(err) {
 				return err
 			}
-			e.backoff(attempt)
+			if err := e.backoff(ctx, attempt); err != nil { // Abort retry delay immediately when the step context is cancelled or expires.
+				return err // Preserve the context cancellation so the plan stops instead of starting another Appium attempt.
+			}
 			continue
 		}
 
@@ -462,16 +486,33 @@ func (e *Executor) isTransient(err error) bool {
 	return errors.IsCode(err, errors.CodeAppTimeout) || errors.IsCode(err, errors.CodeStoreConn) || errors.IsCode(err, errors.CodeAppElemNotFound)
 }
 
-// backoff executes this operation.
-func (e *Executor) backoff(attempt int) {
+// backoff waits for one randomized retry delay and returns immediately when the supplied step context is cancelled.
+func (e *Executor) backoff(ctx context.Context, attempt int) error {
 	if attempt <= 0 {
-		return
+		return nil // Skip invalid or pre-attempt retry delays without creating a timer.
 	}
 	jitterRange := int64(e.retryMaxJitter - e.retryMinJitter)
 	if jitterRange <= 0 {
-		time.Sleep(e.retryMinJitter)
-		return
+		return waitForContext(ctx, e.retryMinJitter) // Apply the fixed minimum delay while remaining responsive to cancellation.
 	}
 	jitter := e.retryMinJitter + time.Duration(rand.Int63n(jitterRange))
-	time.Sleep(jitter)
+	return waitForContext(ctx, jitter) // Apply the selected jitter duration while remaining responsive to cancellation.
+}
+
+// waitForContext waits for one duration and returns the context error when cancellation or a deadline wins first.
+func waitForContext(ctx context.Context, duration time.Duration) error {
+	if err := ctx.Err(); err != nil { // Check already-cancelled contexts before allocating a timer.
+		return err // Preserve the caller's exact cancellation or deadline error.
+	}
+	if duration <= 0 { // Treat zero or negative delays as an immediate successful wait.
+		return nil // Avoid allocating a timer when no positive delay is required.
+	}
+	timer := time.NewTimer(duration) // Allocate a stoppable timer rather than leaking time.After resources on cancellation.
+	defer timer.Stop()               // Release the timer promptly when either select branch returns.
+	select {                         // Race the requested delay against caller cancellation and step deadlines.
+	case <-ctx.Done():
+		return ctx.Err() // Return the exact context error so callers can classify cancellation versus deadline expiration.
+	case <-timer.C:
+		return nil // Report successful completion once the requested delay elapses.
+	}
 }

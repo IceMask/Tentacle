@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	"mcp_for_appium/internal/telemetry"
 	"mcp_for_appium/internal/worker/appium"
 )
+
+const completedPlanHistoryTTL = 2 * time.Hour
 
 // GRPCServer implements rpc.WorkerServiceServer.
 // Each incoming ExecutePlan call spawns a goroutine that creates its own
@@ -25,11 +28,26 @@ type GRPCServer struct {
 	renewEvery  time.Duration
 	newClient   func(string) sessionAwareAppiumClient
 	ensureReady func(context.Context) error
+	capacity    int
+	slots       chan struct{}
 
-	planMu     sync.Mutex
-	planCancel map[string]context.CancelFunc
+	planMu      sync.Mutex
+	activePlans map[string]activePlan
+	planHistory map[string]completedPlan
 
 	logger *slog.Logger
+}
+
+// activePlan stores the attempt and cancel function for one worker-admitted execution.
+type activePlan struct {
+	attempt int64
+	cancel  context.CancelFunc
+}
+
+// completedPlan stores a bounded deduplication tombstone for one finished trace attempt.
+type completedPlan struct {
+	attempt     int64
+	completedAt time.Time
 }
 
 // distributedPlanReporter exposes the worker-to-orchestrator callback RPCs needed by distributed execution.
@@ -45,10 +63,14 @@ type sessionAwareAppiumClient interface {
 	AttachSession(sessionID string)
 }
 
-// NewGRPCServer creates a new worker gRPC service handler.
-func NewGRPCServer(appiumURL string, stepTimeout, autoWaitMax time.Duration, workerID string, reporter distributedPlanReporter, renewEvery time.Duration) *GRPCServer {
+// NewGRPCServer creates a worker gRPC service handler with optional authoritative execution capacity.
+func NewGRPCServer(appiumURL string, stepTimeout, autoWaitMax time.Duration, workerID string, reporter distributedPlanReporter, renewEvery time.Duration, configuredCapacity ...int) *GRPCServer {
 	if renewEvery <= 0 { // Fall back to one conservative default renewal cadence when the caller omits an explicit interval.
 		renewEvery = 5 * time.Second // Keep lease renewals frequent enough that the orchestrator can detect lost ownership promptly.
+	}
+	capacity := 4                                                 // Preserve the historical worker default when callers do not supply explicit admission capacity.
+	if len(configuredCapacity) > 0 && configuredCapacity[0] > 0 { // Honor the first positive capacity supplied by process wiring or a test.
+		capacity = configuredCapacity[0] // Use the same capacity advertised to the orchestrator for worker-side admission.
 	}
 	return &GRPCServer{
 		appiumURL:   appiumURL,
@@ -57,11 +79,14 @@ func NewGRPCServer(appiumURL string, stepTimeout, autoWaitMax time.Duration, wor
 		workerID:    workerID,
 		reporter:    reporter,
 		renewEvery:  renewEvery,
+		capacity:    capacity,                      // Retain the authoritative admission limit so status and diagnostics use the configured worker capacity.
+		slots:       make(chan struct{}, capacity), // Allocate one bounded semaphore slot per concurrently admitted distributed plan.
 		newClient: func(url string) sessionAwareAppiumClient { // Build the default Appium client factory once so tests can swap it with a stub easily.
 			return appium.NewClient(url) // Return the production Appium HTTP client used by distributed worker execution.
 		},
-		ensureReady: nil, // Leave Appium readiness unmanaged by default so callers can opt into local auto-start explicitly from process wiring.
-		planCancel:  make(map[string]context.CancelFunc),
+		ensureReady: nil,                            // Leave Appium readiness unmanaged by default so callers can opt into local auto-start explicitly from process wiring.
+		activePlans: make(map[string]activePlan),    // Initialize the trace-indexed cancellation registry before the worker accepts any plan.
+		planHistory: make(map[string]completedPlan), // Initialize bounded completion tombstones so duplicate attempts are rejected deterministically.
 		logger:      telemetry.Logger(),
 	}
 }
@@ -73,48 +98,85 @@ func (s *GRPCServer) SetAppiumReadyFunc(ensure func(context.Context) error) {
 
 // ActiveLoad returns the number of plans currently executing on this worker.
 func (s *GRPCServer) ActiveLoad() int {
-	s.planMu.Lock()
-	defer s.planMu.Unlock()
-	return len(s.planCancel)
+	s.planMu.Lock()           // Serialize the active-plan map read with admission and completion updates.
+	defer s.planMu.Unlock()   // Release the worker admission lock after calculating the heartbeat snapshot.
+	return len(s.activePlans) // Report exactly the runs that hold authoritative worker capacity slots.
 }
 
 // ExecutePlan implements rpc.WorkerServiceServer.
-// The plan is executed asynchronously; this method returns "accepted" immediately.
+// The plan is executed asynchronously only after synchronous validation, deduplication, capacity admission, and cancellation registration succeed.
 func (s *GRPCServer) ExecutePlan(_ context.Context, req *rpc.ExecutePlanRequest) (*rpc.ExecutePlanResponse, error) {
-	s.logger.Info("received ExecutePlan", "trace_id", req.TraceID, "session_id", req.SessionID, "attempt", req.Attempt) // Log the distributed execute request together with the reserved attempt now owning the trace.
-	go s.runPlan(req.TraceID, req.SessionID, req.Attempt, req.Plan)                                                     // Execute the plan asynchronously so the RPC can acknowledge acceptance immediately.
-	return &rpc.ExecutePlanResponse{Status: "accepted"}, nil
+	if req == nil { // Reject absent gRPC payloads before reading trace ownership metadata.
+		return &rpc.ExecutePlanResponse{Status: "rejected", Message: "request is required"}, nil // Return a stable validation result without starting execution.
+	}
+	traceID := strings.TrimSpace(req.TraceID) // Normalize the trace identifier used for admission, cancellation, and deduplication.
+	if traceID == "" {                        // Reject requests that cannot be tracked or cancelled safely.
+		return &rpc.ExecutePlanResponse{Status: "rejected", Message: "trace_id is required"}, nil // Keep malformed input outside worker execution.
+	}
+	if req.Attempt <= 0 { // Require the orchestrator's positive monotonic ownership token.
+		return &rpc.ExecutePlanResponse{Status: "rejected", Message: "attempt must be greater than zero"}, nil // Prevent unguarded callbacks and duplicate execution.
+	}
+	planRaw := append(json.RawMessage(nil), req.Plan...) // Copy plan bytes before the RPC returns so caller buffer reuse cannot race with asynchronous parsing.
+	now := time.Now().UTC()                              // Capture one admission timestamp for bounded completed-attempt deduplication.
+	s.planMu.Lock()                                      // Serialize duplicate detection, capacity acquisition, and active-plan publication.
+	s.prunePlanHistoryLocked(now)                        // Remove expired tombstones before checking this trace's latest completed attempt.
+	if active, ok := s.activePlans[traceID]; ok {        // Detect duplicate or conflicting delivery while this trace is still executing.
+		s.planMu.Unlock()                  // Release admission serialization before returning the existing ownership result.
+		if active.attempt == req.Attempt { // Treat an exact in-flight replay as an idempotent acknowledgement.
+			return &rpc.ExecutePlanResponse{Status: "accepted", Message: "attempt already active"}, nil // Prevent a second goroutine while allowing the orchestrator to recover a lost response.
+		}
+		return &rpc.ExecutePlanResponse{Status: "busy", Message: "trace already active"}, nil // Reject concurrent attempts for one trace until the current owner exits.
+	}
+	if completed, ok := s.planHistory[traceID]; ok { // Detect a response-loss replay after this worker already completed the attempt.
+		if completed.attempt == req.Attempt { // Acknowledge the exact completed attempt without running its Appium actions again.
+			s.planMu.Unlock()                                                                              // Release admission serialization before returning the deduplicated result.
+			return &rpc.ExecutePlanResponse{Status: "accepted", Message: "attempt already completed"}, nil // Preserve at-most-once worker execution for the retained history window.
+		}
+		if completed.attempt > req.Attempt { // Reject any attempt older than the latest completion retained on this worker.
+			s.planMu.Unlock()                                                                  // Release admission serialization before returning the stale-attempt result.
+			return &rpc.ExecutePlanResponse{Status: "rejected", Message: "stale attempt"}, nil // Prevent an old queue delivery from replaying Appium mutations.
+		}
+		delete(s.planHistory, traceID) // Allow a strictly newer orchestrator-owned attempt to replace the completed tombstone.
+	}
+	select {
+	case s.slots <- struct{}{}:
+		// The non-blocking send reserves one authoritative worker execution slot before acceptance is visible remotely.
+	default:
+		s.planMu.Unlock()                                                                      // Release admission serialization when all configured slots are occupied.
+		return &rpc.ExecutePlanResponse{Status: "busy", Message: "worker is at capacity"}, nil // Let the dispatcher retry this leased attempt without oversubscribing the worker.
+	}
+	runCtx, cancel := context.WithCancel(context.Background())                // Create the worker-owned execution context before publishing acceptance.
+	s.activePlans[traceID] = activePlan{attempt: req.Attempt, cancel: cancel} // Register cancellation and load state synchronously before the RPC can return.
+	s.planMu.Unlock()                                                         // Make the admitted run visible to cancellation and heartbeat calls before starting its goroutine.
+
+	s.logger.Info("accepted ExecutePlan", "trace_id", traceID, "session_id", req.SessionID, "attempt", req.Attempt, "active_load", s.ActiveLoad(), "capacity", s.capacity) // Log safe admission metadata for fleet diagnostics.
+	go s.runPlan(runCtx, traceID, req.SessionID, req.Attempt, planRaw)                                                                                                     // Begin asynchronous execution only after every admission invariant is committed locally.
+	return &rpc.ExecutePlanResponse{Status: "accepted"}, nil                                                                                                               // Acknowledge only a run that now owns a slot and cancellation entry.
 }
 
 // CancelPlan implements rpc.WorkerServiceServer.
 func (s *GRPCServer) CancelPlan(_ context.Context, req *rpc.CancelPlanRequest) (*rpc.CancelPlanResponse, error) {
-	s.planMu.Lock()
-	cancel, ok := s.planCancel[req.TraceID]
-	s.planMu.Unlock()
-
-	if !ok {
-		return &rpc.CancelPlanResponse{Status: "not_found"}, nil
+	if req == nil { // Reject absent cancellation payloads without dereferencing them.
+		return &rpc.CancelPlanResponse{Status: "not_found"}, nil // Preserve an idempotent result for malformed cleanup calls.
 	}
-	cancel()
-	s.logger.Info("plan cancelled", "trace_id", req.TraceID)
-	return &rpc.CancelPlanResponse{Status: "cancelled"}, nil
+	traceID := strings.TrimSpace(req.TraceID) // Normalize the lookup key used by worker admission.
+	s.planMu.Lock()                           // Serialize active-plan lookup with completion cleanup.
+	active, ok := s.activePlans[traceID]      // Resolve the worker-owned cancellation function for this trace.
+	s.planMu.Unlock()                         // Release admission state before invoking cancellation callbacks.
+	if !ok {                                  // Report cleanly when this worker no longer owns an active run for the trace.
+		return &rpc.CancelPlanResponse{Status: "not_found"}, nil // Let the orchestrator clean stale lease metadata idempotently.
+	}
+	active.cancel()                                                                              // Signal executor and lease-renewal contexts to stop as soon as their current operation observes cancellation.
+	s.logger.Info("plan cancellation requested", "trace_id", traceID, "attempt", active.attempt) // Record the safe cancellation request metadata.
+	return &rpc.CancelPlanResponse{Status: "cancelled"}, nil                                     // Confirm that a live worker run received the cancellation signal.
 }
 
-// runPlan executes this operation.
-func (s *GRPCServer) runPlan(traceID string, sessionID string, attempt int64, planRaw json.RawMessage) {
-	ctx, cancel := context.WithCancel(context.Background()) // Create the per-plan root context so worker-side cancel RPCs and lost-lease cancellation can stop execution cleanly.
-	s.planMu.Lock()
-	s.planCancel[traceID] = cancel // Register the per-trace cancel function so later worker cancel RPCs can stop the active run cleanly.
-	s.planMu.Unlock()
-	defer func() {
-		cancel() // Release the execution context so any renewal loop or nested timeouts stop promptly on every exit path.
-		s.planMu.Lock()
-		delete(s.planCancel, traceID) // Remove the trace from the in-flight plan map so ActiveLoad drops immediately after execution stops.
-		s.planMu.Unlock()
-	}()
+// runPlan executes one plan that already owns an authoritative worker capacity slot and active-plan entry.
+func (s *GRPCServer) runPlan(ctx context.Context, traceID string, sessionID string, attempt int64, planRaw json.RawMessage) {
+	defer s.finishPlan(traceID, attempt) // Release cancellation state, capacity, and deduplication bookkeeping on every terminal path.
 
 	if s.reporter != nil { // Start the lease-renewal loop only when the worker has a wired orchestrator callback client.
-		go s.renewLeaseLoop(ctx, cancel, traceID, attempt) // Refresh the distributed ownership lease in the background until this run exits or loses ownership.
+		go s.renewLeaseLoop(ctx, func() { s.cancelPlanAttempt(traceID, attempt) }, traceID, attempt) // Refresh ownership and cancel only this active attempt when the orchestrator reports it stale.
 	}
 	if s.ensureReady != nil { // Run the optional Appium readiness hook before parsing or executing the plan so local Appium auto-start can happen on demand per plan.
 		if err := s.ensureReady(ctx); err != nil { // Stop immediately when the configured Appium dependency is still unavailable after the readiness hook runs.
@@ -156,6 +218,47 @@ func (s *GRPCServer) runPlan(traceID string, sessionID string, attempt int64, pl
 	}
 	s.logger.Info("plan execution completed", "trace_id", traceID, "attempt", attempt)     // Log worker-side completion together with the distributed attempt for operator visibility.
 	s.reportCompletion(traceID, attempt, "completed", "completed", "trace completed", nil) // Report the completed terminal outcome so the orchestrator can close the distributed trace cleanly.
+}
+
+// finishPlan atomically removes one matching active attempt, records its bounded deduplication tombstone, and returns its capacity slot.
+func (s *GRPCServer) finishPlan(traceID string, attempt int64) {
+	now := time.Now().UTC()               // Capture one completion timestamp for deduplication retention and pruning.
+	s.planMu.Lock()                       // Serialize terminal cleanup with cancellation, heartbeat load reads, and new admissions.
+	active, ok := s.activePlans[traceID]  // Resolve the active entry that should own this goroutine's capacity slot.
+	if !ok || active.attempt != attempt { // Avoid deleting or releasing capacity for a newer attempt if invariants are ever violated.
+		s.planMu.Unlock()                                                                                    // Release the admission lock without changing unrelated active state.
+		s.logger.Error("worker plan cleanup lost active ownership", "trace_id", traceID, "attempt", attempt) // Surface the invariant violation for operator diagnosis.
+		return                                                                                               // Preserve the newer or unknown run rather than corrupting worker load accounting.
+	}
+	active.cancel()                                                            // Stop the worker-owned context so lease renewal and nested execution timers exit promptly.
+	delete(s.activePlans, traceID)                                             // Remove the completed run from cancellation and heartbeat load state.
+	s.planHistory[traceID] = completedPlan{attempt: attempt, completedAt: now} // Retain an exact-attempt tombstone so lost acceptance responses cannot replay Appium actions.
+	select {
+	case <-s.slots:
+		// The matching admission token is returned without blocking while the active-plan invariant holds.
+	default:
+		s.logger.Error("worker capacity slot missing during plan cleanup", "trace_id", traceID, "attempt", attempt) // Surface channel/map accounting drift without blocking cleanup forever.
+	}
+	s.planMu.Unlock() // Publish the freed slot and completed tombstone atomically to later admissions.
+}
+
+// cancelPlanAttempt cancels one trace only when the supplied attempt still owns its active worker entry.
+func (s *GRPCServer) cancelPlanAttempt(traceID string, attempt int64) {
+	s.planMu.Lock()                      // Serialize attempt ownership lookup with completion and newer admissions.
+	active, ok := s.activePlans[traceID] // Resolve the current worker-owned run for this trace.
+	s.planMu.Unlock()                    // Release admission state before invoking the cancellation function.
+	if ok && active.attempt == attempt { // Prevent a stale lease-renewal goroutine from cancelling a newer attempt.
+		active.cancel() // Signal only the matching execution context to stop.
+	}
+}
+
+// prunePlanHistoryLocked removes expired completion tombstones while the caller holds the worker admission mutex.
+func (s *GRPCServer) prunePlanHistoryLocked(now time.Time) {
+	for traceID, completed := range s.planHistory { // Inspect every bounded deduplication record under the admission lock.
+		if now.Sub(completed.completedAt) >= completedPlanHistoryTTL { // Expire tombstones after the distributed in-flight retention window.
+			delete(s.planHistory, traceID) // Bound worker memory while retaining enough history for response-loss retries.
+		}
+	}
 }
 
 // renewLeaseLoop keeps the distributed execution lease alive while the current worker attempt still owns the trace.

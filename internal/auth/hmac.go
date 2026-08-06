@@ -70,22 +70,17 @@ func (v *HMACValidator) Verify(ctx context.Context, sig string, method string, p
 		return nil, errors.New(errors.CodeUnauthenticated, "timestamp out of window") // Surface stale or far-future requests as standard authentication failures.
 	}
 
-	if v.nonceStore != nil { // Enforce nonce uniqueness only when the caller supplied a store because replay protection requires shared state.
-		nonceKey := "nonce:" + strings.TrimSpace(keyID) + ":" + strings.TrimSpace(nonce) // Scope the replay marker by key ID so distinct credentials can reuse the same nonce safely.
-		acquired, _, err := v.nonceStore.CheckAndSet(ctx, nonceKey, "1", v.nonceTTL)     // Store the replay marker with the configured nonce TTL so duplicates inside the validity window are rejected.
-		if err != nil {                                                                  // Stop immediately when replay protection storage fails because the signature cannot be trusted safely without it.
-			return nil, errors.Wrap(errors.CodeInternal, "failed to check nonce", err) // Surface nonce-store failures as internal errors because the caller cannot fix server-side replay storage issues.
-		}
-		if !acquired { // Reject duplicate nonce usage because replay protection has already observed this signed request fingerprint recently.
-			return nil, errors.New(errors.CodeNonceDuplicate, "nonce reused") // Surface replayed requests through the dedicated nonce-duplicate error code.
-		}
-	}
-
 	keyMaterial, err := v.keyLookup(ctx, strings.TrimSpace(keyID)) // Resolve the authoritative HMAC key material so runtime validation can enforce status and validity windows.
 	if err != nil {                                                // Stop immediately when the HMAC key ID is unknown or the lookup source fails.
+		if errors.IsCode(err, errors.CodeStoreRead) || errors.IsCode(err, errors.CodeStoreConn) { // Preserve source availability failures instead of misclassifying them as bad credentials.
+			return nil, err // Let the HTTP layer fail closed with a server error while keeping backend details private.
+		}
 		return nil, errors.Wrap(errors.CodeUnauthenticated, "key not found", err) // Preserve the source failure while returning the stable unauthenticated code.
 	}
-	if strings.EqualFold(strings.TrimSpace(keyMaterial.Status), "revoked") || strings.EqualFold(strings.TrimSpace(keyMaterial.Status), "retired") { // Reject revoked or retired keys before signature comparison because those keys must no longer authenticate traffic.
+	if keyMaterial == nil { // Reject a lookup that succeeds without authoritative key material because signature verification cannot proceed safely.
+		return nil, errors.New(errors.CodeUnauthenticated, "key not found") // Fail closed without dereferencing a nil lookup result.
+	}
+	if !strings.EqualFold(strings.TrimSpace(keyMaterial.Status), "active") { // Accept only the explicit active lifecycle state so unknown or future states fail closed.
 		return nil, errors.New(errors.CodeUnauthenticated, "hmac key is not active") // Surface inactive keys as standard authentication failures.
 	}
 	if keyMaterial.NotBefore != nil && requestTime.Before(keyMaterial.NotBefore.UTC()) { // Reject requests signed before the key validity window begins.
@@ -109,12 +104,23 @@ func (v *HMACValidator) Verify(ctx context.Context, sig string, method string, p
 		return nil, errors.New(errors.CodeUnauthenticated, "invalid signature") // Surface mismatched HMAC digests as standard authentication failures.
 	}
 
+	if v.nonceStore != nil { // Consume replay state only after the key and signature prove that the caller holds the shared secret.
+		nonceKey := "nonce:" + strings.TrimSpace(keyID) + ":" + strings.TrimSpace(nonce) // Scope the replay marker by key ID so distinct credentials can reuse the same nonce safely.
+		acquired, _, err := v.nonceStore.CheckAndSet(ctx, nonceKey, "1", v.nonceTTL)     // Store the authenticated replay marker with the configured expiry.
+		if err != nil {                                                                  // Stop when replay storage cannot enforce uniqueness for the otherwise valid request.
+			return nil, errors.Wrap(errors.CodeInternal, "failed to check nonce", err) // Fail closed because accepting without shared replay state would weaken the signature contract.
+		}
+		if !acquired { // Reject duplicate nonce usage because a prior authenticated request already consumed this marker.
+			return nil, errors.New(errors.CodeNonceDuplicate, "nonce reused") // Surface replayed requests through the dedicated nonce-duplicate error code.
+		}
+	}
+
 	subjectID := strings.TrimSpace(keyMaterial.SubjectID) // Normalize the authoritative subject ID so downstream handlers receive a stable principal identifier.
 	if subjectID == "" {                                  // Fall back to the key ID only when the source does not supply a distinct subject identifier.
 		subjectID = strings.TrimSpace(keyMaterial.KeyID) // Preserve a stable authenticated subject identifier even for legacy static HMAC setups without explicit subject data.
 	}
 
-	return &Subject{ID: subjectID, Type: "hmac", TenantID: strings.TrimSpace(keyMaterial.TenantID)}, nil // Return the authenticated HMAC subject for downstream tenant-aware request handling.
+	return &Subject{ID: subjectID, Type: "hmac", CredentialID: strings.TrimSpace(keyMaterial.KeyID), TenantID: strings.TrimSpace(keyMaterial.TenantID)}, nil // Return the authenticated HMAC subject with its safe key identifier for downstream authorization and audit.
 }
 
 // canonicalizeQuery normalizes one raw HTTP query string into the deterministic encoding used by the canonical HMAC request format.

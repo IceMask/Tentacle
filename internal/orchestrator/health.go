@@ -47,10 +47,11 @@ func (s *Service) HealthCheck(ctx context.Context) map[string]interface{} {
 		err := s.dao.Ping(probeCtx)                     // Probe PostgreSQL connectivity using the live DAO pool so the result matches runtime behavior.
 		cancel()                                        // Release the probe timeout resources immediately after the database check finishes.
 		if err != nil {                                 // Treat a failed PostgreSQL ping as a hard-down condition for the orchestrator.
-			checks["database"] = "error"                                       // Report the database probe failure directly in the compact check map.
-			issues = appendIssueOnce(issues, "postgres")                       // Add the stable database issue key once for alerting and dashboards.
-			details["database"] = map[string]interface{}{"error": err.Error()} // Preserve the exact database failure string for operator diagnosis.
-			criticalFailure = true                                             // Mark the health snapshot down because core persistence is unavailable.
+			checks["database"] = "error"                                            // Report the database probe failure directly in the compact check map.
+			issues = appendIssueOnce(issues, "postgres")                            // Add the stable database issue key once for alerting and dashboards.
+			details["database"] = map[string]interface{}{"status": "unavailable"}   // Return only a stable public classification instead of PostgreSQL connection details.
+			s.logger.WarnContext(ctx, "database health probe failed", "error", err) // Retain the exact probe diagnostic in protected server logs for operators.
+			criticalFailure = true                                                  // Mark the health snapshot down because core persistence is unavailable.
 		} else {
 			checks["database"] = "ok" // Report a healthy database probe in the compact check map.
 		}
@@ -65,10 +66,11 @@ func (s *Service) HealthCheck(ctx context.Context) map[string]interface{} {
 		err := s.cache.Ping(probeCtx)                   // Probe Redis using the live cache wrapper so the result matches runtime queue behavior.
 		cancel()                                        // Release the probe timeout resources immediately after the Redis check finishes.
 		if err != nil {                                 // Treat a failed Redis ping as a hard-down condition for the orchestrator.
-			checks["redis"] = "error"                                       // Report the Redis probe failure directly in the compact check map.
-			issues = appendIssueOnce(issues, "redis")                       // Add the stable Redis issue key once for alerting and dashboards.
-			details["redis"] = map[string]interface{}{"error": err.Error()} // Preserve the exact Redis failure string for operator diagnosis.
-			criticalFailure = true                                          // Mark the health snapshot down because core queue and coordination state are unavailable.
+			checks["redis"] = "error"                                            // Report the Redis probe failure directly in the compact check map.
+			issues = appendIssueOnce(issues, "redis")                            // Add the stable Redis issue key once for alerting and dashboards.
+			details["redis"] = map[string]interface{}{"status": "unavailable"}   // Return only a stable public classification instead of Redis endpoint details.
+			s.logger.WarnContext(ctx, "redis health probe failed", "error", err) // Retain the exact probe diagnostic in protected server logs for operators.
+			criticalFailure = true                                               // Mark the health snapshot down because core queue and coordination state are unavailable.
 		} else {
 			checks["redis"] = "ok" // Report a healthy Redis probe in the compact check map.
 		}
@@ -82,10 +84,11 @@ func (s *Service) HealthCheck(ctx context.Context) map[string]interface{} {
 		err := s.s3.ValidateBucket(probeCtx)            // Probe the configured artifact bucket using the live S3 client so the result matches runtime uploads.
 		cancel()                                        // Release the probe timeout resources immediately after the S3 check finishes.
 		if err != nil {                                 // Treat artifact-store failure as degraded because trace execution can still proceed while uploads fail.
-			checks["s3"] = "error"                                                           // Report the artifact-store probe failure directly in the compact check map.
-			issues = appendIssueOnce(issues, "s3")                                           // Add the stable artifact-store issue key once for alerting and dashboards.
-			details["s3"] = map[string]interface{}{"configured": true, "error": err.Error()} // Preserve the exact S3 failure string for operator diagnosis.
-			degradedFailure = true                                                           // Mark the health snapshot degraded because artifact persistence is impaired but not fully fatal.
+			checks["s3"] = "error"                                                              // Report the artifact-store probe failure directly in the compact check map.
+			issues = appendIssueOnce(issues, "s3")                                              // Add the stable artifact-store issue key once for alerting and dashboards.
+			details["s3"] = map[string]interface{}{"configured": true, "status": "unavailable"} // Return safe object-store state without provider response or bucket details.
+			s.logger.WarnContext(ctx, "s3 health probe failed", "error", err)                   // Retain the exact provider diagnostic in protected server logs for operators.
+			degradedFailure = true                                                              // Mark the health snapshot degraded because artifact persistence is impaired but not fully fatal.
 		} else {
 			checks["s3"] = "ok"                                        // Report a healthy artifact-store probe in the compact check map.
 			details["s3"] = map[string]interface{}{"configured": true} // Return explicit metadata so operators can see that object storage is wired and healthy.
@@ -102,13 +105,14 @@ func (s *Service) HealthCheck(ctx context.Context) map[string]interface{} {
 			err := startup.CheckAppiumReachability(probeCtx, s.appiumURL) // Probe the configured Appium status endpoint using the same startup-time reachability check.
 			cancel()                                                      // Release the probe timeout resources immediately after the Appium check finishes.
 			if err != nil {                                               // Treat an unreachable Appium dependency as a hard-down condition in monolith mode.
-				checks["appium"] = "error"                                                           // Report the Appium probe failure directly in the compact check map.
-				issues = appendIssueOnce(issues, "appium")                                           // Add the stable Appium issue key once for alerting and dashboards.
-				details["appium"] = map[string]interface{}{"url": s.appiumURL, "error": err.Error()} // Preserve the failing Appium URL and error string for operator diagnosis.
-				criticalFailure = true                                                               // Mark the health snapshot down because direct execution is unavailable.
+				checks["appium"] = "error"                                                              // Report the Appium probe failure directly in the compact check map.
+				issues = appendIssueOnce(issues, "appium")                                              // Add the stable Appium issue key once for alerting and dashboards.
+				details["appium"] = map[string]interface{}{"configured": true, "status": "unavailable"} // Return safe dependency state without exposing URL credentials or backend diagnostics.
+				s.logger.WarnContext(ctx, "appium health probe failed", "error", err)                   // Retain the exact reachability diagnostic in protected server logs for operators.
+				criticalFailure = true                                                                  // Mark the health snapshot down because direct execution is unavailable.
 			} else {
-				checks["appium"] = "ok"                                        // Report a healthy Appium probe in the compact check map.
-				details["appium"] = map[string]interface{}{"url": s.appiumURL} // Return the probed Appium URL for operator confirmation.
+				checks["appium"] = "ok"                                                               // Report a healthy Appium probe in the compact check map.
+				details["appium"] = map[string]interface{}{"configured": true, "status": "available"} // Confirm readiness without exposing the configured endpoint.
 			}
 		}
 		checks["workers"] = "skipped"                                   // Skip worker-fleet checks in monolith mode because this service does not depend on remote workers for execution.
@@ -146,10 +150,11 @@ func (s *Service) HealthCheck(ctx context.Context) map[string]interface{} {
 		summary, err := s.dispatcher.HealthSummary(probeCtx) // Inspect retained queue depth, pending claims, and in-flight distributed traces through the live dispatcher.
 		cancel()                                             // Release the probe timeout resources immediately after queue inspection finishes.
 		if err != nil {                                      // Treat queue-inspection failure as degraded because Redis reachability is already reported separately above.
-			checks["queue"] = "error"                                       // Report the queue inspection failure directly in the compact check map.
-			issues = appendIssueOnce(issues, "queue")                       // Add the stable queue issue key once for alerting and dashboards.
-			details["queue"] = map[string]interface{}{"error": err.Error()} // Preserve the exact queue inspection error string for operator diagnosis.
-			degradedFailure = true                                          // Mark the health snapshot degraded because execution backlog visibility is impaired.
+			checks["queue"] = "error"                                                 // Report the queue inspection failure directly in the compact check map.
+			issues = appendIssueOnce(issues, "queue")                                 // Add the stable queue issue key once for alerting and dashboards.
+			details["queue"] = map[string]interface{}{"status": "unavailable"}        // Return only a stable public classification instead of Redis stream diagnostics.
+			s.logger.WarnContext(ctx, "queue health inspection failed", "error", err) // Retain the exact queue diagnostic in protected server logs for operators.
+			degradedFailure = true                                                    // Mark the health snapshot degraded because execution backlog visibility is impaired.
 		} else {
 			checks["queue"] = "ok"                     // Report successful queue inspection in the compact check map.
 			details["queue"] = map[string]interface{}{ // Return the raw queue counters so operators can inspect backlog and in-flight activity directly.

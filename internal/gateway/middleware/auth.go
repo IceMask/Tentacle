@@ -2,14 +2,18 @@
 package middleware
 
 import (
-	"bytes"
 	"context"
-	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
+	"mcp_for_appium/internal/audit"
 	"mcp_for_appium/internal/auth"
 	"mcp_for_appium/internal/errors"
+	"mcp_for_appium/internal/gateway/httpinput"
+	"mcp_for_appium/internal/telemetry"
+
+	"github.com/google/uuid"
 )
 
 // patValidator defines the PAT validation contract consumed by the HTTP auth middleware.
@@ -35,6 +39,8 @@ type AuthMiddleware struct {
 	patValidator  patValidator
 	oidcValidator oidcValidator
 	hmacValidator hmacValidator
+	auditRecorder audit.Recorder
+	logger        *slog.Logger
 }
 
 // NewAuthMiddleware constructs the gateway auth middleware when at least one validator has been configured.
@@ -43,7 +49,15 @@ func NewAuthMiddleware(hmac *auth.HMACValidator, oidc *auth.OIDCValidator, pat *
 		return nil // Signal to the caller that no auth wrapper is needed because there is no active credential source.
 	}
 
-	return &AuthMiddleware{hmacValidator: hmac, oidcValidator: oidc, patValidator: pat} // Store the configured validators once so every request can authenticate against the same startup-built set.
+	return &AuthMiddleware{hmacValidator: hmac, oidcValidator: oidc, patValidator: pat, logger: telemetry.Logger()} // Store the configured validators and logger once so every request shares the same authentication and audit diagnostics.
+}
+
+// SetAuditRecorder installs the append-only recorder used for authentication success and failure events.
+func (m *AuthMiddleware) SetAuditRecorder(recorder audit.Recorder) {
+	if m == nil { // Ignore optional wiring when authentication itself is disabled and no middleware was constructed.
+		return // Keep startup wiring concise without dereferencing a nil middleware.
+	}
+	m.auditRecorder = recorder // Store the shared recorder so every protected request emits one best-effort authentication audit event.
 }
 
 // Handle wraps an HTTP handler with gateway request authentication.
@@ -53,15 +67,115 @@ func (m *AuthMiddleware) Handle(next http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { // Build one auth-enforcing wrapper around the protected handler.
-		subject, err := m.authenticate(r) // Resolve the caller identity before the protected handler is allowed to run.
-		if err != nil {                   // Stop request processing when none of the configured auth schemes accept the request.
-			http.Error(w, err.Error(), errors.MapToHTTP(err)) // Return a transport-appropriate auth status so clients can distinguish missing credentials from permission failures.
-			return                                            // Stop before the protected handler runs because the request has not been authenticated successfully.
+		requestID := strings.TrimSpace(r.Header.Get("X-Request-ID")) // Reuse a caller or upstream request identifier when supplied for end-to-end correlation.
+		if requestID == "" {                                         // Generate a trustworthy local correlation identifier when the request omitted one.
+			requestID = uuid.NewString() // Assign one random request identifier without deriving it from credentials or body content.
 		}
+		w.Header().Set("X-Request-ID", requestID) // Return the effective request identifier so callers can correlate responses, logs, and audit records.
+		subject, err := m.authenticate(r)         // Resolve the caller identity before the protected handler is allowed to run.
+		if err != nil {                           // Stop request processing when none of the configured auth schemes accept the request.
+			m.recordAuthentication(r, requestID, nil, err) // Record the rejected attempt without storing bearer tokens, signatures, or raw backend errors.
+			status := errors.MapToHTTP(err)                // Map typed authentication failures without exposing their wrapped backend causes.
+			message := "authentication failed"             // Return one stable public diagnostic for ordinary credential failures.
+			if httpinput.IsBodyTooLarge(err) {             // Preserve the request-size contract when HMAC body hashing encounters the byte ceiling.
+				status = http.StatusRequestEntityTooLarge // Return HTTP 413 so clients can distinguish size rejection from invalid credentials.
+				message = "request body too large"        // Explain the actionable transport constraint without reflecting request content.
+			}
+			http.Error(w, message, status) // Write only the sanitized public diagnostic and mapped transport status.
+			return                         // Stop before the protected handler runs because the request has not been authenticated successfully.
+		}
+		m.recordAuthentication(r, requestID, subject, nil) // Record successful authentication before application dispatch under the resolved principal.
 
-		ctx := auth.WithSubject(r.Context(), subject) // Attach the authenticated subject to the request context so downstream handlers can read tenant and principal metadata.
-		next.ServeHTTP(w, r.WithContext(ctx))         // Forward the authenticated request to the protected handler with the injected subject context.
+		auditContext := audit.WithRequestContext(r.Context(), audit.RequestContext{RequestID: requestID, SourceIP: audit.RequestSourceIP(r)}) // Attach sanitized request correlation for downstream audit producers.
+		ctx := auth.WithSubject(auditContext, subject)                                                                                        // Attach the authenticated subject to the correlated request context so downstream handlers can read tenant and principal metadata.
+		next.ServeHTTP(w, r.WithContext(ctx))                                                                                                 // Forward the authenticated request to the protected handler with the injected subject context.
 	})
+}
+
+// recordAuthentication appends one sanitized authentication outcome without changing request success when the audit sink is unavailable.
+func (m *AuthMiddleware) recordAuthentication(r *http.Request, requestID string, subject *auth.Subject, authErr error) {
+	if m == nil || m.auditRecorder == nil { // Skip optional audit work when startup did not configure a recorder.
+		return // Preserve authentication behavior in protocol-only tests and deployments without PostgreSQL wiring.
+	}
+	event := audit.Event{ // Build the complete sanitized authentication audit record before determining the outcome.
+		ActorID:      "anonymous",                  // Attribute rejected pre-authentication attempts without inventing a principal.
+		ActorType:    "anonymous",                  // Classify the pre-authentication actor explicitly for security queries.
+		AuthScheme:   requestAuthScheme(r),         // Record only the classified credential scheme, never the credential value.
+		CredentialID: requestCredentialID(r),       // Record a safe key or PAT identifier when it can be extracted without a secret.
+		Action:       "auth.authenticate",          // Use one stable action for both successful and rejected protected requests.
+		ResourceType: "http_route",                 // Classify the protected route as the resource under authentication.
+		ResourceID:   r.URL.Path,                   // Record the requested path without query parameters that may carry subscription tokens.
+		Result:       "failure",                    // Default to failure until a validated subject proves success below.
+		Reason:       auditErrorReason(authErr),    // Record a stable internal code or generic marker without wrapped error text.
+		SourceIP:     audit.RequestSourceIP(r),     // Record the directly observed peer address for investigation.
+		RequestID:    strings.TrimSpace(requestID), // Correlate this audit row with response and telemetry identifiers.
+	}
+	if subject != nil && authErr == nil { // Populate authoritative principal fields only after one validator succeeds.
+		event.ActorID = strings.TrimSpace(subject.ID)                // Record the authenticated principal identifier.
+		event.ActorType = "subject"                                  // Classify authenticated callers uniformly while AuthScheme preserves credential type.
+		event.AuthScheme = strings.TrimSpace(subject.Type)           // Prefer the validator-produced scheme over request-shape inference.
+		event.CredentialID = strings.TrimSpace(subject.CredentialID) // Record the safe token or key identifier supplied by the validator.
+		event.TenantID = strings.TrimSpace(subject.TenantID)         // Preserve the authenticated tenant scope for audit filtering.
+		event.Result = "success"                                     // Mark the request as authenticated successfully.
+		event.Reason = ""                                            // Keep successful authentication records free of failure reason text.
+	}
+	if err := m.auditRecorder.Record(r.Context(), event); err != nil { // Append the audit event without allowing recorder availability to bypass or reject authentication.
+		logger := m.logger // Reuse the middleware logger when constructor wiring supplied one.
+		if logger == nil { // Fall back to the current global logger for zero-value middleware instances used in tests.
+			logger = telemetry.Logger() // Preserve observability for audit persistence failures without panicking.
+		}
+		logger.WarnContext(r.Context(), "failed to record authentication audit event", "request_id", requestID, "result", event.Result, "error", err) // Log the recorder failure without credential or raw request data.
+	}
+}
+
+// requestAuthScheme classifies one request credential shape without validating or persisting the credential value.
+func requestAuthScheme(r *http.Request) string {
+	if r == nil { // Return unknown when no request metadata exists.
+		return "unknown" // Avoid dereferencing nil in failure-path audit handling.
+	}
+	if hasAnyHMACHeaders(r) { // Classify every complete or partial HMAC attempt consistently with authentication routing.
+		return "hmac" // Record only the scheme name without any signature material.
+	}
+	authorization := strings.TrimSpace(r.Header.Get("Authorization")) // Read the bearer transport only for shape classification.
+	rawToken, err := parseBearerToken(authorization)                  // Reuse strict bearer parsing while keeping errors private.
+	if err != nil {                                                   // Classify missing or malformed Authorization headers generically.
+		return "unknown" // Avoid reflecting malformed header values into audit metadata.
+	}
+	if looksLikePAT(rawToken) { // Match the stable repository PAT prefix.
+		return "pat" // Record the PAT scheme without persisting its secret.
+	}
+	if looksLikeJWT(rawToken) { // Match the compact three-segment JWT shape.
+		return "oidc" // Record the OIDC scheme without parsing or persisting the raw JWT.
+	}
+	return "bearer" // Classify unsupported bearer formats without exposing their contents.
+}
+
+// requestCredentialID extracts only a safe HMAC key ID or PAT token ID for audit correlation.
+func requestCredentialID(r *http.Request) string {
+	if r == nil { // Return no credential identifier when request metadata is unavailable.
+		return "" // Avoid dereferencing nil in failure-path audit handling.
+	}
+	if hasAnyHMACHeaders(r) { // Use the dedicated non-secret key identifier from HMAC attempts.
+		return strings.TrimSpace(r.Header.Get("X-MCP-Key-Id")) // Never record the HMAC signature, nonce, or shared secret.
+	}
+	rawToken, err := parseBearerToken(strings.TrimSpace(r.Header.Get("Authorization"))) // Parse the bearer envelope without validating its secret.
+	if err != nil || !looksLikePAT(rawToken) {                                          // Return no identifier for malformed bearer values and opaque JWTs.
+		return "" // Avoid decoding or persisting any part of unsupported credentials.
+	}
+	tokenBody := strings.TrimPrefix(strings.TrimSpace(rawToken), "mcp_v1_") // Remove the fixed PAT prefix before locating the ID/secret separator.
+	separatorIndex := strings.Index(tokenBody, "_")                         // Locate the first separator after the safe token identifier.
+	if separatorIndex <= 0 {                                                // Reject malformed PAT bodies without a complete identifier.
+		return "" // Avoid persisting an ambiguous or secret-bearing fragment.
+	}
+	return strings.TrimSpace(tokenBody[:separatorIndex]) // Return only the token ID segment before the secret.
+}
+
+// auditErrorReason returns one stable repository error code or a generic failure marker without exposing wrapped backend details.
+func auditErrorReason(err error) string {
+	if code, ok := errors.CodeOf(err); ok { // Prefer the repository's machine-readable error classification when available.
+		return string(code) // Store only the stable code in the append-only audit record.
+	}
+	return "unclassified_failure" // Classify untyped failures without copying their error text.
 }
 
 // authenticate resolves one request by classifying the presented credentials and delegating to the single matching validator.
@@ -106,8 +220,8 @@ func (m *AuthMiddleware) authenticate(r *http.Request) (*auth.Subject, error) {
 
 // authenticateHMAC validates one HMAC-signed HTTP request while restoring the request body for downstream handlers.
 func (m *AuthMiddleware) authenticateHMAC(r *http.Request) (*auth.Subject, error) {
-	body, err := cloneRequestBody(r) // Read and restore the request body so HMAC validation can hash it without consuming it for downstream handlers.
-	if err != nil {                  // Stop immediately when the request body cannot be read because signature validation would become unreliable.
+	body, err := httpinput.ReadAndRestoreBody(r, httpinput.MaxRequestBodyBytes) // Read and restore a bounded request body so HMAC validation cannot consume unbounded memory.
+	if err != nil {                                                             // Stop immediately when the request body cannot be read because signature validation would become unreliable.
 		return nil, errors.Wrap(errors.CodeUnauthenticated, "failed to read request body for HMAC validation", err) // Surface the body-read failure as an authentication error because the request cannot be verified safely.
 	}
 
@@ -159,19 +273,4 @@ func looksLikeJWT(rawToken string) bool {
 	}
 
 	return true // Report the three-segment non-empty token as JWT-shaped so the request routes into OIDC validation only.
-}
-
-// cloneRequestBody reads the current request body and replaces it with a fresh reader over the same bytes.
-func cloneRequestBody(r *http.Request) ([]byte, error) {
-	if r.Body == nil { // Treat nil bodies as empty so GET and body-less requests can still participate in HMAC verification deterministically.
-		return nil, nil // Return an empty byte slice equivalent without mutating the request because there is no body reader to restore.
-	}
-
-	body, err := io.ReadAll(r.Body) // Read the original request body bytes so the HMAC validator can hash the exact payload sent by the client.
-	if err != nil {                 // Stop when the body cannot be read because the signed payload would be ambiguous and unsafe to verify.
-		return nil, err // Preserve the low-level body read failure for the caller so it can be wrapped appropriately.
-	}
-	r.Body = io.NopCloser(bytes.NewReader(body)) // Restore the request body so downstream handlers can parse the same bytes after HMAC verification succeeds.
-
-	return body, nil // Return the cloned request body bytes to the caller for signature validation.
 }

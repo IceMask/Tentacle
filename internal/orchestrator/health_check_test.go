@@ -36,6 +36,14 @@ func TestHealthCheckReportsMonolithAppiumFailure(t *testing.T) {
 	if checks["s3"] != "skipped" { // Fail the test when the harness without an S3 client does not report the artifact store probe as skipped.
 		t.Fatalf("expected s3 health skipped, got %#v", checks["s3"]) // Surface the unexpected S3 status because the harness intentionally omits object storage wiring.
 	}
+	details := payload["details"].(map[string]interface{})      // Read public dependency details so the test can enforce diagnostic sanitization.
+	appiumDetails := details["appium"].(map[string]interface{}) // Read the failed Appium probe's safe public metadata.
+	if _, exists := appiumDetails["error"]; exists {            // Reject raw reachability diagnostics in externally visible health responses.
+		t.Fatalf("expected appium health details to omit raw error text, got %#v", appiumDetails["error"]) // Surface sensitive diagnostic regression explicitly.
+	}
+	if _, exists := appiumDetails["url"]; exists { // Reject configured endpoint disclosure because URLs can contain internal hosts or credentials.
+		t.Fatalf("expected appium health details to omit configured URL, got %#v", appiumDetails["url"]) // Surface endpoint disclosure regression explicitly.
+	}
 }
 
 // TestHealthCheckReportsDistributedWorkerAndQueueSummary verifies that distributed health reports worker-capacity degradation and live queue counters.
@@ -50,8 +58,9 @@ func TestHealthCheckReportsDistributedWorkerAndQueueSummary(t *testing.T) {
 	if err := harness.service.registry.Register(context.Background(), &WorkerNode{ID: "degraded-worker", Address: "127.0.0.1:19091", Capacity: 1, Tags: map[string]string{}}); err != nil { // Register one second worker that the test will mark degraded to simulate partial fleet impairment.
 		t.Fatalf("failed to register degraded worker: %v", err) // Surface worker-registration failures because the degraded-fleet scenario depends on two workers being present.
 	}
-	degradedWorker := harness.service.registry.GetWorker("degraded-worker") // Load the second worker back out of the registry so the test can mutate its in-memory status directly.
-	degradedWorker.Status = "degraded"                                      // Mark the worker degraded so the distributed health snapshot should report partial capacity impairment.
+	updateWorkerForTest(t, harness.service.registry, "degraded-worker", func(worker *WorkerNode) { // Seed partial fleet impairment under the registry's production synchronization boundary.
+		worker.Status = "degraded" // Mark the selected worker degraded so distributed health reports reduced fleet quality.
+	})
 
 	if _, err := harness.cache.XAdd(context.Background(), harness.service.dispatcher.streamName(0), map[string]interface{}{"trace_id": "queued-trace"}, streamTrimMaxLen); err != nil { // Add one retained queue message so the health endpoint has non-zero stream depth to report.
 		t.Fatalf("failed to seed queue stream entry: %v", err) // Surface queue-seeding failures because the queue summary assertion depends on one retained message.
@@ -60,9 +69,11 @@ func TestHealthCheckReportsDistributedWorkerAndQueueSummary(t *testing.T) {
 	if err != nil {                                    // Skip the test only when even explicit loopback listeners are unavailable in the current environment.
 		t.Skipf("skipping distributed health queue summary test because loopback listen failed: %v", err) // Surface the environment limitation without misclassifying the production logic as passing.
 	}
-	listenerAddress := listener.Addr().String()                                                                                                                                                                                                                                    // Capture the kernel-assigned loopback address before the temporary listener is closed.
-	listener.Close()                                                                                                                                                                                                                                                               // Release the temporary loopback listener immediately so the address can be used only as inert metadata in the in-flight assignment record.
-	harness.service.dispatcher.persistInflightAssignment(context.Background(), "inflight-trace", inflightTraceAssignment{Address: listenerAddress, WorkerID: "healthy-worker", DispatchedAtUnix: time.Now().UnixMilli(), DeadlineAtUnix: time.Now().Add(time.Minute).UnixMilli()}) // Seed one active distributed assignment so the health endpoint can report current in-flight trace count.
+	listenerAddress := listener.Addr().String()                                                                                                                                                                                                                                                               // Capture the kernel-assigned loopback address before the temporary listener is closed.
+	listener.Close()                                                                                                                                                                                                                                                                                          // Release the temporary loopback listener immediately so the address can be used only as inert metadata in the in-flight assignment record.
+	if _, err := harness.service.dispatcher.persistInflightAssignment(context.Background(), "inflight-trace", inflightTraceAssignment{Address: listenerAddress, WorkerID: "healthy-worker", DispatchedAtUnix: time.Now().UnixMilli(), DeadlineAtUnix: time.Now().Add(time.Minute).UnixMilli()}); err != nil { // Seed one active distributed assignment so the health endpoint can report current in-flight trace count.
+		t.Fatalf("failed to persist inflight trace assignment: %v", err) // Surface Redis fixture failures because health cannot report an assignment that was never stored.
+	}
 
 	payload := harness.service.HealthCheck(context.Background()) // Evaluate the production health snapshot against the seeded distributed-capacity and queue state.
 	if payload["status"] != "degraded" {                         // Fail the test when partial worker degradation does not surface as an overall degraded health state.

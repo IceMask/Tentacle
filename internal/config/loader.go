@@ -15,9 +15,14 @@ import (
 
 // Load reads configuration from file and environment variables.
 func Load(path string) (*Config, error) {
-	cfg := &Config{}
+	cfg := &Config{} // Allocate one zero-value config before tagged defaults and external sources are layered in precedence order.
 
-	// 1. Load from file if exists
+	// 1. Apply tagged defaults before decoding so explicit false, zero, and empty values in YAML remain authoritative.
+	if err := applyDefaults(cfg); err != nil { // Seed omitted fields without overwriting values supplied by later sources.
+		return nil, err // Preserve the precise default parsing failure for startup diagnostics.
+	}
+
+	// 2. Load from file if exists
 	if path != "" {
 		f, err := os.Open(path)
 		if err == nil {
@@ -29,15 +34,6 @@ func Load(path string) (*Config, error) {
 		} else if !os.IsNotExist(err) {
 			return nil, errors.Wrap(errors.CodeConfigInvalid, "failed to open config file", err)
 		}
-	}
-
-	// 2. Apply defaults (if zero values need to be overwritten by non-zero defaults)
-	// Note: In this implementation, we rely on struct tags or explicit setting if needed.
-	// Since Go zero values are 0/false/"", we might want to set defaults before loading file?
-	// Actually, the struct tags `default:"..."` are not automatically handled by standard json/yaml.
-	// We will implement a simple default setter based on tags.
-	if err := applyDefaults(cfg); err != nil {
-		return nil, err
 	}
 
 	// 3. Apply Environment Overrides

@@ -247,6 +247,38 @@ func (c *Cache) SetNX(ctx context.Context, key string, value interface{}, ttl ti
 	return c.client.SetNX(ctx, key, value, ttl).Result()
 }
 
+// CompareAndSet replaces one key and refreshes its TTL only when the current string value exactly matches the expected ownership token.
+func (c *Cache) CompareAndSet(ctx context.Context, key string, expectedValue string, nextValue string, ttl time.Duration) (bool, error) {
+	script := `
+		if redis.call("GET", KEYS[1]) ~= ARGV[1] then
+			return 0
+		end
+		redis.call("SET", KEYS[1], ARGV[2], "PX", ARGV[3])
+		return 1
+	` // Compare and replace inside one Redis script so ownership cannot change between read and write.
+	result, err := c.client.Eval(ctx, script, []string{key}, expectedValue, nextValue, ttl.Milliseconds()).Int() // Execute the atomic ownership update with a refreshed millisecond TTL.
+	if err != nil {                                                                                              // Surface Redis script or connectivity failures to the lease owner.
+		return false, err // Preserve the raw cache error for repository-level wrapping by the caller.
+	}
+	return result == 1, nil // Report whether the expected value still owned the key and was replaced.
+}
+
+// CompareAndDelete deletes one key only when its current string value exactly matches the expected ownership token.
+func (c *Cache) CompareAndDelete(ctx context.Context, key string, expectedValue string) (bool, error) {
+	script := `
+		if redis.call("GET", KEYS[1]) ~= ARGV[1] then
+			return 0
+		end
+		redis.call("DEL", KEYS[1])
+		return 1
+	` // Compare and delete inside one Redis script so stale cleanup cannot remove a newer owner's value.
+	result, err := c.client.Eval(ctx, script, []string{key}, expectedValue).Int() // Execute the atomic ownership-guarded deletion.
+	if err != nil {                                                               // Surface Redis script or connectivity failures to the cleanup caller.
+		return false, err // Preserve the raw cache error for repository-level wrapping by the caller.
+	}
+	return result == 1, nil // Report whether this exact ownership value was removed.
+}
+
 // Del deletes one or more keys.
 func (c *Cache) Del(ctx context.Context, keys ...string) error {
 	return c.client.Del(ctx, keys...).Err()
