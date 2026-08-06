@@ -108,7 +108,7 @@ transport 层必须识别 notification，并在 handler 返回后禁止写 respo
 
 在 `ProcessRequest` 中新增：
 
-- `case "ping": result = map[string]interface{}{}` 
+- `case "ping": result = map[string]interface{}{}`
 
 保持最小响应语义，不引入业务逻辑。
 
